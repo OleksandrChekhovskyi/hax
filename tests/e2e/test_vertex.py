@@ -4,6 +4,7 @@ and a one-shot run drives the full path (auth bearer, project/location/model URL
 to completion."""
 
 import json
+import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -59,44 +60,58 @@ class VertexHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    server = ThreadingHTTPServer(("127.0.0.1", 0), VertexHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    base_url = f"http://127.0.0.1:{server.server_address[1]}"
     model = "claude-sonnet-4-5@20250929"
-
     home, workdir = harness.make_home()
-    xdg_config = home / ".config"
-    xdg_config.mkdir()
-    (xdg_config / "hax").mkdir()
-    (xdg_config / "hax" / "config.json").write_text(
-        json.dumps(
-            {
-                "model": model,
-                "providers": {
-                    "vertex": {"base_url": base_url, "project": "smoke-proj", "location": "us"}
-                },
-            }
-        )
+    cache = home / ".cache" / "hax"
+    cache.mkdir(parents=True)
+    (cache / "catalog.json").write_text(
+        json.dumps({"google-vertex-anthropic": {"models": {model: {"limit": {"output": 8192}}}}})
     )
+    xdg_config = home / ".config"
+    (xdg_config / "hax").mkdir(parents=True)
 
     env = harness.hermetic_env(home)
+    for key in (
+        "GOOGLE_CLOUD_PROJECT",
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+        "GOOGLE_CLOUD_LOCATION",
+        "CLOUD_ML_REGION",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "CLOUDSDK_CONFIG",
+    ):
+        env.pop(key, None)
     env["GOOGLE_OAUTH_ACCESS_TOKEN"] = "smoke-token"
     env["XDG_CONFIG_HOME"] = str(xdg_config)
+    env["NO_PROXY"] = env["no_proxy"] = "127.0.0.1,localhost"
 
-    import subprocess
-
-    proc = subprocess.run(
-        [str(harness.hax_binary()), "-p", "--provider=vertex", "hi"],
-        cwd=workdir,
-        env=env,
-        capture_output=True,
-        encoding="utf-8",
-        timeout=30,
-    )
+    with ThreadingHTTPServer(("127.0.0.1", 0), VertexHandler) as server:
+        base_url = f"http://127.0.0.1:{server.server_address[1]}"
+        (xdg_config / "hax" / "config.json").write_text(
+            json.dumps(
+                {
+                    "model": model,
+                    "catalog": {"refresh": 0},
+                    "providers": {
+                        "vertex": {"base_url": base_url, "project": "smoke-proj", "location": "us"}
+                    },
+                }
+            )
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            proc = subprocess.run(
+                [str(harness.hax_binary()), "-p", "--provider=vertex", "hi"],
+                cwd=workdir,
+                env=env,
+                capture_output=True,
+                encoding="utf-8",
+                timeout=30,
+            )
+        finally:
+            server.shutdown()
+            thread.join()
     result = harness.Result(proc, workdir)
-    server.shutdown()
-    server.server_close()
 
     harness.expect(result.returncode == 0, "vertex one-shot exits 0", result)
     harness.expect("Hello from vertex" in result.stdout, "streamed text reaches stdout", result)
@@ -124,7 +139,7 @@ def main() -> None:
         result,
     )
     harness.expect(
-        request_json.get("max_tokens", 0) > 0, "max_tokens is present", result
+        request_json.get("max_tokens") == 8192, "max_tokens comes from the catalog fixture", result
     )
 
 

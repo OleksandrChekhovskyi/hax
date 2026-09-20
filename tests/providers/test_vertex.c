@@ -1,20 +1,17 @@
 /* SPDX-License-Identifier: MIT */
-#include <errno.h>
 #include <jansson.h>
-#include <poll.h>
-#include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
+#include <curl/curl.h>
 
+#include "catalog.h"
 #include "config.h"
 #include "diag.h"
 #include "harness.h"
+#include "loopback.h"
 #include "provider.h"
 #include "xalloc.h"
 #include "providers/anthropic_body.h"
@@ -22,16 +19,12 @@
 #include "providers/registry.h"
 #include "providers/vertex.h"
 #include "providers/wire.h"
+#include "system/fs.h"
 
 /* Endpoint host follows the resolved location: `global`, a `us`/`eu` multi-region, or the
  * regional host. An explicit base_url would win verbatim instead. */
 static void test_resolve_base_url_host_rules(void)
 {
-    /* Host env leaking in would override the registry defaults the test leans on. */
-    unsetenv("GOOGLE_CLOUD_PROJECT");
-    unsetenv("ANTHROPIC_VERTEX_PROJECT_ID");
-    unsetenv("GOOGLE_CLOUD_LOCATION");
-    unsetenv("CLOUD_ML_REGION");
     EXPECT(config_load("{\"providers\": {\"vertex\": {\"project\": \"proj-1\","
                        " \"location\": \"global\"}}}") == 0);
     char *url = vertex_resolve_base_url(NULL);
@@ -127,82 +120,6 @@ static void test_messages_body_variant(void)
     json_decref(body);
 }
 
-/* One sequential-connection server echoing a canned reply; captures each request. */
-struct wire_server {
-    int listener_fd;
-    const char *response;
-    int n_requests;
-    char requests[8][8192];
-    _Atomic int served;
-};
-
-static void *serve_requests(void *user)
-{
-    struct wire_server *server = user;
-    for (int i = 0; i < server->n_requests; i++) {
-        struct pollfd poll_fd = {.fd = server->listener_fd, .events = POLLIN};
-        if (poll(&poll_fd, 1, 10000) <= 0)
-            return NULL;
-        int client_fd = accept(server->listener_fd, NULL, NULL);
-        if (client_fd < 0)
-            return NULL;
-        char *request = server->requests[i];
-        size_t request_len = 0;
-        size_t expected_len = 0;
-        while (request_len < sizeof(server->requests[i]) - 1) {
-            ssize_t bytes_read = read(client_fd, request + request_len,
-                                      sizeof(server->requests[i]) - request_len - 1);
-            if (bytes_read <= 0)
-                break;
-            request_len += (size_t)bytes_read;
-            request[request_len] = '\0';
-            char *header_end = strstr(request, "\r\n\r\n");
-            if (header_end && expected_len == 0) {
-                const char *length = strstr(request, "Content-Length: ");
-                expected_len = (size_t)(header_end + 4 - request) +
-                               (length ? strtoul(length + 16, NULL, 10) : 0);
-            }
-            if (expected_len > 0 && request_len >= expected_len)
-                break;
-        }
-        const char *response = server->response;
-        size_t response_len = strlen(response);
-        size_t written = 0;
-        while (written < response_len) {
-            ssize_t result = write(client_fd, response + written, response_len - written);
-            if (result <= 0)
-                break;
-            written += (size_t)result;
-        }
-        close(client_fd);
-        atomic_fetch_add(&server->served, 1);
-    }
-    return NULL;
-}
-
-static int start_server(struct wire_server *server, pthread_t *thread)
-{
-    server->listener_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server->listener_fd < 0)
-        return -1;
-    struct sockaddr_in address = {0};
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (bind(server->listener_fd, (struct sockaddr *)&address, sizeof(address)) != 0 ||
-        listen(server->listener_fd, 8) != 0)
-        goto error;
-    socklen_t address_len = sizeof(address);
-    if (getsockname(server->listener_fd, (struct sockaddr *)&address, &address_len) != 0)
-        goto error;
-    if (pthread_create(thread, NULL, serve_requests, server) != 0)
-        goto error;
-    return ntohs(address.sin_port);
-error:
-    close(server->listener_fd);
-    server->listener_fd = -1;
-    return -1;
-}
-
 struct error_log {
     int n_errors;
     char message[256];
@@ -223,12 +140,11 @@ static int log_error(const struct stream_event *event, void *user)
  * (no model member, anthropic_version in the body, no anthropic-version header). */
 static void test_stream_raw_predict(void)
 {
-    struct wire_server server = {
+    struct loopback server = {
         .response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
         .n_requests = 1,
     };
-    pthread_t thread;
-    int port = start_server(&server, &thread);
+    int port = loopback_listen(&server);
     EXPECT(port > 0);
     if (port <= 0)
         return;
@@ -245,15 +161,18 @@ static void test_stream_raw_predict(void)
     struct provider *provider = provider_construct(def);
     EXPECT(provider != NULL);
     if (!provider)
-        return;
+        goto out_server;
+    int rc = loopback_serve(&server);
+    EXPECT(rc == 0);
+    if (rc != 0)
+        goto out_provider;
 
     struct item items[] = {{.kind = ITEM_USER_MESSAGE, .text = "hello"}};
     struct context context = {.items = items, .n_items = 1, .image_input = 1};
     struct error_log log = {0};
     const char *model = "claude-sonnet@20250929";
     provider->stream(provider, &context, model, log_error, &log, NULL, NULL);
-    pthread_join(thread, NULL);
-    close(server.listener_fd);
+    loopback_stop(&server);
     EXPECT(atomic_load(&server.served) == 1);
     EXPECT(log.n_errors == 1);
     EXPECT(strstr(server.requests[0], "POST /v1/projects/proj-1/locations/us-east5/"
@@ -264,65 +183,13 @@ static void test_stream_raw_predict(void)
     EXPECT(strstr(server.requests[0], "anthropic-version:") == NULL);
     EXPECT(strstr(server.requests[0], "\"anthropic_version\":\"vertex-2023-10-16\"") != NULL);
     EXPECT(strstr(server.requests[0], "\"model\":") == NULL);
+    EXPECT(strstr(server.requests[0], "\"max_tokens\":8192") != NULL);
 
+out_provider:
     provider->destroy(provider);
+out_server:
+    loopback_stop(&server);
     EXPECT(config_load(NULL) == 0);
-}
-
-/* A minimal HTTP body that reads the request and returns a canned response; used to stand in for
- * the OAuth token endpoint. */
-struct oauth_server {
-    int listener_fd;
-    const char *response;
-    int n_requests;
-    char request[8192];
-    _Atomic int served;
-};
-
-static void *serve_oauth(void *user)
-{
-    struct oauth_server *server = user;
-    for (int i = 0; i < server->n_requests; i++) {
-        struct pollfd poll_fd = {.fd = server->listener_fd, .events = POLLIN};
-        if (poll(&poll_fd, 1, 10000) <= 0)
-            return NULL;
-        int client_fd = accept(server->listener_fd, NULL, NULL);
-        if (client_fd < 0)
-            return NULL;
-        ssize_t bytes = read(client_fd, server->request, sizeof(server->request) - 1);
-        if (bytes > 0)
-            server->request[bytes] = '\0';
-        const char *response = server->response;
-        dprintf(client_fd, "HTTP/1.1 200 OK\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",
-                strlen(response), response);
-        close(client_fd);
-        atomic_fetch_add(&server->served, 1);
-    }
-    return NULL;
-}
-
-static int start_oauth_server(struct oauth_server *server, pthread_t *thread, const char *response)
-{
-    server->response = response;
-    server->listener_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server->listener_fd < 0)
-        return -1;
-    struct sockaddr_in address = {0};
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (bind(server->listener_fd, (struct sockaddr *)&address, sizeof(address)) != 0 ||
-        listen(server->listener_fd, 2) != 0)
-        goto error;
-    socklen_t address_len = sizeof(address);
-    if (getsockname(server->listener_fd, (struct sockaddr *)&address, &address_len) != 0)
-        goto error;
-    if (pthread_create(thread, NULL, serve_oauth, server) != 0)
-        goto error;
-    return ntohs(address.sin_port);
-error:
-    close(server->listener_fd);
-    server->listener_fd = -1;
-    return -1;
 }
 
 /* Write a fresh authorized_user ADC file into a temp dir and hand the path out via
@@ -331,17 +198,11 @@ static void write_adc_user_file(const char *refresh_token)
 {
     char *dir = t_tempdir();
     char *path = xasprintf("%s/adc.json", dir);
-    FILE *f = fopen(path, "w");
-    if (!f)
-        FAIL("fopen %s: %s", path, strerror(errno));
-    fputs("{\"type\": \"authorized_user\","
-          "\"client_id\": \"cid\","
-          "\"client_secret\": \"csecret\","
-          "\"refresh_token\": \"",
-          f);
-    fputs(refresh_token, f);
-    fputs("\"}", f);
-    fclose(f);
+    char *contents = xasprintf("{\"type\":\"authorized_user\",\"client_id\":\"cid\","
+                               "\"client_secret\":\"csecret\",\"refresh_token\":\"%s\"}",
+                               refresh_token);
+    EXPECT(fs_write_atomic(path, contents, strlen(contents), 0) == 0);
+    free(contents);
     setenv("GOOGLE_APPLICATION_CREDENTIALS", path, 1);
     free(path);
 }
@@ -351,14 +212,16 @@ static void write_adc_user_file(const char *refresh_token)
  * request carries the new token. */
 static void test_auth_source_user_refresh(void)
 {
-    struct oauth_server oauth = {.n_requests = 2};
+    struct loopback oauth = {.n_requests = 2};
+    loopback_reply_ok(&oauth, 0, "{\"access_token\": \"fresh-2\", \"expires_in\": 3600}");
+    oauth.response = oauth.responses[0];
     char oauth_url[64];
-    pthread_t oauth_thread;
-    int oauth_port = start_oauth_server(&oauth, &oauth_thread,
-                                        "{\"access_token\": \"fresh-2\", \"expires_in\": 3600}");
+    int oauth_port = loopback_start(&oauth);
     EXPECT(oauth_port > 0);
-    if (oauth_port <= 0)
+    if (oauth_port <= 0) {
+        loopback_stop(&oauth);
         return;
+    }
     snprintf(oauth_url, sizeof(oauth_url), "http://127.0.0.1:%d", oauth_port);
     setenv("HAX_VERTEX_OAUTH_URL", oauth_url, 1);
 
@@ -380,12 +243,13 @@ static void test_auth_source_user_refresh(void)
     EXPECT(strstr(message, "gcloud auth application-default login") != NULL);
     free(message);
 
-    pthread_join(oauth_thread, NULL);
-    close(oauth.listener_fd);
+    loopback_stop(&oauth);
     EXPECT(atomic_load(&oauth.served) == 2);
     /* The refresh is a form POST carrying the ADC's own refresh token. */
-    EXPECT(strstr(oauth.request, "grant_type=refresh_token") != NULL);
-    EXPECT(strstr(oauth.request, "refresh_token=old-refresh") != NULL);
+    for (int i = 0; i < 2; i++) {
+        EXPECT(strstr(oauth.requests[i], "grant_type=refresh_token") != NULL);
+        EXPECT(strstr(oauth.requests[i], "refresh_token=old-refresh") != NULL);
+    }
 
     source.ops->destroy(source.state);
     unsetenv("HAX_VERTEX_OAUTH_URL");
@@ -414,14 +278,44 @@ static void test_auth_source_literal(void)
     EXPECT(config_load(NULL) == 0);
 }
 
+static void setup_fixtures(void)
+{
+    char *home = t_tempdir();
+    setenv("HOME", home, 1);
+    setenv("XDG_CONFIG_HOME", home, 1);
+    setenv("XDG_CACHE_HOME", home, 1);
+    setenv("CLOUDSDK_CONFIG", home, 1);
+    unsetenv("GOOGLE_CLOUD_PROJECT");
+    unsetenv("ANTHROPIC_VERTEX_PROJECT_ID");
+    unsetenv("GOOGLE_CLOUD_LOCATION");
+    unsetenv("CLOUD_ML_REGION");
+    unsetenv("GOOGLE_OAUTH_ACCESS_TOKEN");
+    unsetenv("GOOGLE_APPLICATION_CREDENTIALS");
+    unsetenv("HAX_VERTEX_OAUTH_URL");
+    setenv("NO_PROXY", "127.0.0.1,localhost", 1);
+    setenv("no_proxy", "127.0.0.1,localhost", 1);
+    config_set_override("catalog.refresh", "0");
+
+    char *path = xasprintf("%s/hax/catalog.json", home);
+    static const char catalog[] = "{\"google-vertex-anthropic\":{\"models\":{"
+                                  "\"claude-sonnet@20250929\":{\"limit\":{\"output\":8192}}}}}";
+    EXPECT(fs_write_atomic(path, catalog, sizeof(catalog) - 1, 0) == 0);
+    free(path);
+}
+
 int main(void)
 {
     signal(SIGPIPE, SIG_IGN);
+    EXPECT(curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK);
+    setup_fixtures();
     test_resolve_base_url_host_rules();
     test_def_registered();
     test_messages_body_variant();
     test_stream_raw_predict();
     test_auth_source_user_refresh();
     test_auth_source_literal();
+    catalog_shutdown();
+    config_free();
+    curl_global_cleanup();
     T_REPORT();
 }

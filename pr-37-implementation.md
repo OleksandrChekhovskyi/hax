@@ -1,7 +1,7 @@
 # PR 37 implementation notes
 
 Each numbered section describes one independently committed change from `pr-37-review-plan.md`.
-Only the first change is implemented here; the remaining review items are still pending.
+The first two changes are implemented here; the remaining review items are still pending.
 
 ## 1. Redact Vertex authentication secrets from HTTP traces
 
@@ -82,3 +82,74 @@ Repair the existing Vertex request test's catalog lifetime and isolation: preven
 fetches, join any catalog worker before teardown, and clean up the loopback server on construction
 failure. This change deliberately does not alter catalog lifecycle, configuration resolution,
 endpoint construction, metadata semantics, ADC support, cancellation, or retry policy.
+
+## 2. Isolate Vertex request tests and close their resource lifetimes
+
+### Problem
+
+Streaming through the Vertex provider consults model metadata, which can start the process-wide
+catalog refresh worker. The C request test neither isolated the catalog cache nor disabled that
+refresh, and it never called `catalog_shutdown()`. Joining the HTTP fixture thread did not join
+this separate worker, which is the thread leak reported by TSan in the review.
+
+A local sentinel reproduced the unwanted side effect before this change: the existing C test
+passed but made one catalog HTTP request. Its early return after failed provider construction also
+left its server thread and listener alive. The Python smoke test likewise allowed catalog fetching
+and only stopped its server after a successful subprocess launch and completion.
+
+### Changes
+
+- Give the C tests a private HOME, config directory, Cloud SDK directory, and catalog cache. Clear
+  inherited Google project, location, token, ADC-path, and OAuth-endpoint settings. Keep loopback
+  requests independent of the caller's proxy configuration.
+- Disable catalog refresh with a run-tier override in C, so `config_load()` and inherited
+  `HAX_CATALOG_REFRESH` values cannot re-enable it. The Python smoke test disables refresh in its
+  isolated configuration; its harness already removes inherited `HAX_*` settings.
+- Seed both request tests with a catalog snapshot whose model has an 8192-token output limit, and
+  assert that the outgoing request uses that value. This verifies that the tests actually use the
+  private catalog rather than a developer's cache or a live response.
+- Initialize curl explicitly in the C test process. After the tests, call `catalog_shutdown()`
+  before releasing configuration, cleaning up global curl state, or allowing temporary-directory
+  cleanup at process exit. Catalog shutdown stays at the process boundary, not provider destruction.
+- Replace both private C HTTP servers with `tests/loopback.h`. Bind the request listener first,
+  construct the provider, and only then start serving. Construction and server-start failures
+  reach cleanup. Successful requests join the server before inspecting its captured buffers.
+- Use the shared fixture's complete-request reader for OAuth, and assert both refresh requests.
+  Release its allocated reply even when server startup fails. Write the ADC fixture with the
+  existing filesystem helper so a file-creation failure does not dereference a null `FILE *`.
+- Clear inherited Google settings in the Python smoke test, retaining its explicit fake token.
+  Manage its listener with a context manager and shut down and join the server thread in `finally`,
+  including when launching hax fails or times out.
+
+No production behavior changes in this piece, so no user-facing changelog entry is added. The
+Python smoke test remains until its unique assertions are migrated during the planned test
+consolidation; this change does not remove coverage or redesign the provider.
+
+### Validation
+
+- `scripts/check.sh test providers/vertex providers/vertex_auth e2e/vertex catalog catalog_fetch
+  transport/oauth` passed all six targets.
+- A manual isolation regression supplied an inherited stale catalog with conflicting limits,
+  conflicting Google settings, an inherited token and ADC file, an aggressive catalog-refresh
+  interval, and sentinel HTTP/proxy endpoints. Both C and Python Vertex tests passed, the sentinel
+  observed **zero** requests, and the inherited catalog remained unchanged. Before the fix, the C
+  test made one request to the same kind of catalog sentinel.
+- Injected `FileNotFoundError` and `TimeoutExpired` into the Python test's subprocess launch. In
+  both cases the server thread was joined and the listener was closed.
+- `make lint` passed, including formatting and clang-tidy.
+- The final `make tests` run passed all 121 tests with the same external-network guard described
+  in change 1. An earlier full run failed the existing IPv6-conflict scenario at
+  `tests/transport/test_oauth.c:436-437`, consistent with an ephemeral IPv4 port collision. The
+  unchanged OAuth test passed the focused rerun and the subsequent full suite; no test was skipped
+  and no unrelated production or test code was changed.
+- Retried ASan/UBSan and TSan Meson setup. Both remain blocked by the missing runtime libraries
+  listed in change 1. The TSan CI result is therefore still pending; the local checks do not claim
+  a sanitizer pass.
+
+No public Google endpoint or real credential was used for these checks.
+
+### Next change
+
+Change Vertex's thinking mode from `adaptive` to `prefer-adaptive`, with behavioral coverage for
+both catalog-listed budget-only models and unlisted models. Configuration, endpoint resolution,
+metadata API semantics, and auth hardening remain separate pending pieces.
