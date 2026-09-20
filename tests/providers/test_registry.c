@@ -128,6 +128,15 @@ static void test_def_hooks_reach_provider(void)
         EXPECT(provider->query_usage == openrouter_query_usage); /* dialect-independent */
         provider->destroy(provider);
     }
+    config_set_override("providers.openrouter.metadata_api", "none");
+    provider = provider_construct(def);
+    EXPECT(provider != NULL);
+    if (provider) {
+        EXPECT(provider->list_models == NULL);
+        EXPECT(provider->probe_model == NULL);
+        EXPECT(provider->query_usage == openrouter_query_usage);
+        provider->destroy(provider);
+    }
     config_set_override("providers.openrouter.metadata_api", NULL);
 }
 

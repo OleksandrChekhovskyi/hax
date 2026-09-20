@@ -346,7 +346,7 @@ Common fields:
 | `api_key` | Literal key, or `$VAR` to read an environment variable. |
 | `sort_models` | Sort this provider's model picker newest-first (default); `off` keeps server order. |
 | `catalog_id` | Provider id in models.dev for cost/context metadata; unset means none. |
-| `metadata_api` | `/models` dialect: `openai` (flat list) or `anthropic` (paginated); defaults to the request protocol's family. |
+| `metadata_api` | Model metadata API: `openai`, `anthropic`, or `none` (no default listing/probe). |
 | `extra_body` | Raw JSON members merged into every request body ([below](#request-passthrough)). |
 | `extra_headers` | HTTP headers sent on every request ([below](#request-passthrough)). |
 
@@ -365,7 +365,14 @@ each to the models speaking it.
 `metadata_api` selects the `/models` shape and its auth scheme independently of the request
 protocol, since a proxy or gateway can pair either metadata side with either wire — an
 `anthropic-messages` endpoint behind an OpenAI-style `/v1/models`, say. It defaults to the family
-of the `api` protocol, so most providers never set it.
+of the `api` protocol unless a shipped provider declares another default. `openai` uses a flat
+model list; `anthropic` uses a paginated list and per-model capability probes.
+
+Set `metadata_api: "none"` for an endpoint without a model metadata API. This installs no default
+remote model listing or per-model probe. A shipped provider can still supply a catalog-backed
+listing, as Vertex does. An explicit `openai` or `anthropic` override instead installs that
+metadata dialect's listing and probe behavior. Catalog metadata and its background refresh are
+independent of this setting; use `catalog.refresh: 0` to disable catalog fetching.
 
 For `openai-completions`, advanced fields are `reasoning_format`, `reasoning_roundtrip`,
 `send_cache_key`, `request_cost`, `cache`, and `cache_ttl`; reasoning replay is automatic per

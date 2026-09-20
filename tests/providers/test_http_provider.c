@@ -19,9 +19,12 @@
 #include "effort.h"
 #include "harness.h"
 #include "loopback.h"
+#include "model_meta.h"
 #include "provider.h"
 #include "xalloc.h"
+#include "providers/anthropic_models.h"
 #include "providers/http_provider.h"
+#include "providers/openai_models.h"
 #include "providers/provider_config.h"
 #include "providers/registry.h"
 #include "transport/http.h"
@@ -212,6 +215,51 @@ static void test_metadata_api_override(void)
     EXPECT(config_load(NULL) == 0);
 }
 
+static void test_metadata_api_none(void)
+{
+    struct loopback server = {0};
+    int port = loopback_listen(&server);
+    EXPECT(port > 0);
+    if (port <= 0)
+        return;
+
+    struct config_snapshot *saved = config_snapshot_take();
+    config_set_override("providers.x.api_key", "test-key");
+    char *base_url = xasprintf("http://127.0.0.1:%d", port);
+    const char *apis[] = {"openai-completions", "openai-responses", "anthropic-messages"};
+    for (size_t i = 0; i < sizeof(apis) / sizeof(apis[0]); i++) {
+        for (int configured = 0; configured < 2; configured++) {
+            struct provider_def def = {
+                .id = "x",
+                .api = apis[i],
+                .base_url = base_url,
+                .metadata_api = configured ? NULL : "none",
+            };
+            config_set_override("providers.x.metadata_api", configured ? "none" : NULL);
+            unsigned long diagnostics_before = hax_diag_sequence();
+            struct provider *provider = http_provider_new(&def);
+            EXPECT(provider != NULL);
+            EXPECT(hax_diag_sequence() == diagnostics_before);
+            if (!provider)
+                continue;
+
+            EXPECT(provider->list_models == NULL);
+            EXPECT(provider->probe_model == NULL);
+            char **headers = http_provider_metadata_headers(provider);
+            EXPECT(headers == NULL);
+            string_array_free(headers);
+            model_meta_refresh(provider, "test-model");
+            model_meta_wait_ms(provider, 200);
+            provider->destroy(provider);
+            struct pollfd listener = {.fd = server.listener_fd, .events = POLLIN};
+            EXPECT(poll(&listener, 1, 0) == 0);
+        }
+    }
+    free(base_url);
+    config_snapshot_restore(saved);
+    loopback_stop(&server);
+}
+
 #define MAX_REQUESTS 9
 
 /* Serves one canned response per sequential connection, capturing each request. A non-NULL
@@ -341,6 +389,62 @@ static void write_catalog_fixture(void)
     fclose(f);
 }
 
+static void test_metadata_api_none_catalog_listing(void)
+{
+    write_catalog_fixture();
+    struct provider_def def = {
+        .id = "catalog-only",
+        .api = "anthropic-messages",
+        .base_url = "http://127.0.0.1:1",
+        .catalog_id = "google-vertex-anthropic",
+        .metadata_api = "none",
+        .list_models = http_provider_list_catalog_models,
+    };
+    struct provider *provider = http_provider_new(&def);
+    EXPECT(provider != NULL);
+    if (provider) {
+        EXPECT(provider->probe_model == NULL);
+        EXPECT(provider->list_models == http_provider_list_catalog_models);
+        if (provider->list_models == http_provider_list_catalog_models) {
+            struct model_info *models = NULL;
+            size_t n_models = 0;
+            char *error = NULL;
+            EXPECT(provider->list_models(provider, &models, &n_models, &error, NULL, NULL) == 0);
+            EXPECT(error == NULL);
+            EXPECT(n_models == 1);
+            if (n_models == 1) {
+                EXPECT_STR_EQ(models[0].id, "claude-budget@default");
+                EXPECT(models[0].max_output == 8192);
+            }
+            free(error);
+            model_info_free(models, n_models);
+        }
+        provider->destroy(provider);
+    }
+
+    const char *dialects[] = {"openai", "anthropic"};
+    for (size_t i = 0; i < sizeof(dialects) / sizeof(dialects[0]); i++) {
+        config_set_override("providers.catalog-only.metadata_api", dialects[i]);
+        provider = http_provider_new(&def);
+        EXPECT(provider != NULL);
+        if (!provider)
+            continue;
+        char **headers = http_provider_metadata_headers(provider);
+        if (strcmp(dialects[i], "anthropic") == 0) {
+            EXPECT(provider->list_models == anthropic_list_models);
+            EXPECT(provider->probe_model == anthropic_probe_model);
+            EXPECT(headers_have_version(headers));
+        } else {
+            EXPECT(provider->list_models == openai_list_models);
+            EXPECT(provider->probe_model == NULL);
+            EXPECT(!headers_have_version(headers));
+        }
+        string_array_free(headers);
+        provider->destroy(provider);
+    }
+    config_set_override("providers.catalog-only.metadata_api", NULL);
+}
+
 /* One provider, one endpoint, three wires: model_apis rules and catalog hints pick each
  * request's protocol, path, and auth scheme; unmatched models keep the default wire. */
 static void test_model_wire_routing(void)
@@ -468,6 +572,11 @@ static void test_vertex_thinking_follows_catalog(void)
     EXPECT(provider != NULL);
     if (!provider)
         goto out_server;
+    EXPECT(provider->probe_model == NULL);
+    EXPECT(provider->list_models == http_provider_list_catalog_models);
+    char **headers = http_provider_metadata_headers(provider);
+    EXPECT(headers == NULL);
+    string_array_free(headers);
     int rc = loopback_serve(&server);
     EXPECT(rc == 0);
     if (rc != 0)
@@ -1092,6 +1201,8 @@ int main(void)
     test_messages_efforts_follow_thinking_mode();
     test_api_override_moves_wire();
     test_metadata_api_override();
+    test_metadata_api_none();
+    test_metadata_api_none_catalog_listing();
     test_model_wire_routing();
     test_messages_defaults_follow_def();
     test_vertex_thinking_follows_catalog();

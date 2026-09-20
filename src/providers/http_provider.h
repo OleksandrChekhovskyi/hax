@@ -66,7 +66,7 @@ int http_provider_has_api_key(const struct provider *provider);
 const char *http_provider_api_key(const struct provider *provider);
 /* Owned NULL-terminated auth headers for JSON metadata requests, following the resolved
  * metadata dialect (x-api-key plus the version header on the Anthropic side); free with
- * string_array_free. */
+ * string_array_free. Returns NULL for metadata_api "none", without invoking auth hooks. */
 char **http_provider_metadata_headers(const struct provider *provider);
 /* Owned NULL-terminated extra headers, def defaults under the user's, expanded for a request
  * outside any conversation; NULL when none. Free with string_array_free. */

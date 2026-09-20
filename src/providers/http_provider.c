@@ -39,6 +39,7 @@
 enum http_metadata_api {
     HTTP_METADATA_OPENAI,    /* flat {"data": [...]} list, Bearer auth */
     HTTP_METADATA_ANTHROPIC, /* cursor-paginated list, x-api-key + version auth */
+    HTTP_METADATA_NONE,      /* no default listing, probe, or metadata headers */
 };
 
 /* One <prefix>.model_apis member: models matching the glob speak `wire`. */
@@ -64,7 +65,7 @@ struct http_provider {
     int path_has_model; /* endpoint carries a {model} placeholder, expanded per request */
     char *config_prefix;
     const struct wire *wire;          /* default; wire_rules and catalog hints override per model */
-    const struct wire *metadata_wire; /* auth scheme for /models and probe requests */
+    const struct wire *metadata_wire; /* auth scheme for metadata requests; NULL for none */
     struct wire_rule *wire_rules;
     size_t n_wire_rules;
     int catalog_wires;
@@ -612,6 +613,8 @@ const char *http_provider_api_key(const struct provider *provider)
 char **http_provider_metadata_headers(const struct provider *provider)
 {
     const struct http_provider *hp = (const struct http_provider *)provider;
+    if (!hp->metadata_wire)
+        return NULL;
     return build_headers(hp, hp->metadata_wire, 0, provider_process_session_id());
 }
 
@@ -903,13 +906,15 @@ static char *resolve_catalog_id(const struct provider_def *def, const char *pref
     return catalog_id ? xstrdup(catalog_id) : NULL;
 }
 
-/* "openai" or "anthropic" to the enum; -1 for anything else (unset, "auto", a typo). */
+/* A metadata API name to the enum; -1 for anything else (unset, "auto", a typo). */
 static int metadata_api_parse(const char *value)
 {
     if (value && strcasecmp(value, "openai") == 0)
         return HTTP_METADATA_OPENAI;
     if (value && strcasecmp(value, "anthropic") == 0)
         return HTTP_METADATA_ANTHROPIC;
+    if (value && strcasecmp(value, "none") == 0)
+        return HTTP_METADATA_NONE;
     return -1;
 }
 
@@ -924,8 +929,7 @@ static enum http_metadata_api def_metadata_api(const struct provider_def *def,
     return wire == &WIRE_ANTHROPIC_MESSAGES ? HTTP_METADATA_ANTHROPIC : HTTP_METADATA_OPENAI;
 }
 
-/* An unrecognized value falls back like the other tri-state settings rather than failing
- * construction. */
+/* An unrecognized value falls back to the def rather than failing construction. */
 static enum http_metadata_api resolve_metadata_api(const struct provider_def *def,
                                                    const struct wire *wire, const char *prefix)
 {
@@ -934,7 +938,7 @@ static enum http_metadata_api resolve_metadata_api(const struct provider_def *de
     if (parsed >= 0)
         return (enum http_metadata_api)parsed;
     if (configured && *configured && strcasecmp(configured, "auto") != 0)
-        hax_warn("unknown metadata_api '%s' (openai or anthropic) — using default", configured);
+        hax_warn("unknown metadata_api '%s' (openai/anthropic/none) — using default", configured);
     return def_metadata_api(def, wire);
 }
 
@@ -1079,7 +1083,9 @@ struct provider *http_provider_new(const struct provider_def *def)
     free(expanded_path);
     /* On the OpenAI side any OpenAI-family wire carries the same Bearer scheme; only a Messages
      * default wire paired with OpenAI-shaped metadata needs the explicit Chat stand-in. */
-    if (metadata_api == HTTP_METADATA_ANTHROPIC)
+    if (metadata_api == HTTP_METADATA_NONE)
+        provider->metadata_wire = NULL;
+    else if (metadata_api == HTTP_METADATA_ANTHROPIC)
         provider->metadata_wire = &WIRE_ANTHROPIC_MESSAGES;
     else if (provider->wire == &WIRE_ANTHROPIC_MESSAGES)
         provider->metadata_wire = &WIRE_OPENAI_CHAT;
@@ -1152,7 +1158,7 @@ struct provider *http_provider_new(const struct provider_def *def)
     if (metadata_api == HTTP_METADATA_ANTHROPIC) {
         provider->base.list_models = anthropic_list_models;
         provider->base.probe_model = anthropic_probe_model;
-    } else {
+    } else if (metadata_api == HTTP_METADATA_OPENAI) {
         provider->base.list_models = openai_list_models;
     }
     /* Like parse_model (which only the def's own listing consults), the probe and listing hooks

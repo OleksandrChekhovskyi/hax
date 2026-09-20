@@ -1,7 +1,7 @@
 # PR 37 implementation notes
 
 Each numbered section describes one independently committed change from `pr-37-review-plan.md`.
-The first three changes are implemented here; the remaining review items are still pending.
+The first four changes are implemented here; the remaining review items are still pending.
 
 ## 1. Redact Vertex authentication secrets from HTTP traces
 
@@ -206,3 +206,69 @@ All request checks used a synthetic catalog and loopback responses, not live Goo
 Implement explicit `metadata_api = "none"` semantics: disable default remote model listing and
 probing while preserving deliberately installed catalog listing, and cover this in the generic
 HTTP-provider tests.
+
+## 4. Add an explicit disabled metadata API
+
+### Problem
+
+The metadata parser recognized only OpenAI and Anthropic dialects. Simply setting Vertex's
+`metadata_api` to `none` would therefore fall back to Anthropic behavior and install a remote
+model probe. Its previous `openai` declaration avoided the probe by describing an API the endpoint
+does not serve, while relying on a custom catalog-listing hook to replace the default listing.
+
+### Changes
+
+- Recognize `none` in both provider definitions and configuration overrides. It installs no default
+  remote model listing, per-model probe, or metadata-header dialect.
+- Make `http_provider_metadata_headers()` return NULL for this mode without invoking auth hooks.
+  Streaming headers continue to follow the request wire and are unaffected.
+- Set Vertex's definition to `metadata_api = "none"` and remove the misleading OpenAI stand-in
+  comment. Its explicit catalog-backed listing remains installed.
+- Retain the existing rule for explicit listing/probe hooks: they apply when the selected metadata
+  API matches the definition's own setting. Deliberately overriding a `none` definition with
+  `openai` or `anthropic` installs that remote dialect's defaults instead of retaining a mismatched
+  listing hook. Conversely, configuring `none` on a remote-metadata definition removes its
+  listing/probe hooks; unrelated hooks, such as usage reporting, remain unchanged.
+- Document the new value in the provider guide and local header contracts, and add an Unreleased
+  changelog entry.
+
+This setting controls provider model-metadata queries, not models.dev catalog refresh. Catalog
+metadata remains available, and `catalog.refresh: 0` is still the way to disable its background
+fetch. No new provider-specific boolean or metadata abstraction is introduced.
+
+### Regression coverage
+
+- Exercise definition-level and configured `none` across Chat Completions, Responses, and Messages.
+  Check that construction emits no unknown-setting warning and that listing, probing, and metadata
+  headers are absent. Trigger model-metadata refresh and verify that no connection reaches the
+  bound loopback listener after provider teardown.
+- Construct a generic catalog-only provider and actually list the private snapshot's model,
+  including its output limit. Then override its metadata API to OpenAI and Anthropic and verify
+  the corresponding listing, probe, and version-header behavior.
+- Check that the real Vertex definition retains catalog listing and has no metadata probe or
+  headers, while the existing streaming regression continues to send valid requests.
+- Extend the registry hook test: `none` removes OpenRouter's remote listing and custom probe but
+  leaves its usage hook installed. Existing dialect-override tests remain in place.
+
+### Validation
+
+- Before implementation, the new checks failed 22 assertions in `providers/http_provider` and
+  two in `providers/registry`, including unwanted loopback probe connections.
+- After implementation, these focused targets passed:
+
+  ```sh
+  scripts/check.sh test providers/http_provider providers/registry providers/vertex \
+      providers/anthropic_models providers/openai_models
+  ```
+
+- `make tests` passed all 121 tests with the external-network guard described in change 1.
+- `make lint` and `git diff --check` passed; all touched C sources and headers were formatted.
+- ASan/UBSan and TSan setup were retried and still fail to link because the runtime libraries
+  listed in change 1 are missing. No sanitizer pass is claimed.
+
+No live Google Cloud endpoint or real Google credential was used for these checks.
+
+### Next change
+
+Keep the `vertex` provider ID, change its display name to `google vertex`, and shorten picker
+availability reasons while retaining full setup advice in request diagnostics and documentation.

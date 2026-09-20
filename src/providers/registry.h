@@ -46,8 +46,8 @@ struct provider_def {
     const char *api_key_env;  /* env var holding the key; NULL → local/no key */
     const char *catalog_id;   /* models.dev key (catalog.h); NULL means none. Shipped defs curate
                                  it; a config-only def has one only from providers.<id>.catalog_id */
-    const char *metadata_api; /* /models dialect: "openai" (flat list) or "anthropic" (paged);
-                                 NULL follows the default wire's family */
+    const char *metadata_api; /* "openai" (flat list), "anthropic" (paged), or "none" (no default
+                                 listing/probe); NULL follows the default wire's family */
     int send_cache_key;       /* prompt_cache_key default (0/1) */
     /* Chat cache-marker default: "auto" plans them from model rates, "on" always sends them,
      * NULL sends none. Messages always sends them; only a configured providers.<id>.cache=off
@@ -88,8 +88,8 @@ struct provider_def {
 
     /* Capability hooks the generic constructor installs on the built provider; NULL keeps the
      * generic behavior. A def with a construct override wires its provider itself instead.
-     * parse_model, probe_model, and list_models refine the def's own metadata dialect and stand
-     * down when a configured metadata_api moves the provider to the other one. */
+     * probe_model and list_models refine the def's own metadata dialect and stand down when a
+     * configured metadata_api differs. "none" still permits explicit hooks. */
     void (*parse_model)(const json_t *entry, struct model_info *out); /* refine one /models entry */
     int (*probe_model)(struct provider *provider, const char *model, struct model_probe *probe);
     int (*list_models)(struct provider *provider, struct model_info **models, size_t *n_models,

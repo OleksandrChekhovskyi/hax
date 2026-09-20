@@ -9,6 +9,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Added
 
+- Provider blocks accept `metadata_api: "none"` to disable default remote model listing and
+  metadata probes. Vertex uses this mode while retaining catalog-backed model selection.
 - A preset name right after `hax` starts with that preset: `hax review` is short for
   `hax --preset review`, and `hax review -p "..."` works the same way in one-shot mode.
 

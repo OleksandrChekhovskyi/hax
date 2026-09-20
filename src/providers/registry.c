@@ -132,9 +132,7 @@ static const struct provider_def DEFS[] = {
         .catalog_id = "google-vertex-anthropic",
         .payload_hint = "vertex AI caps a request around 30 MB — trim context or images (or "
                         "compact with /compact) before it fills",
-        /* No /models route: openai metadata stands in so the catalog list is installed and no
-         * probe launches. */
-        .metadata_api = "openai",
+        .metadata_api = "none",
         .path_template =
             "/v1/projects/{project}/locations/{location}/publishers/anthropic/models/"
             "{model}:streamRawPredict",
