@@ -30,6 +30,13 @@
  * moment, so bound it. */
 #define VERTEX_GCLOUD_TIMEOUT_MS 15000
 #define VERTEX_GCLOUD_MAX_BYTES  8192
+/* Compute Engine metadata token endpoint; HTTP metadata requests must carry the flavor header
+ * and bypass proxies (the address is link-local). GCE_METADATA_ROOT overrides the root, which is
+ * also the test seam. */
+#define VERTEX_METADATA_ROOT      "http://metadata.google.internal"
+#define VERTEX_METADATA_ROOT_ENV  "GCE_METADATA_ROOT"
+#define VERTEX_METADATA_TIMEOUT_S 3
+#define VERTEX_METADATA_MAX_BYTES (16 * 1024)
 
 /* A session holds one access token plus the recipe to renew it. Resolution order mirrors what
  * users already have configured: an explicit token (no refresh), the ADC file's authorized_user
@@ -37,9 +44,10 @@
  * accounts, workload identity federation, and impersonation without hand-rolling RS256). */
 
 enum vertex_auth_kind {
-    VERTEX_LITERAL, /* explicit token; rejected by 401 → re-read the literal once */
-    VERTEX_USER,    /* ADC authorized_user: OAuth refresh-token exchange */
-    VERTEX_SERVICE, /* other ADC kinds: `gcloud auth application-default print-access-token` */
+    VERTEX_LITERAL,  /* explicit token; rejected by 401 → re-read the literal once */
+    VERTEX_USER,     /* ADC authorized_user: OAuth refresh-token exchange */
+    VERTEX_METADATA, /* instance metadata server token */
+    VERTEX_SERVICE,  /* other ADC kinds: `gcloud auth application-default print-access-token` */
 };
 
 struct vertex_auth {
@@ -245,6 +253,56 @@ static int refresh_service_token(struct vertex_auth *a, char **detail, http_tick
     return 0;
 }
 
+/* Fetch the instance's default service-account token from the Compute Engine metadata server. */
+static int refresh_metadata_token(struct vertex_auth *a, char **detail, http_tick_cb tick,
+                                  void *tick_user)
+{
+    const char *root = env_nonempty(VERTEX_METADATA_ROOT_ENV);
+    const char *root_url = root ? root : VERTEX_METADATA_ROOT;
+    char *url =
+        xasprintf("%s/computeMetadata/v1/instance/service-accounts/default/token", root_url);
+    const char *const headers[] = {"Metadata-Flavor: Google", NULL};
+    char *response = NULL;
+    long status = 0;
+    int rc = http_get_direct(url, (const char *const *)headers, VERTEX_METADATA_TIMEOUT_S,
+                             VERTEX_METADATA_MAX_BYTES, tick, tick_user, &response, &status);
+    free(url);
+    /* http_get reports non-2xx as failure but still fills `status`, which distinguishes a
+     * server error from a transport failure (status 0). */
+    if (status != 0 && status != 200) {
+        if (detail)
+            *detail = xasprintf("GCE metadata token request failed (HTTP %ld)", status);
+        free(response);
+        return -1;
+    }
+    if (rc != 0 || !response) {
+        if (detail)
+            *detail = xstrdup("GCE metadata token request failed");
+        free(response);
+        return -1;
+    }
+    json_t *root_json = json_loads(response, 0, NULL);
+    free(response);
+    const char *token = json_is_object(root_json)
+                            ? json_string_value(json_object_get(root_json, "access_token"))
+                            : NULL;
+    if (!token || !*token) {
+        json_decref(root_json);
+        if (detail)
+            *detail = xstrdup("GCE metadata token request returned no access_token");
+        return -1;
+    }
+    free(a->token);
+    a->token = xstrdup(token);
+    trace_register_secret(a->token);
+    json_t *expires = json_object_get(root_json, "expires_in");
+    long ttl = json_is_number(expires) ? (long)json_integer_value(expires) : 0;
+    a->token_expires = ttl > VERTEX_TOKEN_MARGIN_S ? time(NULL) + ttl - VERTEX_TOKEN_MARGIN_S
+                                                   : (ttl > 0 ? time(NULL) : 0);
+    json_decref(root_json);
+    return 0;
+}
+
 static void set_fatal(struct vertex_auth *a, const char *message)
 {
     free(a->fatal);
@@ -267,9 +325,16 @@ static int load_credentials(struct vertex_auth *a)
         return 0;
     }
 
+    const char *explicit = env_nonempty("GOOGLE_APPLICATION_CREDENTIALS");
     enum adc_load_error error;
     json_t *root = load_adc(&error);
     if (!root) {
+        if (error == ADC_LOAD_ABSENT && !explicit) {
+            /* No configured or default file: the instance metadata server is the remaining ADC
+             * source. A broken explicit file never falls back to it. */
+            a->kind = VERTEX_METADATA;
+            return 0;
+        }
         if (error == ADC_LOAD_UNREADABLE)
             set_fatal(a, "Google ADC file is unreadable — check permissions on "
                          "GOOGLE_APPLICATION_CREDENTIALS");
@@ -333,8 +398,13 @@ static int verify_token(struct vertex_auth *a, int force, int allow_refresh, htt
     if (a->kind == VERTEX_LITERAL) /* the source changed to a literal; nothing to exchange */
         return 0;
     char *detail = NULL;
-    int rc = a->kind == VERTEX_USER ? refresh_user_token(a, &detail, tick, tick_user)
-                                    : refresh_service_token(a, &detail, tick, tick_user);
+    int rc;
+    if (a->kind == VERTEX_USER)
+        rc = refresh_user_token(a, &detail, tick, tick_user);
+    else if (a->kind == VERTEX_METADATA)
+        rc = refresh_metadata_token(a, &detail, tick, tick_user);
+    else
+        rc = refresh_service_token(a, &detail, tick, tick_user);
     if (rc != 0) {
         set_fatal(a, detail ? detail : "Google credential refresh failed");
         free(detail);

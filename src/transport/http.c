@@ -332,8 +332,8 @@ static int poll_buffered_transfer(void *user, curl_off_t download_total, curl_of
  * otherwise success requires a non-empty 2xx response. */
 static int buffered_request(const char *url, const char *const *headers, const char *content_type,
                             const char *body, size_t body_len, long timeout_s, long max_bytes,
-                            http_tick_cb tick, void *tick_user, int any_status, char **out,
-                            long *status_out)
+                            http_tick_cb tick, void *tick_user, int direct, int any_status,
+                            char **out, long *status_out)
 {
     *out = NULL;
     if (status_out)
@@ -359,6 +359,8 @@ static int buffered_request(const char *url, const char *const *headers, const c
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, HTTP_USER_AGENT);
+    if (direct)
+        curl_easy_setopt(curl, CURLOPT_NOPROXY, "*");
     if (header_list)
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
     if (body) {
@@ -418,14 +420,21 @@ int http_get(const char *url, const char *const *headers, long timeout_s, long m
              http_tick_cb tick, void *tick_user, char **out, long *status_out)
 {
     return buffered_request(url, headers, NULL, NULL, 0, timeout_s, max_bytes, tick, tick_user, 0,
-                            out, status_out);
+                            0, out, status_out);
+}
+
+int http_get_direct(const char *url, const char *const *headers, long timeout_s, long max_bytes,
+                    http_tick_cb tick, void *tick_user, char **out, long *status_out)
+{
+    return buffered_request(url, headers, NULL, NULL, 0, timeout_s, max_bytes, tick, tick_user, 1,
+                            0, out, status_out);
 }
 
 int http_post_json(const char *url, const char *const *headers, const char *body, size_t body_len,
                    long timeout_s, long max_bytes, http_tick_cb tick, void *tick_user, char **out)
 {
     return buffered_request(url, headers, "Content-Type: application/json", body ? body : "",
-                            body ? body_len : 0, timeout_s, max_bytes, tick, tick_user, 0, out,
+                            body ? body_len : 0, timeout_s, max_bytes, tick, tick_user, 0, 0, out,
                             NULL);
 }
 
@@ -437,7 +446,7 @@ int http_post(const char *url, const char *const *headers, const char *content_t
     long status = 0;
     int result =
         buffered_request(url, headers, content_type_header, body ? body : "", body ? body_len : 0,
-                         timeout_s, max_bytes, tick, tick_user, 1, out, &status);
+                         timeout_s, max_bytes, tick, tick_user, 0, 1, out, &status);
     free(content_type_header);
     if (status_out)
         *status_out = result == 0 ? status : 0;

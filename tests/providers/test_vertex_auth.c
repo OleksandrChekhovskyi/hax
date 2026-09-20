@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <curl/curl.h>
 #include <sys/stat.h>
 
@@ -355,6 +356,177 @@ static void test_gcloud_refresh_cancellable(void)
     restore_gcloud_stub();
 }
 
+static void test_metadata_token_success(void)
+{
+    struct loopback metadata = {.n_requests = 1};
+    loopback_reply_ok(&metadata, 0, "{\"access_token\":\"meta-token\",\"expires_in\":7200}");
+    metadata.response = metadata.responses[0];
+    int port = loopback_start(&metadata);
+    EXPECT(port > 0);
+    if (port <= 0)
+        return;
+    char *root = xasprintf("http://127.0.0.1:%d", port);
+    setenv("GCE_METADATA_ROOT", root, 1);
+    free(root);
+    unsetenv("GOOGLE_APPLICATION_CREDENTIALS");
+
+    struct http_auth_source source = {0};
+    EXPECT(vertex_auth_source(NULL, &source) == 0);
+    EXPECT(source.ops->prepare(source.state, 1, NULL, NULL) == 0);
+    char **headers = source.ops->headers(source.state, "sid", 1);
+    EXPECT(strstr(headers[0], "Bearer meta-token") != NULL);
+    string_array_free(headers);
+    EXPECT(source.ops->prepare(source.state, 0, NULL, NULL) == 0);
+    loopback_stop(&metadata);
+    EXPECT(atomic_load(&metadata.served) == 1);
+    EXPECT(strstr(metadata.requests[0], "GET /computeMetadata/v1/instance/service-accounts/"
+                                        "default/token HTTP") != NULL);
+    EXPECT(strstr(metadata.requests[0], "Metadata-Flavor: Google\r\n") != NULL);
+
+    source.ops->destroy(source.state);
+    unsetenv("GCE_METADATA_ROOT");
+}
+
+static void test_metadata_failure_modes(void)
+{
+    struct loopback metadata = {.n_requests = 1};
+    metadata.response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 2\r\n"
+                        "Connection: close\r\n\r\nno";
+    int port = loopback_start(&metadata);
+    EXPECT(port > 0);
+    if (port <= 0)
+        return;
+    char *root = xasprintf("http://127.0.0.1:%d", port);
+    setenv("GCE_METADATA_ROOT", root, 1);
+    free(root);
+    unsetenv("GOOGLE_APPLICATION_CREDENTIALS");
+
+    struct http_auth_source source = {0};
+    EXPECT(vertex_auth_source(NULL, &source) == 0);
+    EXPECT(source.ops->prepare(source.state, 1, NULL, NULL) == -1);
+    char *message = source.ops->unauthorized_message(source.state);
+    EXPECT(strstr(message, "GCE metadata token request failed (HTTP 500)") != NULL);
+    free(message);
+    source.ops->destroy(source.state);
+    loopback_stop(&metadata);
+
+    /* A peer that accepts and closes yields no usable token either. */
+    struct loopback empty = {.n_requests = 1};
+    int empty_port = loopback_listen(&empty);
+    EXPECT(empty_port > 0);
+    if (empty_port <= 0) {
+        unsetenv("GCE_METADATA_ROOT");
+        return;
+    }
+    root = xasprintf("http://127.0.0.1:%d", empty_port);
+    setenv("GCE_METADATA_ROOT", root, 1);
+    free(root);
+    int rc = loopback_serve(&empty);
+    EXPECT(rc == 0);
+    if (rc != 0) {
+        loopback_stop(&empty);
+        unsetenv("GCE_METADATA_ROOT");
+        return;
+    }
+    EXPECT(vertex_auth_source(NULL, &source) == 0);
+    EXPECT(source.ops->prepare(source.state, 1, NULL, NULL) == -1);
+    source.ops->destroy(source.state);
+    loopback_stop(&empty);
+    unsetenv("GCE_METADATA_ROOT");
+}
+
+static void test_metadata_refresh_cancellable(void)
+{
+    struct loopback metadata = {.n_requests = 1, .delay_ms = 4000};
+    int port = loopback_start(&metadata);
+    EXPECT(port > 0);
+    if (port <= 0)
+        return;
+    char *root = xasprintf("http://127.0.0.1:%d", port);
+    setenv("GCE_METADATA_ROOT", root, 1);
+    free(root);
+    unsetenv("GOOGLE_APPLICATION_CREDENTIALS");
+
+    struct http_auth_source source = {0};
+    EXPECT(vertex_auth_source(NULL, &source) == 0);
+    long started = monotonic_ms();
+    EXPECT(source.ops->prepare(source.state, 1, cancel_now, NULL) == -1);
+    long elapsed_ms = monotonic_ms() - started;
+    EXPECT(elapsed_ms < 3000);
+    source.ops->destroy(source.state);
+    loopback_stop(&metadata);
+    unsetenv("GCE_METADATA_ROOT");
+}
+
+static void test_metadata_fallback_precedence(void)
+{
+    const char *default_dir = getenv("CLOUDSDK_CONFIG");
+    EXPECT(default_dir != NULL && *default_dir);
+    char *default_path = xasprintf("%s/application_default_credentials.json", default_dir);
+
+    struct loopback sentinel = {0};
+    int port = loopback_listen(&sentinel);
+    EXPECT(port > 0);
+    if (port <= 0)
+        return;
+    char *root = xasprintf("http://127.0.0.1:%d", port);
+    setenv("GCE_METADATA_ROOT", root, 1);
+    free(root);
+
+    /* A broken explicitly configured file never falls back to metadata. */
+    char *gone = xasprintf("%s/missing.json", t_tempdir());
+    setenv("GOOGLE_APPLICATION_CREDENTIALS", gone, 1);
+    free(gone);
+    struct http_auth_source source = {0};
+    EXPECT(vertex_auth_source(NULL, &source) == 0);
+    EXPECT(source.ops->prepare(source.state, 1, NULL, NULL) == -1);
+    char *message = source.ops->unauthorized_message(source.state);
+    EXPECT(strstr(message, "no Google ADC credentials") != NULL);
+    free(message);
+    source.ops->destroy(source.state);
+    struct pollfd listener = {.fd = sentinel.listener_fd, .events = POLLIN};
+    EXPECT(poll(&listener, 1, 0) == 0);
+
+    /* A broken well-known file never falls back either. */
+    EXPECT(fs_write_atomic(default_path, "{not json", strlen("{not json"), 0) == 0);
+    unsetenv("GOOGLE_APPLICATION_CREDENTIALS");
+    EXPECT(vertex_auth_source(NULL, &source) == 0);
+    EXPECT(source.ops->prepare(source.state, 1, NULL, NULL) == -1);
+    message = source.ops->unauthorized_message(source.state);
+    EXPECT(strstr(message, "not valid JSON") != NULL);
+    free(message);
+    source.ops->destroy(source.state);
+    EXPECT(poll(&listener, 1, 0) == 0);
+    unlink(default_path);
+
+    loopback_stop(&sentinel);
+    unsetenv("GCE_METADATA_ROOT");
+    free(default_path);
+}
+
+static void test_metadata_not_in_status(void)
+{
+    struct loopback sentinel = {0};
+    int port = loopback_listen(&sentinel);
+    EXPECT(port > 0);
+    if (port <= 0)
+        return;
+    char *root = xasprintf("http://127.0.0.1:%d", port);
+    setenv("GCE_METADATA_ROOT", root, 1);
+    free(root);
+    unsetenv("GOOGLE_APPLICATION_CREDENTIALS");
+
+    char *reason = NULL;
+    EXPECT(vertex_auth_local_status(&reason) == 0);
+    EXPECT_STR_EQ(reason, "ADC unavailable");
+    free(reason);
+    struct pollfd listener = {.fd = sentinel.listener_fd, .events = POLLIN};
+    EXPECT(poll(&listener, 1, 0) == 0);
+
+    loopback_stop(&sentinel);
+    unsetenv("GCE_METADATA_ROOT");
+}
+
 static void test_oauth_invalid_grant(void)
 {
     static const char body[] = "{\"error\":\"invalid_grant\"}";
@@ -481,6 +653,11 @@ int main(void)
     test_recover_source_transitions();
     test_gcloud_blank_output_rejected();
     test_gcloud_refresh_cancellable();
+    test_metadata_token_success();
+    test_metadata_failure_modes();
+    test_metadata_refresh_cancellable();
+    test_metadata_fallback_precedence();
+    test_metadata_not_in_status();
     test_oauth_invalid_grant();
     free(trace_path);
     config_free();

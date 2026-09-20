@@ -30,6 +30,11 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
 int http_get(const char *url, const char *const *headers, long timeout_s, long max_bytes,
              http_tick_cb tick, void *tick_user, char **out, long *status_out);
 
+/* GET bypassing HTTP(S) proxies, for link-local internal endpoints a corporate proxy would
+ * otherwise misroute or inspect. Same response, timeout, and size contracts as http_get. */
+int http_get_direct(const char *url, const char *const *headers, long timeout_s, long max_bytes,
+                    http_tick_cb tick, void *tick_user, char **out, long *status_out);
+
 /* Synchronous JSON POST with the same response, timeout, and size contracts as http_get.
  * Content-Type is added automatically. A NULL body sends an empty POST. */
 int http_post_json(const char *url, const char *const *headers, const char *body, size_t body_len,

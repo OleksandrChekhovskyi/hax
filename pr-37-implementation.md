@@ -1,7 +1,7 @@
 # PR 37 implementation notes
 
 Each numbered section describes one independently committed change from `pr-37-review-plan.md`.
-The first nine changes are implemented here; the remaining review items are still pending.
+The first ten changes are implemented here; the remaining review items are still pending.
 
 ## 1. Redact Vertex authentication secrets from HTTP traces
 
@@ -622,3 +622,68 @@ add fallbacks to unreadable or malformed configured files.
 Add metadata-server ADC support, which was deferred in change 8: a bounded, cancellable, proxy-
 bypassing token request with `Metadata-Flavor: Google`, falling back only when no higher-priority
 credential source exists. Then continue with payload-error classification and test consolidation.
+
+## 10. Add GCE metadata-server credentials
+
+### Problem
+
+Without a credentials file, Cloud Run, Compute Engine, and GKE instances could not authenticate:
+the earlier change narrowed the documented ADC support to files and tokens. The remaining Google
+ADC source is the instance metadata server.
+
+### Changes
+
+- Add a `VERTEX_METADATA` credential kind that fetches the instance default service-account token
+  from `http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token`
+  with the required `Metadata-Flavor: Google` header.
+- Use a bounded, cancellable request: a total 3-second timeout and 16 KB response cap, with the
+  caller's tick threaded through `http_get`'s ordinary transfer cancellation.
+- Bypass HTTP(S) proxies for the metadata request — the endpoint is link-local — by adding a narrow
+  `http_get_direct()` transport entry point that sets `CURLOPT_NOPROXY "*"`. Other requests,
+  including OAuth and gcloud transport, are unchanged.
+- Fall back to metadata only when no higher-priority source exists: never when an explicitly
+  configured `GOOGLE_APPLICATION_CREDENTIALS` file is broken, and not when a well-known file is
+  present but unreadable or malformed. An absent well-known path with no explicit configuration
+  selects metadata as the last ADC source.
+- Respect `GCE_METADATA_ROOT` as the root override, which also serves as the test seam, on the same
+  model as `HAX_VERTEX_OAUTH_URL`.
+- Keep metadata requests out of synchronous availability: the picker's local status still never
+  performs network I/O and reports `ADC unavailable` when only runtime metadata could serve.
+- Apply the early-refresh margin to metadata tokens, register them with the trace redactor, and
+  report bounded 200-or-failure diagnostics distinguishing server errors (with HTTP status) from
+  transport failures.
+- Update the provider guide and changelog to describe the supported metadata path and the fallback
+  boundary.
+
+### Regression coverage
+
+- A loopback metadata server receives the `/computeMetadata/v1/instance/service-accounts/
+  default/token` GET with `Metadata-Flavor: Google`; the returned token authenticates a request and
+  stays usable without a further metadata call.
+- Server error (HTTP 500) reports the status; an accepting-closing peer yields no usable token.
+- An immediately-cancelling tick aborts a slow metadata transfer well before its timeout.
+- An explicitly configured file that is missing, and a well-known file that is malformed, both fail
+  with their existing diagnostics and never contact a bound metadata sentinel.
+- The picker status path returns `ADC unavailable` with no connection to a bound metadata sentinel.
+- All existing OAuth, gcloud, recovery, and trace tests continue to pass.
+
+### Validation
+
+- Focused targets passed:
+
+  ```sh
+  scripts/check.sh test providers/vertex_auth providers/vertex providers/http_provider \\
+      transport/http
+  ```
+
+- `make tests` passed all 121 tests under the external-network and credential guard; `make lint`
+  and `git diff --check` passed.
+- ASan/UBSan and TSan setup remain blocked by the missing sanitizer runtime libraries listed in
+  change 1; no sanitizer pass is claimed.
+
+All metadata checks used loopback servers, not a real GCP metadata service.
+
+### Next change
+
+Continue with payload-error classification (`stream_auth_error_message`), then test consolidation,
+documentation cleanup, and the final validation pass.

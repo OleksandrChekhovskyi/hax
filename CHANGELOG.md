@@ -33,6 +33,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Fixed
 
+- Vertex falls back to GCE metadata-server tokens when no file credential is configured, using a
+  bounded request that bypasses proxies and honors cancellation.
 - Vertex distinguishes a missing, unreadable, and malformed ADC file in request diagnostics.
 - Vertex credential refresh respects cancellation and the no-network/no-process refresh contract,
   refuses to resend an unchanged rejected token, adopts credential-source changes, and rejects
