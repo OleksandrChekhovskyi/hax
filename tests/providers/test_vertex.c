@@ -211,7 +211,6 @@ static void test_def_registered(void)
 
     EXPECT(idx_of("vertex") > idx_of("opencode-go"));
     EXPECT(idx_of("vertex") < idx_of("llamacpp"));
-    EXPECT(provider_default() == provider_find("codex"));
 }
 
 /* The bare Messages wire carries the model and the version header; the Vertex raw-Predict
@@ -235,30 +234,66 @@ static void test_messages_body_variant(void)
     json_decref(body);
 }
 
-struct error_log {
-    int n_errors;
-    char message[256];
+struct stream_capture {
+    char text[256];
+    size_t n_text;
+    int done;
+    int errors;
+    char stop_reason[64];
 };
 
-static int log_error(const struct stream_event *event, void *user)
+static int capture_stream(const struct stream_event *event, void *user)
 {
-    struct error_log *log = user;
-    if (event->kind == EV_ERROR) {
-        log->n_errors++;
-        snprintf(log->message, sizeof(log->message), "%s", event->u.error.message);
+    struct stream_capture *capture = user;
+    switch (event->kind) {
+    case EV_TEXT_DELTA:
+        snprintf(capture->text + capture->n_text, sizeof(capture->text) - capture->n_text, "%s",
+                 event->u.text_delta.text);
+        capture->n_text = strlen(capture->text);
+        break;
+    case EV_DONE:
+        capture->done++;
+        if (event->u.done.stop_reason)
+            snprintf(capture->stop_reason, sizeof(capture->stop_reason), "%s",
+                     event->u.done.stop_reason);
+        break;
+    case EV_ERROR:
+        capture->errors++;
+        snprintf(capture->text, sizeof(capture->text), "%s", event->u.error.message);
+        capture->n_text = strlen(capture->text);
+        break;
+    default:
+        break;
     }
     return 0;
 }
 
-/* End-to-end: an explicit base_url wins verbatim, the path template expands project/location
- * now and the model per request, auth is a Google bearer, and the body is the raw-Predict shape
- * (no model member, anthropic_version in the body, no anthropic-version header). */
+/* The single slim end-to-end check: an explicit base_url wins verbatim, project/location expand
+ * in the path, auth is a Google bearer, the body is the raw-Predict shape, and a successful SSE
+ * stream reaches the callback. */
 static void test_stream_raw_predict(void)
 {
-    struct loopback server = {
-        .response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
-        .n_requests = 1,
-    };
+    static const char sse[] =
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_smoke\","
+        "\"type\":\"message\",\"role\":\"assistant\","
+        "\"model\":\"claude-sonnet-4-5@20250929\",\"content\":[],\"stop_reason\":null,"
+        "\"stop_sequence\":null,\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}\n"
+        "\n"
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{"
+        "\"type\":\"text\",\"text\":\"\"}}\n"
+        "\n"
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{"
+        "\"type\":\"text_delta\",\"text\":\"Hello from vertex\"}}\n"
+        "\n"
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n"
+        "\n"
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\","
+        "\"stop_sequence\":null},\"usage\":{\"output_tokens\":3}}\n"
+        "\n"
+        "data: {\"type\":\"message_stop\"}\n"
+        "\n";
+    struct loopback server = {.n_requests = 1};
+    loopback_reply_ok(&server, 0, sse);
     int port = loopback_listen(&server);
     EXPECT(port > 0);
     if (port <= 0)
@@ -284,12 +319,15 @@ static void test_stream_raw_predict(void)
 
     struct item items[] = {{.kind = ITEM_USER_MESSAGE, .text = "hello"}};
     struct context context = {.items = items, .n_items = 1, .image_input = 1};
-    struct error_log log = {0};
+    struct stream_capture capture = {0};
     const char *model = "claude-sonnet@20250929";
-    provider->stream(provider, &context, model, log_error, &log, NULL, NULL);
+    provider->stream(provider, &context, model, capture_stream, &capture, NULL, NULL);
     loopback_stop(&server);
     EXPECT(atomic_load(&server.served) == 1);
-    EXPECT(log.n_errors == 1);
+    EXPECT_STR_EQ(capture.text, "Hello from vertex");
+    EXPECT_STR_EQ(capture.stop_reason, "end_turn");
+    EXPECT(capture.done == 1);
+    EXPECT(capture.errors == 0);
     EXPECT(strstr(server.requests[0], "POST /v1/projects/proj-1/locations/us-east5/"
                                       "publishers/anthropic/models/claude-sonnet@20250929:"
                                       "streamRawPredict HTTP") != NULL);

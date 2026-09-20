@@ -156,7 +156,6 @@ e2e_scenarios = [
     'oneshot_signal_interrupt',
     'oneshot_text',
     'oneshot_tool',
-    'vertex',
 ]
 
 python = find_program('python3')

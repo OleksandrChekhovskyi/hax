@@ -1,7 +1,7 @@
 # PR 37 implementation notes
 
 Each numbered section describes one independently committed change from `pr-37-review-plan.md`.
-The first eleven changes are implemented here; the remaining review items are still pending.
+The first twelve changes are implemented here; the remaining review items are still pending.
 
 ## 1. Redact Vertex authentication secrets from HTTP traces
 
@@ -739,3 +739,42 @@ prompt-length message; the fixtures remain synthetic because no live backend was
 Consolidate tests at their owning modules: migrate the remaining Vertex e2e and C-wire assertions,
 drop the private servers already replaced by `tests/loopback.h`, and finish the missing regression
 coverage from the plan's test checklist.
+
+## 12. Consolidate Vertex request tests
+
+### Problem
+
+Vertex coverage was split between a C test that only exercised error paths and a Python e2e script
+that duplicated the private HTTP server pattern. The plan asks for at most one slim
+construct-and-successful-request check in C, with the e2e script dropped after its unique
+assertions move into it.
+
+### Changes
+
+- Convert the C `test_stream_raw_predict` into the single successful-request check: a loopback SSE
+  200 stream carries the full message sequence, and the test asserts the streamed text, an
+  `end_turn` completion, and zero errors alongside the existing URL, auth, body-shape, version, and
+  `max_tokens` assertions preserved from the e2e script.
+- Delete `tests/e2e/test_vertex.py` and remove its registration from `tests/meson.build`. Its
+  one-shot exit code is covered by the other e2e scenarios; its request-shape and streaming
+  assertions now live in the C check.
+- Drop the already-covered default-provider assertion from `test_def_registered`; the registry
+  test owns that property.
+- Remove the now-unused `error_log`/`log_error` helpers from the Vertex test.
+
+No production code changes. The unified loopback fixture is the only server implementation in the
+Vertex tests.
+
+### Validation
+
+- `scripts/check.sh test providers/vertex providers/vertex_auth` passed.
+- `make tests` passed all 120 tests (one fewer than before: the e2e/vertex scenario is gone) with
+  the external-network and credential guard; `make lint` and `git diff --check` passed.
+- ASan/UBSan and TSan setup remain blocked by the missing sanitizer runtime libraries listed in
+  change 1; no sanitizer pass is claimed.
+
+### Next change
+
+Complete the documentation and small-cleanup section: delete the unused `cache_default` field,
+clean up remaining narrative comments, add Vertex to the README with its retained settings and
+exact model IDs, move and tighten the Vertex changelog entry, and run the final validation pass.
