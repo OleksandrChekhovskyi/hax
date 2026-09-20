@@ -128,7 +128,7 @@ static const struct provider_def DEFS[] = {
         /* Vertex signs and validates thinking blocks like the first-party Messages API. */
         .strict_signatures = 1,
         .cache = "on",
-        .thinking_mode = "adaptive",
+        .thinking_mode = "prefer-adaptive",
         .catalog_id = "google-vertex-anthropic",
         .payload_hint = "vertex AI caps a request around 30 MB — trim context or images (or "
                         "compact with /compact) before it fills",

@@ -27,6 +27,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Fixed
 
+- Vertex uses budget thinking for catalog-listed budget-only Claude models instead of forcing
+  adaptive thinking; unlisted models retain the adaptive default.
 - Vertex OAuth client secrets, refresh tokens, and access tokens are redacted from HTTP traces,
   including form-encoded credentials and echoed error bodies.
 - `config.json` and `state.json` are now written with a trailing newline, matching `auth.json`

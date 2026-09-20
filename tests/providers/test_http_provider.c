@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <curl/curl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -17,6 +18,7 @@
 #include "diag.h"
 #include "effort.h"
 #include "harness.h"
+#include "loopback.h"
 #include "provider.h"
 #include "xalloc.h"
 #include "providers/http_provider.h"
@@ -331,7 +333,10 @@ static void write_catalog_fixture(void)
           "\"claude-budget\": {\"provider\": {\"npm\": \"@ai-sdk/anthropic\"},"
           " \"reasoning_options\": [{\"type\": \"budget_tokens\"}]},"
           "\"gemini-hint\": {\"provider\": {\"npm\": \"@ai-sdk/google\"}},"
-          "\"think-hint\": {\"interleaved\": {\"field\": \"reasoning_content\"}}}}}",
+          "\"think-hint\": {\"interleaved\": {\"field\": \"reasoning_content\"}}}},"
+          "\"google-vertex-anthropic\": {\"models\": {\"claude-budget@default\": {"
+          "\"limit\": {\"output\": 8192},"
+          "\"reasoning_options\": [{\"type\": \"budget_tokens\"}]}}}}",
           f);
     fclose(f);
 }
@@ -438,6 +443,62 @@ static void test_model_wire_routing(void)
     EXPECT(log.n_errors == 9); /* every canned reply is a 400 */
     provider->destroy(provider);
     EXPECT(config_load(NULL) == 0);
+}
+
+static void test_vertex_thinking_follows_catalog(void)
+{
+    write_catalog_fixture();
+    struct loopback server = {
+        .response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
+        .n_requests = 3,
+    };
+    int port = loopback_listen(&server);
+    EXPECT(port > 0);
+    if (port <= 0)
+        return;
+
+    struct config_snapshot *saved = config_snapshot_take();
+    char *base_url = xasprintf("http://127.0.0.1:%d", port);
+    config_set_override("providers.vertex.base_url", base_url);
+    free(base_url);
+    config_set_override("providers.vertex.project", "test-project");
+    config_set_override("providers.vertex.location", "us-east5");
+    config_set_override("providers.vertex.access_token", "test-token");
+    struct provider *provider = provider_construct(provider_find("vertex"));
+    EXPECT(provider != NULL);
+    if (!provider)
+        goto out_server;
+    int rc = loopback_serve(&server);
+    EXPECT(rc == 0);
+    if (rc != 0)
+        goto out_provider;
+
+    struct item items[] = {{.kind = ITEM_USER_MESSAGE, .text = "hello"}};
+    struct context context = {.items = items, .n_items = 1};
+    struct error_log log = {0};
+    provider->stream(provider, &context, "claude-budget@default", log_error, &log, NULL, NULL);
+    context.effort = "high";
+    provider->stream(provider, &context, "claude-budget@default", log_error, &log, NULL, NULL);
+    context.effort = NULL;
+    provider->stream(provider, &context, "claude-unlisted@default", log_error, &log, NULL, NULL);
+    loopback_stop(&server);
+    EXPECT(atomic_load(&server.served) == 3);
+    EXPECT(log.n_errors == 3);
+    for (int i = 0; i < 2; i++) {
+        EXPECT(strstr(server.requests[i], "\"thinking\":{\"type\":\"enabled\"") != NULL);
+        EXPECT(strstr(server.requests[i], "\"budget_tokens\":8191") != NULL);
+        EXPECT(strstr(server.requests[i], "\"adaptive\"") == NULL);
+        EXPECT(strstr(server.requests[i], "\"output_config\"") == NULL);
+    }
+    EXPECT(strstr(server.requests[2], "\"thinking\":{\"type\":\"adaptive\"") != NULL);
+    EXPECT(strstr(server.requests[2], "\"budget_tokens\"") == NULL);
+    EXPECT(strstr(server.requests[2], "\"output_config\"") == NULL);
+
+out_provider:
+    provider->destroy(provider);
+out_server:
+    loopback_stop(&server);
+    config_snapshot_restore(saved);
 }
 
 /* The def-declared Messages defaults reach the request: prefer-adaptive thinking gives a model
@@ -1023,12 +1084,17 @@ static void test_unsupported_protocol_reported(void)
 int main(void)
 {
     signal(SIGPIPE, SIG_IGN);
+    EXPECT(curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK);
+    config_set_override("catalog.refresh", "0");
+    setenv("NO_PROXY", "127.0.0.1,localhost", 1);
+    setenv("no_proxy", "127.0.0.1,localhost", 1);
     test_list_efforts_wiring();
     test_messages_efforts_follow_thinking_mode();
     test_api_override_moves_wire();
     test_metadata_api_override();
     test_model_wire_routing();
     test_messages_defaults_follow_def();
+    test_vertex_thinking_follows_catalog();
     test_auth_source_stream();
     test_auth_source_logged_out();
     test_payload_hint();
@@ -1038,5 +1104,8 @@ int main(void)
     test_config_only_routing_without_catalog_id();
     test_catalog_routing_warning();
     test_unsupported_protocol_reported();
+    catalog_shutdown();
+    config_free();
+    curl_global_cleanup();
     T_REPORT();
 }

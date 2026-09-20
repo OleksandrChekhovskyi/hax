@@ -1,7 +1,7 @@
 # PR 37 implementation notes
 
 Each numbered section describes one independently committed change from `pr-37-review-plan.md`.
-The first two changes are implemented here; the remaining review items are still pending.
+The first three changes are implemented here; the remaining review items are still pending.
 
 ## 1. Redact Vertex authentication secrets from HTTP traces
 
@@ -153,3 +153,56 @@ No public Google endpoint or real credential was used for these checks.
 Change Vertex's thinking mode from `adaptive` to `prefer-adaptive`, with behavioral coverage for
 both catalog-listed budget-only models and unlisted models. Configuration, endpoint resolution,
 metadata API semantics, and auth hardening remain separate pending pieces.
+
+## 3. Follow model metadata when selecting Vertex thinking mode
+
+### Problem
+
+Vertex's `adaptive` default pins thinking mode and bypasses the catalog. A Claude model whose
+catalog entry declares only token-budget reasoning therefore receives an unsupported adaptive
+request. A selected effort can also cause an inappropriate `output_config` to be sent.
+
+### Changes
+
+- Change the shipped Vertex definition to `thinking_mode = "prefer-adaptive"`. This is the only
+  production-code change: the existing resolver already follows known model capabilities and
+  falls back to adaptive thinking when capabilities are unknown.
+- Add a behavioral regression in `tests/providers/test_http_provider.c`, constructing the actual
+  shipped Vertex provider and capturing its outgoing request bodies with the shared loopback
+  fixture. The test does not simply assert the definition's string value.
+- Extend the private catalog fixture with a synthetic budget-only Vertex model and an 8192-token
+  output limit. Check that it receives `thinking.type = "enabled"`, a budget of 8191 tokens, and
+  neither adaptive thinking nor `output_config`, both without an effort and with `high` selected.
+- Check that an unlisted model still receives adaptive thinking without choosing an effort first.
+  This preserves the intended fallback and distinguishes `prefer-adaptive` from `auto`.
+- Disable catalog refresh in the HTTP-provider test process, use run-tier overrides for the fake
+  Vertex credentials and endpoint, bypass proxies for loopback, and shut down the catalog before
+  global curl cleanup. The test restores its configuration overrides after destroying the provider.
+- Add an Unreleased changelog entry describing the corrected default.
+
+Explicit user thinking-mode overrides retain their existing precedence. No resolver, auth, endpoint,
+or metadata-API behavior is otherwise changed.
+
+### Validation
+
+- With the original `adaptive` definition, the new regression failed seven assertions on the
+  budget-only requests. The unlisted-model adaptive fallback already passed.
+- After the one-line fix, all five focused targets passed:
+
+  ```sh
+  scripts/check.sh test providers/http_provider providers/vertex providers/anthropic_body \
+      providers/registry e2e/vertex
+  ```
+
+- `make tests` passed all 121 tests with the external-network guard described in change 1.
+- `make lint` and `git diff --check` passed; both touched C files were formatted.
+- Retried ASan/UBSan and TSan setup. Both remain blocked by the missing sanitizer runtime
+  libraries listed in change 1; no sanitizer pass is claimed.
+
+All request checks used a synthetic catalog and loopback responses, not live Google Cloud.
+
+### Next change
+
+Implement explicit `metadata_api = "none"` semantics: disable default remote model listing and
+probing while preserving deliberately installed catalog listing, and cover this in the generic
+HTTP-provider tests.
