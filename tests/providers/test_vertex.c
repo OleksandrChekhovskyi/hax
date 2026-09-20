@@ -20,6 +20,7 @@
 #include "providers/http_provider.h"
 #include "providers/registry.h"
 #include "providers/vertex.h"
+#include "providers/vertex_auth.h"
 #include "providers/wire.h"
 #include "system/fs.h"
 
@@ -464,6 +465,24 @@ static void test_availability_reasons(void)
 
     free(marker);
     free(gcloud);
+
+    /* CLOUDSDK_CONFIG supplies the ADC file when GOOGLE_APPLICATION_CREDENTIALS is unset. */
+    config_set_override("providers.vertex.access_token", NULL);
+    unsetenv("GOOGLE_APPLICATION_CREDENTIALS");
+    setenv("CLOUDSDK_CONFIG", dir, 1);
+    char *cloud_adc = xasprintf("%s/application_default_credentials.json", dir);
+    EXPECT(fs_write_atomic(cloud_adc, user, strlen(user), 0) == 0);
+    free(cloud_adc);
+    expect_availability(1, NULL);
+
+    /* A configured file wins even when CLOUDSDK_CONFIG holds a valid one. */
+    setenv("GOOGLE_APPLICATION_CREDENTIALS", adc, 1);
+    EXPECT(fs_write_atomic(adc, malformed, strlen(malformed), 0) == 0);
+    expect_availability(0, "ADC unavailable");
+    EXPECT(fs_write_atomic(adc, user, strlen(user), 0) == 0);
+    expect_availability(1, NULL);
+    unsetenv("CLOUDSDK_CONFIG");
+
     config_snapshot_restore(saved);
     unsetenv("GOOGLE_APPLICATION_CREDENTIALS");
     free(adc);

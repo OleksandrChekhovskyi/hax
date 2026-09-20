@@ -26,11 +26,19 @@ char *spawn_shell_cmd_force_utf8(char *shell_cmd);
  * program succeeding — and -1 when forking failed. */
 int spawn_detached(const char *const *argv);
 
+/* Optional cancellation callback for spawn_capture_stdout_checked: a non-zero return aborts the
+ * capture, killing and reaping the child. */
+typedef int (*spawn_cancel_cb)(void *user);
+
 /* Run `argv` directly, with stdin and stderr redirected to /dev/null, and capture stdout.
  * Return malloc'd output of 1..max_bytes on a zero exit status, or NULL on error, timeout,
- * overflow, or empty output. `argv`, argv[0], and out_len must be non-NULL and timeout_ms must be
- * positive. The child is killed and reaped on timeout or overflow. On success, *out_len receives
- * the output size. */
+ * overflow, empty output, or cancellation. `argv`, argv[0], and out_len must be non-NULL and
+ * timeout_ms must be positive. The child is killed and reaped on timeout, overflow, or
+ * cancellation. On success, *out_len receives the output size. */
+char *spawn_capture_stdout_checked(const char *const *argv, size_t max_bytes, int timeout_ms,
+                                   spawn_cancel_cb cancel, void *cancel_user, size_t *out_len);
+
+/* spawn_capture_stdout_checked without a cancellation callback. */
 char *spawn_capture_stdout(const char *const *argv, size_t max_bytes, int timeout_ms,
                            size_t *out_len);
 

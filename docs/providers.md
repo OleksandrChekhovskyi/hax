@@ -209,7 +209,12 @@ Credentials are a Google access token, resolved in this order:
 4. Any other ADC shape (service account, workload identity federation, impersonation) — resolved
    through `gcloud auth application-default print-access-token`.
 
-Explicit access tokens are used as-is and cannot be refreshed.
+Explicit access tokens are used as-is and cannot be refreshed. Compute Engine, Cloud Run, and GKE
+metadata-server default credentials are not yet supported: hax requires an explicit token or an ADC
+file. Refresh is bounded: hax never contacts OAuth or runs gcloud when refresh is disallowed, stops
+renewals promptly when a caller is cancelled, and reuses a rejected literal token only after it
+actually changes. A rejected refresh reports `invalid_grant` with re-authentication advice when the
+server names it.
 
 There is no `/login`; Google owns that flow (`gcloud auth application-default login`).
 For file credentials, hax reads `GOOGLE_APPLICATION_CREDENTIALS` when set, otherwise

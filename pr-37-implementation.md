@@ -1,7 +1,7 @@
 # PR 37 implementation notes
 
 Each numbered section describes one independently committed change from `pr-37-review-plan.md`.
-The first seven changes are implemented here; the remaining review items are still pending.
+The first eight changes are implemented here; the remaining review items are still pending.
 
 ## 1. Redact Vertex authentication secrets from HTTP traces
 
@@ -491,3 +491,88 @@ All endpoint requests used loopback fixtures; no Google endpoint or credential w
 Extract Google ADC credential loading, token renewal, auth operations, and credential status into
 `vertex_auth.{c,h}` before hardening non-refresh preparation, cancellation, recovery, and ADC
 support.
+
+## 8. Extract Vertex authentication and harden refresh semantics
+
+### Problem
+
+Credential loading, renewal, and the auth hooks lived inside `vertex.c` next to endpoint
+construction, so availability had to construct and inspect a private credential session. `tick`
+was ignored during credential acquisition, so a cancelled caller could not stop an OAuth refresh
+or a slow gcloud child. Preparation without refresh could still spawn network work after a reload,
+could report success for an expired renewable token, and a rejected literal was always resent even
+when it had not changed. The refresh exchange also lacked error classification, gcloud's alternate
+Cloud SDK directory was ignored, and a non-object ADC root leaked.
+
+### Changes
+
+- Move credential loading, token renewal, the credential session, and all `http_auth_ops` into a
+  new `vertex_auth.{c,h}` module. Endpoint construction and picker presentation stay in `vertex.c`.
+  Register the source in `meson.build` and mirror the boundary in tests, which now include the auth
+  header directly. `vertex.c` keeps the project/location validation and build hooks only.
+- Expose `vertex_auth_local_status()` as the picker's credential check. It classifies an explicit
+  token, a native `authorized_user` file, and delegated kinds, reports `ADC unavailable` or
+  `gcloud not found`, and never performs network I/O or executes gcloud.
+- Honor `CLOUDSDK_CONFIG` as the alternate Cloud SDK directory when
+  `GOOGLE_APPLICATION_CREDENTIALS` is unset. Release a successfully parsed non-object ADC JSON root
+  instead of leaking it.
+- With refresh disallowed, preparation only reloads local credentials: it never performs HTTP or
+  spawns gcloud, fails when no usable token exists, and fails for a token the early-refresh margin
+  marks as already expiring instead of reporting success. A fresh token remains usable.
+- Thread `tick` through the OAuth HTTP request and use a cancelled call's tick when dispatching to
+  gcloud. Extend the shared process facility with `spawn_capture_stdout_checked()`, which polls an
+  optional cancellation callback and kills and reaps the child on cancellation or failure, keeping
+  the existing bounded timeout and output behavior.
+- Refuse to resend an unchanged rejected literal token; permit exactly one retry when re-reading
+  the literal produces a different token. A renewable source recovers with one forced renewal
+  regardless of whether the new token string changed. Re-classify the credential source after each
+  reload so a transition to a literal never runs the old exchange with missing ADC fields.
+- Trim and reject whitespace-only gcloud output. Apply the early-refresh margin to user tokens as
+  well: a token not outliving the margin is treated as already expiring.
+- Classify refresh errors: preserve bounded OAuth details, distinguish server-reported
+  `invalid_grant` (with re-authentication advice) from transport and other server failures, and
+  never expose credential values in diagnostics.
+- Narrow the documented ADC scope: metadata-server credentials (Compute Engine, Cloud Run, GKE)
+  are an explicit non-goal of this change. The initial feature supports explicit tokens and file
+  credentials only. Add an Unreleased changelog entry.
+
+### Regression coverage
+
+- Preparation with refresh disallowed and no token fails locally with a bound token endpoint
+  receiving no connection; after one permitted refresh the same call succeeds without further
+  network work.
+- A 1-second user token becomes "already expiring" through the margin, so refresh-disabled
+  preparation fails and no second connection occurs.
+- Rejected literals: unchanged means no resend; an env-visible change allows one retry, then stops.
+- Source transition: a gcloud-delegated source switches to a literal during recovery and adopts it.
+- Whitespace-only gcloud output fails with a "no usable token" diagnostic.
+- A `sleep 30` gcloud stub with an immediately-cancelling tick returns within 5 seconds, proving
+  the child is killed rather than waited out.
+- An OAuth endpoint replying `{"error":"invalid_grant"}` produces a message with the code and
+  re-authentication advice.
+- Credential-path precedence: `CLOUDSDK_CONFIG` supplies the ADC file when the application
+  credential is unset; an explicitly configured file wins even when `CLOUDSDK_CONFIG` is valid.
+- Existing trace-redaction, refresh, recovery, setup-diagnostics, availability, and streaming tests
+  keep passing against the moved module.
+
+### Validation
+
+- All seven focused targets passed before and after the boundary move:
+
+  ```sh
+  scripts/check.sh test providers/vertex providers/vertex_auth providers/http_provider \
+      providers/registry config text/placeholder e2e/vertex
+  ```
+
+- `make tests` passed all 121 tests, including lint (`make lint`) and `git diff --check`.
+- ASan/UBSan and TSan setup were retried and remain blocked by the missing sanitizer runtime
+  libraries listed in change 1; no sanitizer pass is claimed.
+
+No real Google credentials, endpoints, or installed gcloud were used; gcloud was a local test stub.
+
+### Next change
+
+Metadata-server ADC credentials were deliberately deferred and the documentation narrowed
+accordingly. The remaining auth follow-ups are: metadata support; distinguishing absent, unreadable,
+and malformed credential files; and preserving the ADC file across refreshes. Then continue with
+payload-error classification, test consolidation, documentation cleanup, and final validation.

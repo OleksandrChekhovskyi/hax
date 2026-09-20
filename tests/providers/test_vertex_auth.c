@@ -13,7 +13,8 @@
 #include "trace.h"
 #include "xalloc.h"
 #include "providers/http_provider.h"
-#include "providers/vertex.h"
+#include "providers/vertex_auth.h"
+#include "system/clock.h"
 #include "system/fs.h"
 
 static void write_adc(const char *contents)
@@ -28,6 +29,31 @@ static void write_adc(const char *contents)
     setenv("GOOGLE_APPLICATION_CREDENTIALS", path, 1);
     free(path);
 }
+
+static char *gcloud_saved_path;
+
+static void install_gcloud_stub(const char *body)
+{
+    char *dir = t_tempdir();
+    char *stub = xasprintf("%s/gcloud", dir);
+    char *script = xasprintf("#!/bin/sh\n%s\n", body);
+    EXPECT(fs_write_atomic(stub, script, strlen(script), 0) == 0);
+    free(script);
+    EXPECT(chmod(stub, 0700) == 0);
+    free(stub);
+    gcloud_saved_path = t_path_prepend(dir);
+}
+
+static void restore_gcloud_stub(void)
+{
+    if (gcloud_saved_path) {
+        t_path_restore(gcloud_saved_path);
+        gcloud_saved_path = NULL;
+    }
+}
+
+static const char USER_ADC[] = "{\"type\":\"authorized_user\",\"client_id\":\"cid\","
+                               "\"client_secret\":\"secret\",\"refresh_token\":\"refresh\"}";
 
 static void expect_token_redacted(const struct http_auth_source *source, const char *token,
                                   const char *trace_path)
@@ -165,6 +191,201 @@ static void test_gcloud_trace_redaction(const char *trace_path)
     t_path_restore(saved_path);
 }
 
+static void test_prepare_no_refresh(void)
+{
+    struct loopback oauth = {.n_requests = 1};
+    loopback_reply_ok(&oauth, 0, "{\"access_token\":\"no-refresh-token\",\"expires_in\":7200}");
+    oauth.response = oauth.responses[0];
+    int port = loopback_listen(&oauth);
+    EXPECT(port > 0);
+    if (port <= 0)
+        return;
+    char *url = xasprintf("http://127.0.0.1:%d/token", port);
+    setenv("HAX_VERTEX_OAUTH_URL", url, 1);
+    free(url);
+    write_adc(USER_ADC);
+
+    struct http_auth_source source = {0};
+    EXPECT(vertex_auth_source(NULL, &source) == 0);
+    /* Without refresh and without a token, a renewable source fails locally. */
+    EXPECT(source.ops->prepare(source.state, 0, NULL, NULL) == -1);
+    struct pollfd listener = {.fd = oauth.listener_fd, .events = POLLIN};
+    EXPECT(poll(&listener, 1, 0) == 0);
+
+    int rc = loopback_serve(&oauth);
+    EXPECT(rc == 0);
+    if (rc != 0)
+        goto out;
+    EXPECT(source.ops->prepare(source.state, 1, NULL, NULL) == 0);
+    /* The fresh token is reusable without further network access. */
+    EXPECT(source.ops->prepare(source.state, 0, NULL, NULL) == 0);
+    loopback_stop(&oauth);
+    EXPECT(atomic_load(&oauth.served) == 1);
+
+out:
+    source.ops->destroy(source.state);
+    unsetenv("HAX_VERTEX_OAUTH_URL");
+}
+
+/* A token the margin marks as already expiring must fail a refresh-disabled prepare instead of
+ * returning success. */
+static void test_prepare_expired_refuses_network(void)
+{
+    struct loopback oauth = {.n_requests = 1};
+    loopback_reply_ok(&oauth, 0, "{\"access_token\":\"short-lived\",\"expires_in\":1}");
+    oauth.response = oauth.responses[0];
+    int port = loopback_listen(&oauth);
+    EXPECT(port > 0);
+    if (port <= 0)
+        return;
+    char *url = xasprintf("http://127.0.0.1:%d/token", port);
+    setenv("HAX_VERTEX_OAUTH_URL", url, 1);
+    free(url);
+    write_adc(USER_ADC);
+
+    struct http_auth_source source = {0};
+    EXPECT(vertex_auth_source(NULL, &source) == 0);
+    int rc = loopback_serve(&oauth);
+    EXPECT(rc == 0);
+    if (rc != 0)
+        goto out;
+    EXPECT(source.ops->prepare(source.state, 1, NULL, NULL) == 0);
+    /* The early-refresh margin applies to user tokens: a 1s token is already expiring. */
+    EXPECT(source.ops->prepare(source.state, 0, NULL, NULL) == -1);
+    EXPECT(source.ops->prepare(source.state, 0, NULL, NULL) == -1);
+    loopback_stop(&oauth);
+    EXPECT(atomic_load(&oauth.served) == 1); /* only the initial refresh connected */
+
+out:
+    source.ops->destroy(source.state);
+    unsetenv("HAX_VERTEX_OAUTH_URL");
+}
+
+static void test_recover_literal_semantics(void)
+{
+    setenv("GOOGLE_OAUTH_ACCESS_TOKEN", "literal-one", 1);
+    struct http_auth_source source = {0};
+    EXPECT(vertex_auth_source(NULL, &source) == 0);
+    EXPECT(source.ops->prepare(source.state, 1, NULL, NULL) == 0);
+    char **headers = source.ops->headers(source.state, "sid", 1);
+    EXPECT(strstr(headers[0], "Bearer literal-one") != NULL);
+    string_array_free(headers);
+
+    /* An unchanged rejected literal is never resent. */
+    int retried = 0;
+    EXPECT(source.ops->recover(source.state, &retried, NULL, NULL) == 0);
+    EXPECT(retried == 1);
+
+    /* A different literal permits exactly one retry. */
+    setenv("GOOGLE_OAUTH_ACCESS_TOKEN", "literal-two", 1);
+    retried = 0;
+    EXPECT(source.ops->recover(source.state, &retried, NULL, NULL) == 1);
+    EXPECT(retried == 1);
+    headers = source.ops->headers(source.state, "sid", 1);
+    EXPECT(strstr(headers[0], "Bearer literal-two") != NULL);
+    string_array_free(headers);
+    retried = 0;
+    EXPECT(source.ops->recover(source.state, &retried, NULL, NULL) == 0);
+    EXPECT(retried == 1);
+
+    source.ops->destroy(source.state);
+    unsetenv("GOOGLE_OAUTH_ACCESS_TOKEN");
+}
+
+/* Recovery re-reads the source and re-classifies it; a switch to a literal never runs the old
+ * gcloud exchange with missing ADC fields. */
+static void test_recover_source_transitions(void)
+{
+    install_gcloud_stub("printf 'service-token\\n'");
+    write_adc("{\"type\":\"service_account\"}");
+    struct http_auth_source source = {0};
+    EXPECT(vertex_auth_source(NULL, &source) == 0);
+    EXPECT(source.ops->prepare(source.state, 1, NULL, NULL) == 0);
+    char **headers = source.ops->headers(source.state, "sid", 1);
+    EXPECT(strstr(headers[0], "Bearer service-token") != NULL);
+    string_array_free(headers);
+
+    /* The source switches to a literal: the forced renewal adopts it without gcloud. */
+    setenv("GOOGLE_OAUTH_ACCESS_TOKEN", "literal-new", 1);
+    int retried = 0;
+    EXPECT(source.ops->recover(source.state, &retried, NULL, NULL) == 1);
+    EXPECT(retried == 1);
+    headers = source.ops->headers(source.state, "sid", 1);
+    EXPECT(strstr(headers[0], "Bearer literal-new") != NULL);
+    string_array_free(headers);
+
+    source.ops->destroy(source.state);
+    unsetenv("GOOGLE_OAUTH_ACCESS_TOKEN");
+    restore_gcloud_stub();
+}
+
+static void test_gcloud_blank_output_rejected(void)
+{
+    install_gcloud_stub("printf '\\n   \\n'");
+    write_adc("{\"type\":\"service_account\"}");
+    struct http_auth_source source = {0};
+    EXPECT(vertex_auth_source(NULL, &source) == 0);
+    EXPECT(source.ops->prepare(source.state, 1, NULL, NULL) == -1);
+    char *message = source.ops->unauthorized_message(source.state);
+    EXPECT(strstr(message, "no usable token") != NULL);
+    free(message);
+    source.ops->destroy(source.state);
+    restore_gcloud_stub();
+}
+
+static int cancel_now(void *user)
+{
+    (void)user;
+    return 1;
+}
+
+/* A cancelled gcloud capture must abort promptly and reap the child instead of waiting out the
+ * bounded timeout. */
+static void test_gcloud_refresh_cancellable(void)
+{
+    install_gcloud_stub("sleep 30");
+    write_adc("{\"type\":\"service_account\"}");
+    struct http_auth_source source = {0};
+    EXPECT(vertex_auth_source(NULL, &source) == 0);
+    long started = monotonic_ms();
+    EXPECT(source.ops->prepare(source.state, 1, cancel_now, NULL) == -1);
+    long elapsed_ms = monotonic_ms() - started;
+    EXPECT(elapsed_ms < 5000);
+    source.ops->destroy(source.state);
+    restore_gcloud_stub();
+}
+
+static void test_oauth_invalid_grant(void)
+{
+    static const char body[] = "{\"error\":\"invalid_grant\"}";
+    char *error_response = xasprintf("HTTP/1.1 401 Unauthorized\r\nContent-Length: %zu\r\n"
+                                     "Connection: close\r\n\r\n%s",
+                                     strlen(body), body);
+    struct loopback oauth = {.n_requests = 1, .responses = {error_response}};
+    int port = loopback_start(&oauth);
+    EXPECT(port > 0);
+    if (port <= 0)
+        goto out_server;
+    char *url = xasprintf("http://127.0.0.1:%d/token", port);
+    setenv("HAX_VERTEX_OAUTH_URL", url, 1);
+    free(url);
+    write_adc(USER_ADC);
+
+    struct http_auth_source source = {0};
+    EXPECT(vertex_auth_source(NULL, &source) == 0);
+    EXPECT(source.ops->prepare(source.state, 1, NULL, NULL) == -1);
+    char *message = source.ops->unauthorized_message(source.state);
+    EXPECT(strstr(message, "invalid_grant") != NULL);
+    EXPECT(strstr(message, "auth application-default login") != NULL);
+    free(message);
+    source.ops->destroy(source.state);
+    unsetenv("HAX_VERTEX_OAUTH_URL");
+    loopback_stop(&oauth);
+
+out_server:
+    free(error_response);
+}
+
 static void test_setup_diagnostics(void)
 {
     char *dir = t_tempdir();
@@ -216,6 +437,13 @@ int main(void)
     test_oauth_trace_redaction(trace_path);
     test_gcloud_trace_redaction(trace_path);
     test_setup_diagnostics();
+    test_prepare_no_refresh();
+    test_prepare_expired_refuses_network();
+    test_recover_literal_semantics();
+    test_recover_source_transitions();
+    test_gcloud_blank_output_rejected();
+    test_gcloud_refresh_cancellable();
+    test_oauth_invalid_grant();
     free(trace_path);
     config_free();
     curl_global_cleanup();

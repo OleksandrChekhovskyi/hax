@@ -305,6 +305,12 @@ int spawn_wait_child_timeout(pid_t pid, int timeout_ms)
 char *spawn_capture_stdout(const char *const *argv, size_t max_bytes, int timeout_ms,
                            size_t *out_len)
 {
+    return spawn_capture_stdout_checked(argv, max_bytes, timeout_ms, NULL, NULL, out_len);
+}
+
+char *spawn_capture_stdout_checked(const char *const *argv, size_t max_bytes, int timeout_ms,
+                                   spawn_cancel_cb cancel, void *cancel_user, size_t *out_len)
+{
     if (!argv || !argv[0] || !out_len || timeout_ms <= 0) {
         errno = EINVAL;
         return NULL;
@@ -352,6 +358,10 @@ char *spawn_capture_stdout(const char *const *argv, size_t max_bytes, int timeou
     int capture_failed = 0;
     char chunk[65536];
     for (;;) {
+        if (cancel && cancel(cancel_user)) {
+            capture_failed = 1;
+            break;
+        }
         long remaining_ms = deadline_ms - monotonic_ms();
         if (remaining_ms <= 0) {
             capture_failed = 1;

@@ -21,6 +21,7 @@
 #include "providers/opencode.h"
 #include "providers/openrouter.h"
 #include "providers/vertex.h"
+#include "providers/vertex_auth.h"
 
 /* The OpenCode gateway pins a conversation to one upstream by its session header — Go rejects
  * requests without one — and attributes usage by client. */
