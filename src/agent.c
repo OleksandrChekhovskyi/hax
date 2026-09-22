@@ -518,6 +518,15 @@ static void clear_resume_state(struct agent_state *state)
     state->compaction_deferred = 0;
 }
 
+/* The live path reads the context limit and rates only after the pre-request wait has let the
+ * model probe land; a resumed record reads them before any request, so callers settle metadata
+ * first. Without reported tokens nothing consults metadata, so there is nothing to wait for. */
+static void settle_resumed_metadata(struct provider *provider, const struct agent_session *session)
+{
+    if (provider && agent_session_has_reported_usage(session))
+        model_meta_wait_ms(provider, MODEL_META_WAIT_MS);
+}
+
 /* A resumed record can end mid-story; re-offer the empty-send continue its run lost with the
  * process. A clean tail is indistinguishable from a finished conversation, so only marked or
  * unanswered tails re-arm the affordance. */
@@ -701,6 +710,7 @@ void agent_resume_session(struct agent_state *state, const char *path)
                          session->n_tools);
     transcript_log_append(state->transcript, session->items, session->n_items);
 
+    settle_resumed_metadata(state->provider, session);
     derive_resume_state(state);
     replay_user_turn(state->render, session, "resumed", state->provider);
 }
@@ -1129,8 +1139,10 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
     render.spinner = spinner_new("working...");
     render.md = markdown_enabled() ? md_new(md_emit_to_disp, &render.disp, md_cols()) : NULL;
     /* Replay needs the live renderer initialized first. */
-    if (resumed_item_count > 0)
+    if (resumed_item_count > 0) {
+        settle_resumed_metadata(current_provider, &session);
         replay_user_turn(&render, &session, "resumed", current_provider);
+    }
     struct input *input = input_new();
     /* Prompt recall remains readable when recording is disabled. */
     input_history_open_default(input, recording_enabled);

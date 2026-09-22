@@ -141,6 +141,10 @@ enum agent_resume_tail agent_session_resume_tail(const struct agent_session *ses
  * is ignored. */
 long agent_session_last_context_tokens(const struct agent_session *session);
 
+/* Whether any footer that model metadata can price or bound reports input or output tokens:
+ * live footers, inherited or not, and retired footers of this session's own turns. */
+int agent_session_has_reported_usage(const struct agent_session *session);
+
 struct turn;
 
 struct agent_absorb_result {

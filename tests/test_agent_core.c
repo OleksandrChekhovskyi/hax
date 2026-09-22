@@ -771,6 +771,43 @@ static void test_last_context_tokens(void)
     agent_session_free(&session);
 }
 
+static void test_has_reported_usage(void)
+{
+    struct agent_session session = {0};
+    EXPECT(!agent_session_has_reported_usage(&session));
+
+    agent_session_add_user(&session, "hello");
+    EXPECT(!agent_session_has_reported_usage(&session));
+
+    /* A duration-only footer neither prices nor bounds anything. */
+    struct stream_usage unreported = {-1, -1, -1, -1, -1, -1};
+    agent_session_add_turn_usage(&session, NULL, &unreported, 1000, NULL, ITEM_ORIGIN_NONE);
+    EXPECT(!agent_session_has_reported_usage(&session));
+
+    struct stream_usage usage = reported_usage();
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
+    EXPECT(agent_session_has_reported_usage(&session));
+
+    /* An undone turn's footer still prices the session. */
+    agent_session_retire(&session, 1);
+    EXPECT(session.n_items == 1);
+    EXPECT(agent_session_has_reported_usage(&session));
+    agent_session_free(&session);
+
+    /* A fork's inherited footer bounds the live window but, once undone, neither prices nor
+     * bounds anything. */
+    struct agent_session fork = {0};
+    agent_session_add_user(&fork, "hello");
+    agent_session_add_turn_usage(&fork, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
+    for (size_t i = 0; i < fork.n_items; i++)
+        fork.items[i].inherited = 1;
+    EXPECT(agent_session_has_reported_usage(&fork));
+    agent_session_retire(&fork, 0);
+    EXPECT(fork.n_items == 0);
+    EXPECT(!agent_session_has_reported_usage(&fork));
+    agent_session_free(&fork);
+}
+
 int main(void)
 {
     test_session_append();
@@ -803,5 +840,6 @@ int main(void)
     test_mark_interrupt_empty_session();
     test_resume_tail_classification();
     test_last_context_tokens();
+    test_has_reported_usage();
     T_REPORT();
 }

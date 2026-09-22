@@ -462,6 +462,28 @@ long agent_session_last_context_tokens(const struct agent_session *session)
     return -1;
 }
 
+static int footer_reports_tokens(const struct item *item)
+{
+    if (item->kind != ITEM_TURN_USAGE || !item->usage)
+        return 0;
+    const struct stream_usage *usage = &item->usage->usage;
+    return usage->input_tokens >= 0 || usage->output_tokens >= 0;
+}
+
+int agent_session_has_reported_usage(const struct agent_session *session)
+{
+    for (size_t i = 0; i < session->n_items; i++) {
+        if (footer_reports_tokens(&session->items[i]))
+            return 1;
+    }
+    /* A retired inherited footer is neither this session's context nor its bill. */
+    for (size_t i = 0; i < session->n_retired; i++) {
+        if (!session->retired[i].inherited && footer_reports_tokens(&session->retired[i]))
+            return 1;
+    }
+    return 0;
+}
+
 /* An ordinary session then stores nothing extra, while a renamed provider or a gguf path still
  * reads as the banner showed it. */
 static char *label_if_distinct(const char *label, const char *wire_id)
