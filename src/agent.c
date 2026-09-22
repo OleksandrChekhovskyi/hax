@@ -518,22 +518,14 @@ static void clear_resume_state(struct agent_state *state)
     state->compaction_deferred = 0;
 }
 
-/* The live path reads the context limit and rates only after the pre-request wait has let the
- * model probe land; a resumed record reads them before any request, so callers settle metadata
- * first. Without reported tokens nothing consults metadata, so there is nothing to wait for. */
-static void settle_resumed_metadata(struct provider *provider, const struct agent_session *session)
-{
-    if (provider && agent_session_has_reported_usage(session))
-        model_meta_wait_ms(provider, MODEL_META_WAIT_MS);
-}
-
 /* A resumed record can end mid-story; re-offer the empty-send continue its run lost with the
  * process. A clean tail is indistinguishable from a finished conversation, so only marked or
  * unanswered tails re-arm the affordance. */
-static void derive_resume_state(struct agent_state *state)
+static void apply_resumed(struct agent_state *state, const struct agent_resumed *resumed)
 {
     clear_resume_state(state);
-    switch (agent_session_resume_tail(state->session)) {
+    state->session_log = resumed->session_log;
+    switch (resumed->tail) {
     case AGENT_RESUME_TAIL_MARKED:
     case AGENT_RESUME_TAIL_USER:
         state->resume_reason = AGENT_RESUME_INTERRUPTED;
@@ -542,12 +534,7 @@ static void derive_resume_state(struct agent_state *state)
     case AGENT_RESUME_TAIL_EMPTY:
         break;
     }
-    /* The record may end over the compaction threshold — a pause stops before the loop's
-     * compact seam — so the run that continues it owes the pre-send pass. */
-    if (state->provider && state->session->model)
-        state->compaction_deferred =
-            compact_should_auto(agent_session_last_context_tokens(state->session),
-                                model_meta_context(state->provider, state->session->model));
+    state->compaction_deferred = resumed->compact_owed;
 }
 
 /* Interactive front for agent_finalize_tasks: announce the stop before the kill. */
@@ -625,7 +612,7 @@ static int is_replay_anchor(const struct item *item)
 static void replay_user_turn(struct render_ctx *render, const struct agent_session *session,
                              const char *heading, const struct provider *provider)
 {
-    if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))
+    if (session->n_items == 0 || !isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))
         return;
 
     size_t anchor_index = 0;
@@ -672,7 +659,7 @@ void agent_resume_session(struct agent_state *state, const char *path)
     (void)session_touch(path);
     struct agent_session *session = state->session;
     struct session_loaded loaded;
-    if (session_load_all(path, &loaded) != 0 || loaded.n_items == 0) {
+    if (session_load_all(path, &loaded) != 0) {
         session_loaded_free(&loaded);
         ui_error("could not read session");
         /* Replace the picker's stale newline count with the error line's committed newline. */
@@ -694,24 +681,13 @@ void agent_resume_session(struct agent_state *state, const char *path)
 
     /* Keep tracked temporary files when replacing history; resumable branches may share paths. */
     agent_session_adopt(session, &loaded);
-
-    /* Re-evaluate recording after provider restoration; the starting provider may have disabled
-     * it. Recorded metadata lets session_log_set_meta stage a failed restore as a switch. */
-    if (agent_recording_enabled(state->provider))
-        state->session_log =
-            session_log_resume(path, loaded.meta.provider, loaded.meta.model, loaded.meta.effort,
-                               loaded.meta.preset, session->n_items);
-    /* Stage a failed selection restore without changing the file until a turn is appended. */
-    session_log_set_meta(state->session_log, agent_provider_log_name(state->provider),
-                         session->model, session->model_label, session->effort,
-                         config_str("preset"));
-    session_loaded_free(&loaded);
     transcript_log_reset(state->transcript, session->system_prompt, session->tools,
                          session->n_tools);
-    transcript_log_append(state->transcript, session->items, session->n_items);
-
-    settle_resumed_metadata(state->provider, session);
-    derive_resume_state(state);
+    struct agent_resumed resumed;
+    agent_session_prepare_resumed(session, state->provider, path, &loaded.meta, state->transcript,
+                                  &resumed);
+    session_loaded_free(&loaded);
+    apply_resumed(state, &resumed);
     replay_user_turn(state->render, session, "resumed", state->provider);
 }
 
@@ -1110,24 +1086,16 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
     int recording_enabled = agent_recording_enabled(current_provider);
 
     /* Load resumed history before initializing dependent views and logs. An unreadable file is
-     * fatal because starting fresh would use the wrong context. */
-    size_t resumed_item_count = 0;
-    /* Preserve recorded metadata until the resumed log is opened; flags may have overridden the
-     * live selection. */
-    struct session_meta resume_metadata;
-    memset(&resume_metadata, 0, sizeof(resume_metadata));
+     * fatal because starting fresh would use the wrong context. The record's own selection
+     * stays loaded until the log is bound; flags may have overridden it. */
+    struct session_loaded loaded = {0};
     if (options->resume_path) {
-        struct session_loaded loaded;
         if (session_load_all(options->resume_path, &loaded) != 0) {
             hax_err("could not resume session '%s'", options->resume_path);
             agent_session_free(&session);
             return 1;
         }
         agent_session_adopt(&session, &loaded);
-        resume_metadata = loaded.meta;
-        memset(&loaded.meta, 0, sizeof(loaded.meta));
-        session_loaded_free(&loaded);
-        resumed_item_count = session.n_items;
     }
 
     putchar('\n');
@@ -1138,17 +1106,6 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
                                 .show_reasoning = reasoning_visible()};
     render.spinner = spinner_new("working...");
     render.md = markdown_enabled() ? md_new(md_emit_to_disp, &render.disp, md_cols()) : NULL;
-    /* Replay needs the live renderer initialized first. */
-    if (resumed_item_count > 0) {
-        settle_resumed_metadata(current_provider, &session);
-        replay_user_turn(&render, &session, "resumed", current_provider);
-    }
-    struct input *input = input_new();
-    /* Prompt recall remains readable when recording is disabled. */
-    input_history_open_default(input, recording_enabled);
-    input_set_modal_completer(input, &file_mention_completer);
-    input_set_paste_hook(input, capture_paste, NULL);
-    input_set_paste_filter(input, filter_paste, NULL);
     /* Transcript logging is optional; its API is NULL-safe. */
     struct transcript_log *transcript =
         transcript_log_open(session.system_prompt, session.tools, session.n_tools);
@@ -1158,29 +1115,27 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
                                 .provider = current_provider,
                                 .transcript = transcript,
                                 .render = &render};
+    if (options->resume_path) {
+        struct agent_resumed resumed;
+        agent_session_prepare_resumed(&session, current_provider, options->resume_path,
+                                      &loaded.meta, transcript, &resumed);
+        session_loaded_free(&loaded);
+        apply_resumed(&state, &resumed);
+        replay_user_turn(&render, &session, "resumed", current_provider);
+    } else if (recording_enabled) {
+        state.session_log =
+            session_log_open(agent_provider_log_name(current_provider), session.model,
+                             session.model_label, session.effort, config_str("preset"));
+    }
+    struct input *input = input_new();
+    /* Prompt recall remains readable when recording is disabled. */
+    input_history_open_default(input, recording_enabled);
+    input_set_modal_completer(input, &file_mention_completer);
+    input_set_paste_hook(input, capture_paste, NULL);
+    input_set_paste_filter(input, filter_paste, NULL);
     /* Raw mode clears IEXTEN, so Ctrl-O does not trigger BSD/macOS VDISCARD. */
     input_bind_modal_key(input, INPUT_KEY_CTRL('O'), show_history_cb, &state);
     input_bind_modal_key(input, INPUT_KEY_CTRL('T'), show_transcript_cb, &state);
-    /* Resume continues the existing log without rewriting restored items; the API is NULL-safe
-     * when recording is disabled. */
-    if (recording_enabled)
-        state.session_log =
-            options->resume_path
-                ? session_log_resume(options->resume_path, resume_metadata.provider,
-                                     resume_metadata.model, resume_metadata.effort,
-                                     resume_metadata.preset, resumed_item_count)
-                : session_log_open(agent_provider_log_name(current_provider), session.model,
-                                   session.model_label, session.effort, config_str("preset"));
-    /* Stage flag-overridden selection metadata; it reaches disk only with the next turn. */
-    if (options->resume_path)
-        session_log_set_meta(state.session_log, agent_provider_log_name(current_provider),
-                             session.model, session.model_label, session.effort,
-                             config_str("preset"));
-    session_meta_free(&resume_metadata);
-    if (resumed_item_count > 0) {
-        transcript_log_append(transcript, session.items, session.n_items);
-        derive_resume_state(&state);
-    }
     /* Capture terminal state before raw input; non-TTY initialization is a no-op. */
     interrupt_init();
     interrupt_set_fatal_signal_hook(bash_shell_pgids_kill);

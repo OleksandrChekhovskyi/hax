@@ -6,6 +6,7 @@
 #include "agent_core.h"
 #include "harness.h"
 #include "provider.h"
+#include "session.h"
 #include "tool.h"
 #include "turn.h"
 #include "xalloc.h"
@@ -808,6 +809,58 @@ static void test_has_reported_usage(void)
     agent_session_free(&fork);
 }
 
+/* Binding a record reads what its tail owes the run and reopens its file only when recording. */
+static void test_prepare_resumed(void)
+{
+    struct provider mock = {.name = "mock"};
+    struct session_meta recorded = {.provider = "mock", .model = "mock-model"};
+    struct agent_session session = {0};
+    session.model = xstrdup("mock-model");
+    unsetenv("HAX_PROVIDER");
+    setenv("HAX_NO_SESSION", "1", 1);
+    setenv("HAX_CONTEXT_LIMIT", "1000", 1);
+    setenv("HAX_COMPACT_THRESHOLD", "85", 1);
+
+    struct agent_resumed resumed;
+    agent_session_add_user(&session, "hello");
+    agent_session_prepare_resumed(&session, &mock, "/nonexistent/session.jsonl", &recorded, NULL,
+                                  &resumed);
+    EXPECT(resumed.session_log == NULL);
+    EXPECT(resumed.tail == AGENT_RESUME_TAIL_USER);
+    EXPECT(!resumed.compact_owed);
+
+    /* A record left over the threshold owes the pre-send compaction. */
+    agent_session_append(&session,
+                         (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("done")});
+    struct stream_usage usage = reported_usage();
+    usage.input_tokens = 900;
+    usage.output_tokens = 50;
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
+    agent_session_prepare_resumed(&session, &mock, "/nonexistent/session.jsonl", &recorded, NULL,
+                                  &resumed);
+    EXPECT(resumed.tail == AGENT_RESUME_TAIL_CLEAN);
+    EXPECT(resumed.compact_owed);
+
+    /* Recording on: the record's own file is reopened for appending. */
+    setenv("HAX_NO_SESSION", "0", 1);
+    char *dir = t_tempdir();
+    char *path = xasprintf("%s/session.jsonl", dir);
+    /* Append never creates a file: a removed session must not come back headerless. */
+    FILE *file = fopen(path, "w");
+    EXPECT(file != NULL);
+    if (file)
+        fclose(file);
+    agent_session_prepare_resumed(&session, &mock, path, &recorded, NULL, &resumed);
+    EXPECT(resumed.session_log != NULL);
+    session_log_close(resumed.session_log);
+    free(path);
+
+    unsetenv("HAX_NO_SESSION");
+    unsetenv("HAX_CONTEXT_LIMIT");
+    unsetenv("HAX_COMPACT_THRESHOLD");
+    agent_session_free(&session);
+}
+
 int main(void)
 {
     test_session_append();
@@ -841,5 +894,6 @@ int main(void)
     test_resume_tail_classification();
     test_last_context_tokens();
     test_has_reported_usage();
+    test_prepare_resumed();
     T_REPORT();
 }

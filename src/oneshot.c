@@ -37,6 +37,7 @@ struct oneshot_state {
     /* Resumed history, live and undone, precedes this run's own records. */
     size_t run_from_item;
     size_t run_from_retired;
+    int compact_owed; /* the resumed record ends over the threshold: compact before sending */
     long started_ms;
     long context_tokens;
     int json;           /* stream conversation records as JSONL on stdout */
@@ -238,51 +239,38 @@ static void emit_json_result(struct oneshot_state *state, const struct agent_loo
     emit_json_record(state, record);
 }
 
-static int resume_session(struct oneshot_state *state, const char *path,
-                          struct session_meta *metadata, size_t *item_count)
-{
-    if (!path)
-        return 0;
-
-    struct session_loaded loaded;
-    if (session_load_all(path, &loaded) != 0) {
-        hax_err("could not resume session '%s'", path);
-        return -1;
-    }
-
-    agent_session_adopt(&state->session, &loaded);
-    *metadata = loaded.meta;
-    memset(&loaded.meta, 0, sizeof(loaded.meta));
-    session_loaded_free(&loaded);
-    *item_count = state->session.n_items;
-    return 0;
-}
-
-static void open_logs(struct oneshot_state *state, const struct hax_opts *options,
-                      const struct session_meta *resume_metadata, size_t resumed_item_count)
+/* Resolve the session, fresh or resumed, with its logs. Returns -1 after printing a diagnostic. */
+static int open_session(struct oneshot_state *state, const struct hax_opts *options)
 {
     struct agent_session *session = &state->session;
     struct provider *provider = state->provider;
 
+    struct session_loaded loaded = {0};
+    if (options->resume_path) {
+        if (session_load_all(options->resume_path, &loaded) != 0) {
+            hax_err("could not resume session '%s'", options->resume_path);
+            return -1;
+        }
+        agent_session_adopt(session, &loaded);
+    }
     state->transcript =
         transcript_log_open(session->system_prompt, session->tools, session->n_tools);
-    if (agent_recording_enabled(provider)) {
+    if (options->resume_path) {
+        struct agent_resumed resumed;
+        agent_session_prepare_resumed(session, provider, options->resume_path, &loaded.meta,
+                                      state->transcript, &resumed);
+        session_loaded_free(&loaded);
+        state->session_log = resumed.session_log;
+        state->compact_owed = resumed.compact_owed;
+    } else if (agent_recording_enabled(provider)) {
         state->session_log =
-            options->resume_path
-                ? session_log_resume(options->resume_path, resume_metadata->provider,
-                                     resume_metadata->model, resume_metadata->effort,
-                                     resume_metadata->preset, resumed_item_count)
-                : session_log_open(agent_provider_id(provider), session->model,
-                                   session->model_label, session->effort, config_str("preset"));
-        /* The banner announces the id before the first provider call, so the file must exist by
-         * then: a run killed outright never reaches the exit hint. */
-        session_log_begin(state->session_log);
-    }
-    if (options->resume_path)
-        session_log_set_meta(state->session_log, agent_provider_id(provider), session->model,
+            session_log_open(agent_provider_log_name(provider), session->model,
                              session->model_label, session->effort, config_str("preset"));
-    if (resumed_item_count > 0)
-        transcript_log_append(state->transcript, session->items, session->n_items);
+    }
+    /* The banner announces the id before the first provider call, so the file must exist by
+     * then: a run killed outright never reaches the exit hint. */
+    session_log_begin(state->session_log);
+    return 0;
 }
 
 static void print_start_banner(const struct oneshot_state *state, const struct hax_opts *options)
@@ -427,15 +415,9 @@ static int start_run(struct oneshot_state *state, const char *prompt,
         return -1;
     }
 
-    struct session_meta resume_metadata = {0};
-    size_t resumed_item_count = 0;
-    if (resume_session(state, options->resume_path, &resume_metadata, &resumed_item_count) != 0) {
-        session_meta_free(&resume_metadata);
+    if (open_session(state, options) != 0)
         return -1;
-    }
-    open_logs(state, options, &resume_metadata, resumed_item_count);
-    session_meta_free(&resume_metadata);
-    state->run_from_item = resumed_item_count;
+    state->run_from_item = state->session.n_items;
     state->run_from_retired = state->session.n_retired;
 
     /* Resumed history is context, not this run's events: stream only what the run appends. */
@@ -602,12 +584,9 @@ int oneshot_run(struct provider *provider, const char *prompt, const struct hax_
     interrupt_clear_requests();
     interrupt_install_request_signal_handlers();
 
-    /* The loop compacts only at continuation seams it reaches itself, and a pause stops just
-     * before that check, so continuing a resumed run owns the pre-request pass — the REPL's
-     * deferred compaction before a send. */
-    if (options->resume_path &&
-        compact_should_auto(agent_session_last_context_tokens(&state.session),
-                            model_meta_context(provider, state.session.model)))
+    /* The REPL's deferred compaction before a send: the loop compacts only at seams it reaches
+     * itself, so a resumed record over the threshold is compacted here. */
+    if (state.compact_owed)
         auto_compact(&state);
 
     struct agent_loop_result loop_result;

@@ -7,6 +7,7 @@
 #include "agent_env.h"
 #include "agent_usage.h"
 #include "buf.h"
+#include "compact.h"
 #include "config.h"
 #include "diag.h"
 #include "effort.h"
@@ -482,6 +483,37 @@ int agent_session_has_reported_usage(const struct agent_session *session)
             return 1;
     }
     return 0;
+}
+
+/* The live path reads the context limit and rates only after the pre-request wait has let the
+ * model probe land; a resumed record reads them before any request. Without reported tokens
+ * nothing consults metadata, so there is nothing to wait for. */
+static void settle_resumed_metadata(struct provider *provider, const struct agent_session *session)
+{
+    if (provider && agent_session_has_reported_usage(session))
+        model_meta_wait_ms(provider, MODEL_META_WAIT_MS);
+}
+
+void agent_session_prepare_resumed(struct agent_session *session, struct provider *provider,
+                                   const char *path, const struct session_meta *recorded,
+                                   struct transcript_log *transcript, struct agent_resumed *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (agent_recording_enabled(provider))
+        out->session_log = session_log_resume(path, recorded->provider, recorded->model,
+                                              recorded->effort, recorded->preset, session->n_items);
+    /* Staged until the next append, so an unused override leaves the file as recorded. */
+    session_log_set_meta(out->session_log, agent_provider_log_name(provider), session->model,
+                         session->model_label, session->effort, config_str("preset"));
+    transcript_log_append(transcript, session->items, session->n_items);
+
+    settle_resumed_metadata(provider, session);
+    out->tail = agent_session_resume_tail(session);
+    /* A pause stops before the loop's compact seam, so the record may end over the threshold;
+     * the run that continues it owes the pre-send pass. */
+    if (provider && session->model)
+        out->compact_owed = compact_should_auto(agent_session_last_context_tokens(session),
+                                                model_meta_context(provider, session->model));
 }
 
 /* An ordinary session then stores nothing extra, while a renamed provider or a gguf path still

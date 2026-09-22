@@ -134,6 +134,26 @@ enum agent_resume_tail {
 
 enum agent_resume_tail agent_session_resume_tail(const struct agent_session *session);
 
+struct session_log;
+struct session_meta;
+struct transcript_log;
+
+/* What an adopted record leaves for the run continuing it. */
+struct agent_resumed {
+    struct session_log *session_log; /* owned; NULL unless recording reopened the file */
+    enum agent_resume_tail tail;
+    int compact_owed; /* the record ends over the compaction threshold: compact before sending */
+};
+
+/* Bind an adopted record at `path` to the run continuing it: reopen the file for appending when
+ * recording is enabled, stage the live selection there, append the history to `transcript`,
+ * settle model metadata, and read what the record's tail owes the run. `recorded` is the file's
+ * own selection, against which the staged one reads as an override. Call after the provider is
+ * final and before anything consults model metadata. */
+void agent_session_prepare_resumed(struct agent_session *session, struct provider *provider,
+                                   const char *path, const struct session_meta *recorded,
+                                   struct transcript_log *transcript, struct agent_resumed *out);
+
 /* Context-window size of the newest request a usage footer records in the model-visible
  * context, or -1 when none reports it. This is the recorded counterpart of a live run's
  * latest-usage snapshot, for continuation decisions such as compact-before-send; compaction's
