@@ -10,6 +10,7 @@
 #include "agent.h"
 #include "agent_core.h"
 #include "agent_stats.h"
+#include "buf.h"
 #include "catalog.h"
 #include "config.h"
 #include "file_mention.h"
@@ -24,6 +25,7 @@
 #include "render/render_ctx.h"
 #include "terminal/ansi.h"
 #include "terminal/clipboard.h"
+#include "terminal/input_core.h"
 #include "terminal/picker.h"
 #include "terminal/theme.h"
 #include "terminal/ui.h"
@@ -47,7 +49,7 @@ struct slash_command {
     const char *name;
     const char *alias;
     const char *summary;
-    int accepts_argument;
+    const char *usage; /* argument placeholder such as "[preset]"; NULL takes no argument */
     enum command_display display;
     void (*handler)(const struct command_call *call);
 };
@@ -88,8 +90,8 @@ static const struct slash_command COMMANDS[] = {
     {
         .name = "new",
         .alias = "clear",
-        .summary = "start a fresh conversation (optional: preset)",
-        .accepts_argument = 1,
+        .summary = "start a fresh conversation",
+        .usage = "[preset]",
         .handler = run_new,
     },
     {
@@ -100,15 +102,15 @@ static const struct slash_command COMMANDS[] = {
     },
     {
         .name = "undo",
-        .summary = "revert conversation to before an earlier message (optional: user turns back)",
-        .accepts_argument = 1,
+        .summary = "revert conversation to before an earlier message",
+        .usage = "[turns back]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_undo,
     },
     {
         .name = "fork",
-        .summary = "branch a new session before an earlier message (optional: user turns back)",
-        .accepts_argument = 1,
+        .summary = "branch a new session before an earlier message",
+        .usage = "[turns back]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_fork,
     },
@@ -132,30 +134,30 @@ static const struct slash_command COMMANDS[] = {
     },
     {
         .name = "preset",
-        .summary = "switch to a config-defined preset (optional: name)",
-        .accepts_argument = 1,
+        .summary = "switch to a config-defined preset",
+        .usage = "[name]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_preset,
     },
     /* `/preset save` would conflict with a preset named "save". */
     {
         .name = "preset-save",
-        .summary = "save the current selection as a preset (name, optional tint)",
-        .accepts_argument = 1,
+        .summary = "save the current selection as a preset",
+        .usage = "<name> [tint]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_preset_save,
     },
     {
         .name = "config",
-        .summary = "view or change settings (optional: key value)",
-        .accepts_argument = 1,
+        .summary = "view or change settings",
+        .usage = "[key [value]]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_config,
     },
     {
         .name = "compact",
-        .summary = "summarize the conversation to free up context (optional: focus instructions)",
-        .accepts_argument = 1,
+        .summary = "summarize the conversation to free up context",
+        .usage = "[focus]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_compact,
     },
@@ -166,8 +168,8 @@ static const struct slash_command COMMANDS[] = {
     },
     {
         .name = "tasks",
-        .summary = "list background tasks (optional: kill <id>... | kill all)",
-        .accepts_argument = 1,
+        .summary = "list background tasks",
+        .usage = "[kill <id>... | kill all]",
         .handler = run_tasks,
     },
     {
@@ -182,15 +184,15 @@ static const struct slash_command COMMANDS[] = {
     },
     {
         .name = "login",
-        .summary = "log in to a provider account, managed by hax (optional: provider)",
-        .accepts_argument = 1,
+        .summary = "log in to a provider account, managed by hax",
+        .usage = "[provider]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_login,
     },
     {
         .name = "logout",
-        .summary = "log out and remove a hax-managed login (optional: provider)",
-        .accepts_argument = 1,
+        .summary = "log out and remove a hax-managed login",
+        .usage = "[provider]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_logout,
     },
@@ -226,6 +228,11 @@ static const struct shortcut SHORTCUTS[] = {
 };
 #define N_SHORTCUTS (sizeof(SHORTCUTS) / sizeof(SHORTCUTS[0]))
 
+static int is_name_byte(unsigned char c)
+{
+    return isalnum(c) || c == '_' || c == '-';
+}
+
 static int parse_command(const char *line, struct parsed_command *parsed)
 {
     if (!line || line[0] != '/')
@@ -234,9 +241,8 @@ static int parse_command(const char *line, struct parsed_command *parsed)
     const char *name = line + 1;
     const char *cursor = name;
     while (*cursor && !isspace((unsigned char)*cursor)) {
-        unsigned char c = (unsigned char)*cursor;
         /* Restrict command-shaped input so paths and terminal control bytes pass through. */
-        if (!isalnum(c) && c != '_' && c != '-')
+        if (!is_name_byte((unsigned char)*cursor))
             return 0;
         cursor++;
     }
@@ -280,7 +286,7 @@ enum slash_result slash_dispatch(const char *line, struct agent_state *state)
         result = SLASH_UNKNOWN;
         goto raw_output;
     }
-    if (parsed.argument && !command->accepts_argument) {
+    if (parsed.argument && !command->usage) {
         ui_error("/%s takes no arguments.", parsed.name);
         result = SLASH_BAD_USAGE;
         goto raw_output;
@@ -288,7 +294,7 @@ enum slash_result slash_dispatch(const char *line, struct agent_state *state)
 
     struct command_call call = {
         .state = state,
-        .argument = command->accepts_argument ? parsed.argument : NULL,
+        .argument = command->usage ? parsed.argument : NULL,
     };
     command->handler(&call);
     if (command->display == COMMAND_DISPLAY_RAW)
@@ -300,6 +306,155 @@ raw_output:
     disp_sync_external_line(disp);
     free(parsed.name);
     return result;
+}
+
+/* ---------- name completion and prompt hints ---------- */
+
+/* Every command name and alias starting with `prefix`, in registry order. */
+struct name_matches {
+    const char *names[2 * N_COMMANDS];
+    size_t count;
+};
+
+static void collect_name_matches(const char *prefix, struct name_matches *matches)
+{
+    size_t prefix_len = strlen(prefix);
+
+    matches->count = 0;
+    for (size_t i = 0; i < N_COMMANDS; i++) {
+        const char *spellings[] = {COMMANDS[i].name, COMMANDS[i].alias};
+        for (size_t j = 0; j < 2; j++) {
+            const char *spelling = spellings[j];
+            if (spelling && strncmp(spelling, prefix, prefix_len) == 0)
+                matches->names[matches->count++] = spelling;
+        }
+    }
+}
+
+static size_t shared_prefix_len(const struct name_matches *matches)
+{
+    size_t shared = strlen(matches->names[0]);
+
+    for (size_t i = 1; i < matches->count; i++) {
+        size_t common = 0;
+        while (common < shared && matches->names[i][common] == matches->names[0][common])
+            common++;
+        shared = common;
+    }
+    return shared;
+}
+
+char *slash_complete_name(const char *prefix)
+{
+    struct name_matches matches;
+
+    collect_name_matches(prefix, &matches);
+    if (matches.count == 1)
+        return xasprintf("%s ", matches.names[0]);
+    if (matches.count == 0)
+        return NULL;
+
+    size_t shared = shared_prefix_len(&matches);
+    if (shared <= strlen(prefix))
+        return NULL;
+    return xasprintf("%.*s", (int)shared, matches.names[0]);
+}
+
+char *slash_name_candidates(const char *prefix)
+{
+    struct name_matches matches;
+    struct buf list;
+
+    collect_name_matches(prefix, &matches);
+    if (matches.count < 2)
+        return NULL;
+
+    buf_init(&list);
+    for (size_t i = 0; i < matches.count; i++) {
+        buf_append_str(&list, i > 0 ? " /" : "/");
+        buf_append_str(&list, matches.names[i]);
+    }
+    return buf_steal(&list);
+}
+
+/* The command name occupies [1, name_end) of a line that starts with a slash. Return 0 for input
+ * that is not command-shaped, such as a path, so no completion or hint applies. */
+static int scan_command_name(const char *line, size_t *name_end)
+{
+    if (line[0] != '/')
+        return 0;
+
+    size_t end = 1;
+    while (is_name_byte((unsigned char)line[end]))
+        end++;
+    if (line[end] != '\0' && !isspace((unsigned char)line[end]))
+        return 0;
+    *name_end = end;
+    return 1;
+}
+
+static int match_command_name(const char *buffer, size_t buffer_len, size_t cursor, size_t *start,
+                              size_t *end, void *user)
+{
+    (void)user;
+
+    size_t name_end;
+    if (cursor > buffer_len || !scan_command_name(buffer, &name_end) || cursor != name_end)
+        return 0;
+    *start = 1;
+    *end = name_end;
+    return 1;
+}
+
+static char *complete_command_name(const char *name, void *user)
+{
+    (void)user;
+    return slash_complete_name(name);
+}
+
+/* Two spaces set the list apart from the name it follows. A bare slash matches every command,
+ * which /help already lists in full instead of a truncated row. */
+static char *list_command_names(const char *name, void *user)
+{
+    (void)user;
+
+    if (*name == '\0')
+        return xstrdup("  see /help");
+    char *names = slash_name_candidates(name);
+    if (!names)
+        return NULL;
+    char *listing = xasprintf("  %s", names);
+    free(names);
+    return listing;
+}
+
+const struct input_completer slash_completer = {
+    .match = match_command_name,
+    .complete = complete_command_name,
+    .candidates = list_command_names,
+};
+
+/* Placeholders appear once the name is complete and before any argument, so a mistyped or
+ * partial name draws nothing. */
+char *slash_hint(const char *line)
+{
+    size_t name_end;
+
+    if (!scan_command_name(line, &name_end) || strchr(line, '\n'))
+        return NULL;
+
+    char *name = xasprintf("%.*s", (int)(name_end - 1), line + 1);
+    const struct slash_command *command = find_command(name);
+    free(name);
+    if (!command || !command->usage)
+        return NULL;
+
+    const char *argument = line + name_end;
+    while (isspace((unsigned char)*argument))
+        argument++;
+    if (*argument)
+        return NULL;
+    return xasprintf("%s%s", line[name_end] == '\0' ? " " : "", command->usage);
 }
 
 /* ---------- /new ---------- */
@@ -863,6 +1018,13 @@ static void print_command_row(const char *name, const char *summary, int dimmed,
     free(label);
 }
 
+static char *command_help_summary(const struct slash_command *command)
+{
+    if (!command->usage)
+        return xstrdup(command->summary);
+    return xasprintf("%s %s", command->summary, command->usage);
+}
+
 static void run_help(const struct command_call *call)
 {
     (void)call;
@@ -888,7 +1050,9 @@ static void run_help(const struct command_call *call)
 
     fputs(ANSI_BOLD "commands" ANSI_RESET "\n", stdout);
     for (size_t i = 0; i < N_COMMANDS; i++) {
-        print_command_row(COMMANDS[i].name, COMMANDS[i].summary, 0, description_column, columns);
+        char *summary = command_help_summary(&COMMANDS[i]);
+        print_command_row(COMMANDS[i].name, summary, 0, description_column, columns);
+        free(summary);
         if (COMMANDS[i].alias) {
             char *summary = xasprintf("alias for /%s", COMMANDS[i].name);
             print_command_row(COMMANDS[i].alias, summary, 1, description_column, columns);

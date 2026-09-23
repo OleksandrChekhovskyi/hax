@@ -12,6 +12,7 @@
 #include "tool.h"
 #include "xalloc.h"
 #include "render/render_ctx.h"
+#include "terminal/input_core.h"
 
 /* Link-only tool stubs; slash tests never invoke them. */
 static char *stub_run(const char *args, struct tool_run_ctx *ctx)
@@ -261,6 +262,7 @@ static void test_help_lists_commands_and_shortcuts(void)
 
     EXPECT(strstr(out, "commands") != NULL);
     EXPECT(strstr(out, "/new") != NULL);
+    EXPECT(strstr(out, "start a fresh conversation [preset]") != NULL);
     EXPECT(strstr(out, "/clear") != NULL);
     EXPECT(strstr(out, "/help") != NULL);
     EXPECT(strstr(out, "shortcuts") != NULL);
@@ -747,6 +749,144 @@ static void test_compaction_seed_history_rules(void)
     agent_session_free(&s);
 }
 
+/* ---------- name completion and prompt hints ---------- */
+
+static void expect_completion(const char *prefix, const char *expected)
+{
+    char *completion = slash_complete_name(prefix);
+
+    if (!expected)
+        EXPECT(completion == NULL);
+    else if (!completion)
+        FAIL("no completion for '%s', expected '%s'", prefix, expected);
+    else
+        EXPECT_STR_EQ(completion, expected);
+    free(completion);
+}
+
+static void test_complete_name_like_a_shell(void)
+{
+    expect_completion("mo", "model ");
+    expect_completion("help", "help ");
+    expect_completion("cle", "clear ");
+    expect_completion("pre", "preset");
+    expect_completion("preset", NULL);
+    expect_completion("preset-", "preset-save ");
+    expect_completion("c", NULL);
+    expect_completion("", NULL);
+    expect_completion("zzz", NULL);
+}
+
+static void expect_candidates(const char *prefix, const char *expected)
+{
+    char *candidates = slash_name_candidates(prefix);
+
+    if (!expected)
+        EXPECT(candidates == NULL);
+    else if (!candidates)
+        FAIL("no candidates for '%s', expected '%s'", prefix, expected);
+    else
+        EXPECT_STR_EQ(candidates, expected);
+    free(candidates);
+}
+
+static void test_name_candidates_list_ambiguous_prefixes(void)
+{
+    expect_candidates("c", "/clear /config /compact /copy");
+    expect_candidates("preset", "/preset /preset-save");
+    expect_candidates("mo", NULL);
+    expect_candidates("zzz", NULL);
+
+    char *all = slash_name_candidates("");
+    EXPECT(all && strncmp(all, "/new /clear /resume ", 20) == 0);
+    free(all);
+
+    char *listing = slash_completer.candidates("pre", slash_completer.user);
+    EXPECT(listing != NULL);
+    if (listing)
+        EXPECT_STR_EQ(listing, "  /preset /preset-save");
+    free(listing);
+
+    char *bare = slash_completer.candidates("", slash_completer.user);
+    EXPECT(bare != NULL);
+    if (bare)
+        EXPECT_STR_EQ(bare, "  see /help");
+    free(bare);
+}
+
+static int match_name(const char *buffer, size_t len, size_t cursor, size_t *start, size_t *end)
+{
+    return slash_completer.match(buffer, len, cursor, start, end, slash_completer.user);
+}
+
+static void test_completer_matches_name_at_cursor(void)
+{
+    size_t start = 999;
+    size_t end = 999;
+
+    EXPECT(match_name("/mo", 3, 3, &start, &end) == 1);
+    EXPECT(start == 1);
+    EXPECT(end == 3);
+
+    EXPECT(match_name("/", 1, 1, &start, &end) == 1);
+    EXPECT(start == 1);
+    EXPECT(end == 1);
+
+    EXPECT(match_name("/mo x", 5, 3, &start, &end) == 1);
+    EXPECT(end == 3);
+
+    EXPECT(match_name("/mo x", 5, 5, &start, &end) == 0);
+    EXPECT(match_name("/mo", 3, 2, &start, &end) == 0);
+    EXPECT(match_name("/home/x", 7, 7, &start, &end) == 0);
+    EXPECT(match_name("hello", 5, 5, &start, &end) == 0);
+    EXPECT(match_name("@foo", 4, 4, &start, &end) == 0);
+    EXPECT(match_name("", 0, 0, &start, &end) == 0);
+}
+
+static void expect_hint(const char *line, const char *expected)
+{
+    char *hint = slash_hint(line);
+
+    if (!expected)
+        EXPECT(hint == NULL);
+    else if (!hint)
+        FAIL("no hint for '%s', expected '%s'", line, expected);
+    else
+        EXPECT_STR_EQ(hint, expected);
+    free(hint);
+}
+
+static void test_hint_shows_argument_placeholder(void)
+{
+    expect_hint("/new", " [preset]");
+    expect_hint("/new ", "[preset]");
+    expect_hint("/new   ", "[preset]");
+    expect_hint("/preset", " [name]");
+    expect_hint("/clear", " [preset]");
+}
+
+static void test_hint_stays_quiet_otherwise(void)
+{
+    expect_hint("/mo", NULL);
+    expect_hint("/pre", NULL);
+    expect_hint("/", NULL);
+    expect_hint("/zzz", NULL);
+    expect_hint("/zzz x", NULL);
+    expect_hint("/model", NULL);
+    expect_hint("/model ", NULL);
+    expect_hint("/model foo", NULL);
+    expect_hint("/new foo", NULL);
+}
+
+static void test_hint_ignores_non_commands(void)
+{
+    expect_hint("", NULL);
+    expect_hint("hello", NULL);
+    expect_hint("/home/x", NULL);
+    expect_hint("/mo\n", NULL);
+    expect_hint("/new\nfoo", NULL);
+}
+
 int main(void)
 {
     /* Row-layout and row-presence assertions depend on these; the variables leak in from any
@@ -780,5 +920,11 @@ int main(void)
     test_resume_no_picker_repairs_newline_state();
     test_undo_fork_empty_conversation();
     test_compaction_seed_history_rules();
+    test_complete_name_like_a_shell();
+    test_name_candidates_list_ambiguous_prefixes();
+    test_completer_matches_name_at_cursor();
+    test_hint_shows_argument_placeholder();
+    test_hint_stays_quiet_otherwise();
+    test_hint_ignores_non_commands();
     T_REPORT();
 }

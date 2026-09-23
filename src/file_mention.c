@@ -232,7 +232,8 @@ static char *pick_file_mention(const char *mention, void *user)
     return file_mention_pick(mention + 1);
 }
 
-const struct input_modal_completer file_mention_completer = {
+const struct input_completer file_mention_completer = {
     .match = match_file_mention,
-    .pick = pick_file_mention,
+    .complete = pick_file_mention,
+    .modal = 1,
 };

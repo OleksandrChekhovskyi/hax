@@ -191,6 +191,19 @@ static void test_modal_key_table_full(void)
     input_free(in);
 }
 
+static void test_completer_slots_fill_in_order(void)
+{
+    struct input *in = input_new();
+    struct input_completer completers[INPUT_COMPLETERS_MAX + 1] = {0};
+
+    for (int i = 0; i < INPUT_COMPLETERS_MAX; i++) {
+        EXPECT(input_add_completer(in, &completers[i]) == 0);
+        EXPECT(in->completers[i] == &completers[i]);
+    }
+    EXPECT(input_add_completer(in, &completers[INPUT_COMPLETERS_MAX]) == -1);
+    input_free(in);
+}
+
 int main(void)
 {
     test_history_load_is_read_only();
@@ -202,5 +215,6 @@ int main(void)
     test_modal_key_bind_and_rebind();
     test_modal_key_rejects_printable();
     test_modal_key_table_full();
+    test_completer_slots_fill_in_order();
     T_REPORT();
 }

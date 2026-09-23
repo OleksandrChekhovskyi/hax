@@ -30,6 +30,7 @@
 #include "terminal/width.h"
 #include "text/utf8.h"
 #include "text/utf8_sanitize.h"
+#include "text/width.h"
 
 #define ESC_TIMEOUT_MS 50
 
@@ -357,6 +358,21 @@ static int edit_area_rows(int terminal_rows)
     return cap;
 }
 
+/* Drawn only with the cursor at the buffer end, which lets leave_edit_area erase it from the
+ * cursor. A response to a keystroke already pressed wins over the hint. */
+static char *ghost_text(struct input *in)
+{
+    if (in->cursor != in->len)
+        return NULL;
+    if (in->exit_armed && in->len == 0)
+        return xstrdup("ctrl+c again to exit");
+    if (in->candidates)
+        return xstrdup(in->candidates);
+    if (in->hint_fn)
+        return in->hint_fn(in->buf, in->hint_user);
+    return NULL;
+}
+
 /* Batch each repaint under DEC synchronized output and draw before clearing stale rows,
  * avoiding partial or blank frames on terminals that ignore synchronization. Clip tall buffers
  * because relative cursor motion cannot reach rows pushed into scrollback; clipping requires two
@@ -406,16 +422,20 @@ static void paint(struct input *in)
                           in->display_columns, paint_emit, &context, NULL);
     }
 
-    /* Ghost text after the empty prompt; the cursor repositioning below lands on top of it. */
-    in->hint_painted = 0;
-    if (in->exit_armed && in->len == 0) {
-        static const char exit_hint[] = "ctrl+c again to exit";
-        if (prompt_width + (int)sizeof(exit_hint) - 1 <= in->display_columns) {
+    /* Ghost text after the buffer end; the cursor repositioning below lands on top of it. */
+    in->ghost_painted = 0;
+    if (!clipped && layout.end_col < in->display_columns) {
+        char *ghost = ghost_text(in);
+        if (ghost && *ghost) {
+            char *fitted =
+                truncate_for_display(ghost, (size_t)(in->display_columns - layout.end_col));
             buf_append_str(&frame, ANSI_DIM);
-            buf_append_str(&frame, exit_hint);
+            buf_append_str(&frame, fitted);
             buf_append_str(&frame, ANSI_BOLD_OFF);
-            in->hint_painted = 1;
+            in->ghost_painted = 1;
+            free(fitted);
         }
+        free(ghost);
     }
 
     if (clipped) {
@@ -539,10 +559,13 @@ static void leave_edit_area(struct input *in)
     int down = in->painted_rows - 1 - in->painted_cursor_row;
     if (down > 0)
         printf(ANSI_CSI "%dB", down);
+    if (in->ghost_painted)
+        fputs(ANSI_ERASE_LINE, stdout);
     fputs("\r\n", stdout);
     fflush(stdout);
     in->painted_cursor_row = 0;
     in->painted_rows = 0;
+    in->ghost_painted = 0;
 }
 
 /* Reset the accent around each continuation stripe so attributes do not nest. */
@@ -603,6 +626,7 @@ static void render_submitted(struct input *in)
 
     in->painted_cursor_row = 0;
     in->painted_rows = 0;
+    in->ghost_painted = 0;
 }
 
 /* Erase line-by-line because erase-below from the top of the screen can push a stale
@@ -628,7 +652,7 @@ static void erase_edit_area(struct input *in)
     buf_free(&frame);
     in->painted_cursor_row = 0;
     in->painted_rows = 0;
-    in->hint_painted = 0;
+    in->ghost_painted = 0;
 }
 
 /* ---------------- $EDITOR escape ---------------- */
@@ -745,9 +769,9 @@ static int run_modal_key(struct input *in, unsigned char key)
     return 1;
 }
 
-/* ---------------- Tab modal completion ---------------- */
+/* ---------------- Tab completion ---------------- */
 
-static void complete_modal(struct input *in, size_t start, size_t end)
+static char *span_dup(const struct input *in, size_t start, size_t end)
 {
     size_t token_len = end - start;
     char *token = xmalloc(token_len + 1);
@@ -755,18 +779,52 @@ static void complete_modal(struct input *in, size_t start, size_t end)
     if (token_len > 0)
         memcpy(token, in->buf + start, token_len);
     token[token_len] = '\0';
+    return token;
+}
 
-    erase_edit_area(in);
-    disable_raw_mode(in);
+static void complete_span(struct input *in, const struct input_completer *completer, size_t start,
+                          size_t end)
+{
+    char *token = span_dup(in, start, end);
+    char *replacement;
 
-    char *replacement = in->completer->pick(token, in->completer->user);
-    free(token);
-
-    enable_raw_mode(in);
-    refresh_terminal_size(in);
+    if (completer->modal) {
+        erase_edit_area(in);
+        disable_raw_mode(in);
+        replacement = completer->complete(token, completer->user);
+        enable_raw_mode(in);
+        refresh_terminal_size(in);
+    } else {
+        replacement = completer->complete(token, completer->user);
+    }
     if (replacement && *replacement)
         input_core_replace_span(in, start, end, replacement);
+    else if (in->last_key_was_tab && completer->candidates)
+        in->candidates = completer->candidates(token, completer->user);
+    free(token);
     free(replacement);
+}
+
+/* A completer that matches owns the token even when it has nothing to add. */
+static void complete_at_cursor(struct input *in)
+{
+    for (size_t i = 0; i < INPUT_COMPLETERS_MAX && in->completers[i]; i++) {
+        const struct input_completer *completer = in->completers[i];
+        size_t start, end;
+
+        if (!completer->match(in->buf, in->len, in->cursor, &start, &end, completer->user))
+            continue;
+        if (start <= end && end <= in->len)
+            complete_span(in, completer, start, end);
+        break;
+    }
+    in->last_key_was_tab = 1;
+}
+
+static void clear_candidates(struct input *in)
+{
+    free(in->candidates);
+    in->candidates = NULL;
 }
 
 /* ---------------- reverse / forward incremental search ---------------- */
@@ -1261,9 +1319,21 @@ int input_bind_modal_key(struct input *in, unsigned char key, void (*fn)(void *u
     return 0;
 }
 
-void input_set_modal_completer(struct input *in, const struct input_modal_completer *completer)
+int input_add_completer(struct input *in, const struct input_completer *completer)
 {
-    in->completer = completer;
+    for (size_t i = 0; i < INPUT_COMPLETERS_MAX; i++) {
+        if (!in->completers[i]) {
+            in->completers[i] = completer;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+void input_set_hint(struct input *in, char *(*fn)(const char *buf, void *user), void *user)
+{
+    in->hint_fn = fn;
+    in->hint_user = user;
 }
 
 void input_set_paste_hook(struct input *in, char *(*fn)(void *user), void *user)
@@ -1331,6 +1401,8 @@ char *input_readline(struct input *in, const char *prompt)
     free(in->draft);
     in->draft = NULL;
     in->exit_armed = 0;
+    in->last_key_was_tab = 0;
+    clear_candidates(in);
     in->painted_cursor_row = 0;
     in->painted_rows = 0;
     in->previous_paint_clipped = 0;
@@ -1358,6 +1430,9 @@ char *input_readline(struct input *in, const char *prompt)
 
         if (c != 0x03)
             in->exit_armed = 0;
+        if (c != 0x09)
+            in->last_key_was_tab = 0;
+        clear_candidates(in);
 
         switch (c) {
         case 0x01: /* Ctrl-A */
@@ -1400,16 +1475,9 @@ char *input_readline(struct input *in, const char *prompt)
         case 0x7f: /* DEL / backspace */
             input_core_delete_back(in);
             break;
-        case 0x09: { /* Tab */
-            size_t cs, ce;
-            if (in->completer &&
-                in->completer->match(in->buf, in->len, in->cursor, &cs, &ce, in->completer->user) &&
-                cs <= ce && ce <= in->len)
-                complete_modal(in, cs, ce);
-            else
-                input_core_insert(in, "\t", 1);
+        case 0x09: /* Tab */
+            complete_at_cursor(in);
             break;
-        }
         case 0x0a: /* LF — Shift+Enter inserts a newline */
             input_core_insert(in, "\n", 1);
             break;
@@ -1477,13 +1545,6 @@ char *input_readline(struct input *in, const char *prompt)
 
         if (!eof && !submit)
             paint(in);
-    }
-
-    /* A key that ends the loop skips the disarm repaint, so a painted hint
-     * would outlive the editor; erase it before leaving. */
-    if (in->hint_painted) {
-        in->exit_armed = 0;
-        paint(in);
     }
 
     if (submit && in->len > 0)

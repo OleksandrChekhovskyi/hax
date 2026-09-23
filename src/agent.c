@@ -1030,6 +1030,12 @@ static void repl_loop_task_note(const char *text, void *user)
     disp_flush(&render->disp);
 }
 
+static char *slash_hint_cb(const char *buf, void *user)
+{
+    (void)user;
+    return slash_hint(buf);
+}
+
 static int handle_slash_input(struct input *input, struct agent_state *state, const char *line)
 {
     if (!*line)
@@ -1134,7 +1140,9 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
     input_history_open_tty(input, history_path, recording_enabled);
     free(history_path);
     free(cwd);
-    input_set_modal_completer(input, &file_mention_completer);
+    input_add_completer(input, &slash_completer);
+    input_add_completer(input, &file_mention_completer);
+    input_set_hint(input, slash_hint_cb, NULL);
     input_set_paste_hook(input, capture_paste, NULL);
     input_set_paste_filter(input, filter_paste, NULL);
     /* Raw mode clears IEXTEN, so Ctrl-O does not trigger BSD/macOS VDISCARD. */

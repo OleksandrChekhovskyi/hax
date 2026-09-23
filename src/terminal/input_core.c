@@ -31,6 +31,7 @@ void input_free(struct input *in)
     free(in->hist);
     free(in->persist_path);
     free(in->preseed);
+    free(in->candidates);
     free(in);
 }
 

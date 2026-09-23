@@ -7,15 +7,22 @@
 
 /* Shared editor state and terminal-independent operations. */
 
-/* `match` performs no I/O and returns the replacement span [start, end).
- * `pick` runs in cooked mode with the edit area erased and owns the terminal until it returns.
- * It returns a malloc'd replacement, or NULL to leave the buffer unchanged. */
-struct input_modal_completer {
+/* `match` performs no I/O and returns the replacement span [start, end). `complete` receives the
+ * span's text and returns a malloc'd replacement, or NULL to leave the buffer unchanged. A modal
+ * completer's `complete` runs in cooked mode with the edit area erased and owns the terminal until
+ * it returns; an inline completer's must not touch the tty. The optional `candidates` returns
+ * malloc'd ghost text listing what the token could become, or NULL. */
+struct input_completer {
     int (*match)(const char *buf, size_t len, size_t cursor, size_t *start, size_t *end,
                  void *user);
-    char *(*pick)(const char *token, void *user);
+    char *(*complete)(const char *token, void *user);
+    char *(*candidates)(const char *token, void *user);
+    int modal;
     void *user;
 };
+
+/* Tab tries completers in registration order and stops at the first whose `match` succeeds. */
+#define INPUT_COMPLETERS_MAX 4
 
 /* Slots for application-bound modal control keys (input_bind_modal_key).
  * Small on purpose: these are top-level views, not a general keymap. */
@@ -43,7 +50,7 @@ struct input {
     int previous_paint_clipped;
     int window_top;
     int top_indicator_width;
-    int hint_painted; /* the last paint drew the exit hint */
+    int ghost_painted; /* the last paint drew ghost text after the buffer */
 
     int continuation_at_column_zero;
     const char *prompt; /* borrowed for the duration of input_readline */
@@ -63,8 +70,13 @@ struct input {
         void *user;
     } modal_keys[INPUT_MODAL_KEYS_MAX];
 
-    /* Borrowed; NULL makes Tab insert a literal tab. */
-    const struct input_modal_completer *completer;
+    /* Borrowed; filled in order, NULL marks an unused slot. */
+    const struct input_completer *completers[INPUT_COMPLETERS_MAX];
+    int last_key_was_tab;
+    char *candidates; /* owned; cleared by the next key */
+
+    char *(*hint_fn)(const char *buf, void *user);
+    void *hint_user;
 
     /* Returns malloc'd insertion text. Empty bracketed pastes also invoke this hook. */
     char *(*paste_hook)(void *user);

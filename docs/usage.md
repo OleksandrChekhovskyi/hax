@@ -121,6 +121,7 @@ The editor supports common readline-style movement and history keys. Notable hax
 | Ctrl-O | Open the rendered conversation in `$PAGER`. |
 | Ctrl-T | Open the model-facing transcript in `$PAGER`. |
 | Ctrl-V | Paste an image, or clipboard text when no image is available. |
+| Tab | Complete a `/` command name. |
 | `@` + Tab | Choose a project file with `fzf`. |
 
 Ctrl-O is the best view for reviewing what happened. Ctrl-T includes the system prompt, tool schemas,
