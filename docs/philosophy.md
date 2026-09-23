@@ -90,7 +90,7 @@ Reusable prompts are files. Keep them in your repo (or anywhere) and `@`-mention
 prompt — the fzf picker makes them discoverable, and the model reads the file it is pointed at.
 That is an instruction to the model rather than the deterministic text expansion a command
 system performs, but the extra read is cheap and the outcome is the same in practice. Personal
-repetition is already covered by prompt history (Ctrl+R, persisted across sessions), and
+repetition is already covered by prompt history (Ctrl-R, persisted across sessions), and
 project conventions belong in `AGENTS.md`, where they apply without being invoked.
 
 ### Small dependency footprint

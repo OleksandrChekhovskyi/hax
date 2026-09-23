@@ -183,6 +183,11 @@ struct session_entry {
 int session_list(const char *cwd, struct session_entry **out_entries, size_t *out_count);
 void session_list_free(struct session_entry *entries, size_t count);
 
+/* Return the owned path of cwd's prompt-history file, a sibling of its session files that listing
+ * and pruning ignore. Return NULL for a NULL cwd or when no state directory is available, so an
+ * unknown working directory records nothing, as with sessions. */
+char *session_prompt_history_path(const char *cwd);
+
 /* Reads a bounded file prefix, describing the session as it started: a later model or preset
  * switch is not reflected. The prompt is limited to max_cells. Overwrites out without releasing
  * it, so pass a zeroed or freed struct; unreadable files leave it zeroed. */

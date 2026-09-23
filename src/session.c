@@ -1387,6 +1387,18 @@ int session_list(const char *cwd, struct session_entry **out_entries, size_t *ou
     return 0;
 }
 
+char *session_prompt_history_path(const char *cwd)
+{
+    if (!cwd)
+        return NULL;
+    char *directory = session_directory(cwd);
+    if (!directory)
+        return NULL;
+    char *path = path_join(directory, "history");
+    free(directory);
+    return path;
+}
+
 void session_list_free(struct session_entry *entries, size_t count)
 {
     for (size_t i = 0; i < count; i++) {

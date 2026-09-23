@@ -111,7 +111,7 @@ The editor supports common readline-style movement and history keys. Notable hax
 | Enter | Submit; at a paused empty prompt, continue without adding a message. |
 | Shift-Enter | Insert a newline if the terminal sends LF for it. |
 | Up / Down | Recall previous/next prompts. |
-| Ctrl-R | Search persistent prompt history. |
+| Ctrl-R | Search prompt history. |
 | Esc | Pause after the current step so you can steer. |
 | Esc Esc | Interrupt the model or running tool immediately. |
 | Ctrl-C | Clear the current prompt; twice on an empty prompt quits. |
@@ -177,7 +177,7 @@ image is present, Ctrl-V pastes text. Image understanding also depends on the se
 model/provider; hax detects support when metadata is available, and `image_input` can override
 detection.
 
-## Sessions and history
+## Sessions and prompt history
 
 Non-empty conversations are recorded as JSONL session files under:
 
@@ -185,10 +185,13 @@ Non-empty conversations are recorded as JSONL session files under:
 ~/.local/state/hax/sessions/<encoded-cwd>/
 ```
 
-Sessions are scoped to the current directory. `-c`, `--resume`, and `/resume` therefore show the
-history for where hax is running, not every repository. Sessions inactive for 30 days are removed by
-default; set `session_retention_days` to another value or `0` to keep them indefinitely. The file
-format is documented in [sessions.md](./sessions.md) and is safe to read from scripts.
+Sessions are scoped to the current directory. `-c`, `--resume`, and `/resume` therefore list the
+sessions for where hax is running, not every repository. Sessions inactive for 30 days are removed
+by default; set `session_retention_days` to another value or `0` to keep them indefinitely. The
+file format is documented in [sessions.md](./sessions.md) and is safe to read from scripts.
+
+Prompt history (Up, Ctrl-R) is scoped the same way: each directory keeps its own `history` file
+beside its session files, so recall stays within the project.
 
 Resuming restores the provider, model, effort, and preset last used by that conversation. A CLI
 selection flag deliberately overrides the restored choice:
@@ -201,8 +204,8 @@ hax --resume=ID --preset=review
 The new selection is recorded in the resumed session. If its old provider or preset is unavailable,
 hax reports the problem rather than silently choosing another backend.
 
-`--no-session` (or `no_session`) prevents new session and prompt-history writes. It does not hide or
-disable existing sessions and prompt recall.
+`--no-session` (or `no_session`) prevents new session and prompt-history writes. It does not hide
+existing sessions or disable prompt recall.
 
 ## Pausing and steering
 
@@ -247,9 +250,10 @@ including undone user turns and retried requests, with a token row per model whe
 switched; a resumed session shows the same totals. `/usage` asks the provider for account-level
 usage when supported. One-shot runs put equivalent stats on stderr.
 
-Automatic compaction summarizes old history near 85% of a known context window. Use `/compact`
-earlier when the conversation has accumulated obsolete exploration, optionally naming what the
-summary must preserve. Manual compaction works even when the model's context limit is unknown.
+Automatic compaction summarizes the older part of the conversation near 85% of a known context
+window. Use `/compact` earlier when the conversation has accumulated obsolete exploration,
+optionally naming what the summary must preserve. Manual compaction works even when the model's
+context limit is unknown.
 
 For local servers, configure a context window large enough for the system prompt, project context,
 conversation, and response. A small server-side context often appears as truncated answers rather

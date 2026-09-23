@@ -22,7 +22,6 @@
 #include "system/fd.h"
 #include "system/fs.h"
 #include "system/locale.h"
-#include "system/path.h"
 #include "system/spawn.h"
 #include "terminal/ansi.h"
 #include "terminal/input_core.h"
@@ -1290,19 +1289,15 @@ void input_set_preseed(struct input *in, const char *text)
     in->preseed = (text && *text) ? xstrdup(text) : NULL;
 }
 
-void input_history_open_default(struct input *in, int persist)
+void input_history_open_tty(struct input *in, const char *path, int persist)
 {
     /* Never retain piped input; it may contain secrets from unattended scripts. */
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))
-        return;
-    char *path = xdg_hax_state_path("history");
-    if (!path)
         return;
     if (persist)
         input_history_open(in, path);
     else
         input_history_load(in, path);
-    free(path);
 }
 
 /* ---------------- public API ---------------- */

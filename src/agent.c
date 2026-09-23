@@ -403,7 +403,7 @@ static void show_history_cb(void *user)
     size_t prompts = agent_user_turn_count(session);
     struct banner_writer header;
     banner_open(&header, memory_stream);
-    banner_put(&header, "", ANSI_DIM, ANSI_BOLD_OFF, "conversation history");
+    banner_put(&header, "", ANSI_DIM, ANSI_BOLD_OFF, "conversation");
     if (prompts > 0) {
         char count[32];
         snprintf(count, sizeof(count), "%zu prompt%s", prompts, prompts == 1 ? "" : "s");
@@ -1128,8 +1128,12 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
                              session.model_label, session.effort, config_str("preset"));
     }
     struct input *input = input_new();
-    /* Prompt recall remains readable when recording is disabled. */
-    input_history_open_default(input, recording_enabled);
+    /* Prompt recall is scoped like sessions and remains readable when recording is disabled. */
+    char *cwd = getcwd(NULL, 0);
+    char *history_path = session_prompt_history_path(cwd);
+    input_history_open_tty(input, history_path, recording_enabled);
+    free(history_path);
+    free(cwd);
     input_set_modal_completer(input, &file_mention_completer);
     input_set_paste_hook(input, capture_paste, NULL);
     input_set_paste_filter(input, filter_paste, NULL);

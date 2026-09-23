@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <sys/stat.h>
 
 #include "harness.h"
@@ -119,6 +120,20 @@ static void test_history_session_entry_persists_on_resubmit(void)
     free(path);
 }
 
+static void test_history_open_tty_ignores_piped_input(void)
+{
+    if (isatty(STDIN_FILENO) && isatty(STDOUT_FILENO))
+        T_SKIP("stdin and stdout are terminals");
+    char *path = xasprintf("%s/history", t_tempdir());
+    struct input *in = input_new();
+    input_history_open_tty(in, path, 1);
+    input_history_add(in, "secret from a script");
+    EXPECT(in->hist_n == 1);
+    EXPECT(file_size(path) == -1);
+    input_free(in);
+    free(path);
+}
+
 static void noop_view(void *user)
 {
     (void)user;
@@ -182,6 +197,7 @@ int main(void)
     test_history_open_appends();
     test_history_missing_file();
     test_history_session_entry_persists_on_resubmit();
+    test_history_open_tty_ignores_piped_input();
     test_modal_key_macro();
     test_modal_key_bind_and_rebind();
     test_modal_key_rejects_printable();

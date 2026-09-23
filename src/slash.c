@@ -154,7 +154,7 @@ static const struct slash_command COMMANDS[] = {
     },
     {
         .name = "compact",
-        .summary = "summarize history to free up context (optional: focus instructions)",
+        .summary = "summarize the conversation to free up context (optional: focus instructions)",
         .accepts_argument = 1,
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_compact,
@@ -216,7 +216,7 @@ static const struct shortcut SHORTCUTS[] = {
     {.key = "ctrl-d", .description = "quit (on empty prompt)"},
     {.key = "ctrl-l", .description = "clear screen and redraw prompt"},
     {.key = "ctrl-g", .description = "edit prompt in $EDITOR"},
-    {.key = "ctrl-o", .description = "view conversation history in $PAGER"},
+    {.key = "ctrl-o", .description = "view the conversation in $PAGER"},
     {.key = "ctrl-t", .description = "view model-facing transcript in $PAGER"},
     {.key = "ctrl-v", .description = "paste image (or text) from clipboard"},
     {.key = "@ + tab",

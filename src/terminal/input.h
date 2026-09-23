@@ -69,9 +69,9 @@ void input_set_preseed(struct input *in, const char *text);
 /* When enabled, Enter on an empty buffer returns "" instead of doing nothing. */
 void input_set_empty_submit(struct input *in, int enabled);
 
-/* Load the conventional XDG history file only for tty sessions. `persist` controls whether
- * later entries are appended; scripted input is never retained. */
-void input_history_open_default(struct input *in, int persist);
+/* Load `path` only for tty sessions; `persist` controls whether later entries are appended
+ * there. Scripted input is never retained, so non-tty sessions leave `path` untouched. */
+void input_history_open_tty(struct input *in, const char *path, int persist);
 
 /* Write a committed user message with an accent stripe on each row, wrapped to
  * `display_columns`. Leave the cursor at column 0 of a fresh row without erasing prior content. */

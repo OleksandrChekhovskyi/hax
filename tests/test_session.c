@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include <jansson.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -331,6 +332,46 @@ static void test_session_listing(void)
     session_list_free(list, list_n);
     free(saved_id);
     free(path);
+}
+
+static void test_prompt_history_path_shares_session_directory(void)
+{
+    use_fresh_session_state();
+    char *session_path =
+        write_session("alpha", "m1", "high", NULL, CONVERSATION, CONVERSATION_COUNT);
+    char cwd[4096];
+    EXPECT(getcwd(cwd, sizeof(cwd)) != NULL);
+
+    EXPECT(session_prompt_history_path(NULL) == NULL);
+    char *history_path = session_prompt_history_path(cwd);
+    char *elsewhere = session_prompt_history_path("/elsewhere");
+    EXPECT(history_path != NULL && elsewhere != NULL);
+    if (!history_path || !elsewhere)
+        return;
+    EXPECT(strcmp(history_path, elsewhere) != 0);
+
+    const char *session_basename = strrchr(session_path, '/');
+    size_t directory_len = session_basename ? (size_t)(session_basename - session_path) : 0;
+    EXPECT(strncmp(history_path, session_path, directory_len) == 0);
+    EXPECT_STR_EQ(history_path + directory_len, "/history");
+
+    FILE *f = fopen(history_path, "w");
+    EXPECT(f != NULL);
+    if (f) {
+        fputs("remembered prompt\n", f);
+        fclose(f);
+    }
+    struct session_entry *list;
+    size_t list_n;
+    EXPECT(session_list(cwd, &list, &list_n) == 0);
+    EXPECT(list_n == 1);
+    session_list_free(list, list_n);
+
+    unlink(history_path);
+    unlink(session_path);
+    free(elsewhere);
+    free(history_path);
+    free(session_path);
 }
 
 static void test_session_file_permissions(void)
@@ -1017,6 +1058,7 @@ int main(void)
     test_session_round_trip();
     test_reasoning_provenance_round_trip();
     test_session_listing();
+    test_prompt_history_path_shares_session_directory();
     test_session_file_permissions();
     test_resume_appends_only_new_items();
     test_prompt_labels();

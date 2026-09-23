@@ -15,7 +15,9 @@ Sessions live under `$XDG_STATE_HOME/hax/sessions/<encoded-cwd>/` (by default
 `~/.local/state/hax/sessions/...`), where `<encoded-cwd>` is a readable slug of the working
 directory plus a disambiguating hash. Filenames are `<timestamp>_<uuid>.jsonl`; the UUID is the
 session id printed by the one-shot banner and accepted by `--resume`. Files are owner-only and
-are pruned after `session_retention_days` of inactivity.
+are pruned after `session_retention_days` of inactivity. The same directory holds the working
+directory's prompt history, the `history` file behind Up and Ctrl-R; it is not a session and
+pruning leaves it alone.
 
 Files are append-only and flushed at each newline, so an in-progress run can be followed with
 `tail -f`; nothing already written is ever rewritten, and `/undo` appends a record rather than
@@ -97,7 +99,7 @@ records:
 1. A `"type": "session"` record identifying the run — the header fields above, minus
    `timestamp`. `id` is omitted when recording is disabled; on a resumed run the fields describe
    this run rather than the original header.
-2. The conversation items this run appends. A resumed run's prior history is not replayed.
+2. The conversation items this run appends. A resumed run's prior items are not replayed.
 3. A closing `"type": "result"` record:
 
 | Field | Meaning |

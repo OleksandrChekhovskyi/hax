@@ -16,6 +16,10 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Changed
 
+- Prompt history (Up, Ctrl-R) is scoped to the working directory like sessions: each directory
+  keeps its own `history` file beside its session files, so a prompt typed in one project no
+  longer comes back in another. The old global `~/.local/state/hax/history` is no longer read and
+  can be deleted.
 - One-shot runs no longer stop after 100 model round-trips: `max_turns` defaults to `0`
   (unlimited) in both modes, and `auto` is no longer accepted. Set a number to keep a limit;
   signals and `--json` remain the way to observe and stop a long run.
