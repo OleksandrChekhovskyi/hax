@@ -24,14 +24,15 @@ keys in environment variables rather than command arguments or `config.json`.
 | `openrouter` | Many vendors through one API | `OPENROUTER_API_KEY`; choose a model. |
 | `opencode-zen` | Curated pay-as-you-go models | `OPENCODE_API_KEY`; choose a model. |
 | `opencode-go` | OpenCode's model subscription | `OPENCODE_API_KEY`; choose a model. |
+| `yolo-auto` | [Yolo-Auto](https://yolo-auto.com)'s OpenAI-compatible API | `YOLO_AUTO_API_KEY`; choose a model. |
 | `llama.cpp` | Local `llama-server` | Start the server; model is normally discovered. |
 | `ollama` | Local Ollama models | Start `ollama serve`; choose a pulled model. |
 | `openai-compatible` | OpenAI Chat Completions-compatible endpoint | Base URL; usually choose a model. |
 | `anthropic-compatible` | Anthropic Messages-compatible proxy/server | Base URL; usually choose a model. |
 
 When no provider is selected, hax picks the first available one: the hosted providers (Codex,
-OpenAI, Anthropic, OpenRouter, OpenCode), then the local servers (llama.cpp, Ollama), then the
-generic compatible endpoints and any user-defined providers. Auto-selection is convenient
+OpenAI, Anthropic, OpenRouter, OpenCode, Yolo-Auto), then the local servers (llama.cpp, Ollama),
+then the generic compatible endpoints and any user-defined providers. Auto-selection is convenient
 interactively; pass a provider explicitly in automation so a newly available backend cannot change
 a script's behavior.
 
@@ -174,6 +175,21 @@ not expose usage through its API, so check the OpenCode dashboard instead.
 Requests carry the conversation id as `x-opencode-session`, which the gateway requires for
 routing and prompt caching, and `x-opencode-client: hax`. Both can be overridden in
 `extra_headers` ([below](#request-passthrough)).
+
+## Yolo-Auto
+
+[Yolo-Auto](https://yolo-auto.com) is an OpenAI-compatible endpoint on flat-rate plans, with a free
+tier, so it needs no more than a key:
+
+```sh
+export YOLO_AUTO_API_KEY=yolo_...
+hax --provider=yolo-auto --model=yolo
+```
+
+Create a key at https://yolo-auto.com; credentials come from `YOLO_AUTO_API_KEY`. The two
+contractual model aliases are `yolo` and `yolo-small`, and `/model` lists everything the key can
+reach, which the endpoint reports at `/v1/models`. See
+[the Yolo-Auto docs](https://yolo-auto.com/docs) for the model catalog and plan details.
 
 ## llama.cpp
 

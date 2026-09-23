@@ -61,6 +61,26 @@ static void test_gateway_defs_registered(void)
     provider_availability_clear(&availability);
 }
 
+/* A shipped def for the Yolo-Auto endpoint: data-only, its key named by the picker so an
+ * unavailable entry says which variable to set. */
+static void test_yolo_auto_def_registered(void)
+{
+    const struct provider_def *def = provider_find("yolo-auto");
+    EXPECT(def != NULL);
+    EXPECT(idx_of("yolo-auto") >= 0);
+    if (!def)
+        return;
+    EXPECT_STR_EQ(def->base_url, "https://yolo-auto.com/v1");
+    EXPECT_STR_EQ(def->api_key_env, "YOLO_AUTO_API_KEY");
+
+    unsetenv("YOLO_AUTO_API_KEY");
+    struct provider_availability availability = {0};
+    provider_prepare_availability(def, &availability);
+    EXPECT(!availability.available);
+    EXPECT_STR_EQ(availability.reason, "YOLO_AUTO_API_KEY not set");
+    provider_availability_clear(&availability);
+}
+
 /* Autoselect-priority ordering follows the shipped table: concrete providers first, the generic
  * -compatible endpoints last so a deliberately configured concrete provider outranks a leftover
  * generic base-URL variable, and custom config blocks after every shipped def. */
@@ -246,6 +266,7 @@ int main(void)
     test_default_is_highest_priority();
     test_internal_providers_hidden();
     test_gateway_defs_registered();
+    test_yolo_auto_def_registered();
     test_autoselect_order();
     test_former_id_canonicalized();
     test_display_name_resolution();

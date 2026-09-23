@@ -114,6 +114,13 @@ static const struct provider_def DEFS[] = {
         .extra_headers = OPENCODE_HEADERS,
         .query_usage = opencode_go_query_usage,
     },
+    /* No catalog_id: models.dev does not describe it, and its /v1/models list is the model
+     * list a key can reach. */
+    {
+        .id = "yolo-auto",
+        .base_url = "https://yolo-auto.com/v1",
+        .api_key_env = "YOLO_AUTO_API_KEY",
+    },
     /* Local servers. */
     {
         /* Dot-free so the id names its providers.llamacpp config block ('.' is the config key

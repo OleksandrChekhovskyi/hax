@@ -13,6 +13,9 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   `hax --preset review`, and `hax review -p "..."` works the same way in one-shot mode.
 - `/session` shows a token row per model when the conversation switched models, how many user
   turns `/undo` removed, and what a fork inherited from its source.
+- A `yolo-auto` provider for [Yolo-Auto](https://yolo-auto.com)'s OpenAI-compatible API: set
+  `YOLO_AUTO_API_KEY`, choose a model, and `/model` lists the models the key can reach. See
+  [docs/providers.md](docs/providers.md#yolo-auto).
 
 ### Changed
 

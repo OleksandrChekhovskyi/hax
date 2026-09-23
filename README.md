@@ -89,6 +89,7 @@ and choose a model. hax remembers interactive provider, model, and effort select
 | `anthropic` | Set `ANTHROPIC_API_KEY`. |
 | `openrouter` | Set `OPENROUTER_API_KEY`. |
 | `opencode-zen` / `opencode-go` | Set `OPENCODE_API_KEY`. |
+| `yolo-auto` | Set `YOLO_AUTO_API_KEY`. |
 | `llama.cpp` | Run `llama-server`. |
 | `ollama` | Run `ollama serve`. |
 | Compatible or custom endpoint | See [docs/providers.md](./docs/providers.md). |
