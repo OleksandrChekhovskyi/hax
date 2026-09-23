@@ -81,6 +81,12 @@ const struct http_auth_source *http_provider_auth(const struct provider *provide
  * that authenticates successfully relaunches it. */
 void http_provider_defer_probe(struct provider *provider);
 
+/* Catalog-backed /model listing for defs whose endpoint serves no /models route: enumerates the
+ * provider's catalog models with their metadata, with no network round trip. */
+int http_provider_list_catalog_models(struct provider *base, struct model_info **models,
+                                      size_t *n_models, char **error, http_tick_cb tick,
+                                      void *tick_user);
+
 /* Output cap for one Messages request: <prefix>.max_tokens clamped to model metadata. */
 int http_provider_max_tokens(struct provider *provider, const char *model);
 

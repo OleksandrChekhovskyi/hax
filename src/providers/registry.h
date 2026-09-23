@@ -32,6 +32,14 @@ struct provider_def {
      * always used verbatim. */
     const char *base_url;
     int port; /* default for the "{port}" placeholder (0: none); providers.<id>.port overrides */
+    /* Per-request path override, added to the base URL in place of the wire's path. A template
+     * may carry {model} (substituted at request time) and providers.<id> config placeholders
+     * ({project}, {location}, {port}, ...; substituted at construction). NULL → the wire path. */
+    const char *path_template;
+    /* Resolve the endpoint's base URL from supplied config for defs whose host depends on a
+     * config value (e.g. a cloud per-region endpoint). Called only when no explicit base_url is
+     * configured; returns an owned URL or NULL after reporting why none can be derived. */
+    char *(*resolve_base_url)(const struct provider_def *def);
     /* First-party endpoint: configured base_url and api cannot rewire it, so its key is never
      * redirected to another host or protocol family. */
     int pinned;
@@ -56,8 +64,9 @@ struct provider_def {
     /* The endpoint signs and validates thinking blocks like the first-party Messages API, so
      * unsigned blocks from other backends are dropped rather than replayed and rejected. */
     int strict_signatures;
-    const char *length_hint; /* appended to a "length"-truncation error */
-    int no_efforts;          /* offer no effort levels, so /effort skips the provider */
+    const char *length_hint;  /* appended to a "length"-truncation error */
+    const char *payload_hint; /* appended to a request-too-large HTTP error */
+    int no_efforts;           /* offer no effort levels, so /effort skips the provider */
     /* JSON object of body members the endpoint requires on every request, merged under the
      * user's providers.<id>.extra_body. NULL sends none. */
     const char *extra_body;
@@ -65,6 +74,11 @@ struct provider_def {
      * user's providers.<id>.extra_headers; "{session_id}" in a value expands to the conversation's
      * affinity id. NULL sends none. */
     const char *extra_headers;
+    /* Default anthropic-version (body or header) when providers.<id>.version is unset. */
+    const char *version;
+    /* anthropic-messages: the endpoint reads anthropic_version from the body and drops the
+     * anthropic-version header (Vertex raw-Predict; `version` names the body value). */
+    int body_version;
     /* Probe <base_url>/models reachability when keyless. Only for curated local defs where
      * "not running" is the common failure and /models is known to exist; a generic endpoint may
      * not serve /models at all, so configuration is the default availability check. */

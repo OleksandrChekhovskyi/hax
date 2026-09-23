@@ -563,6 +563,55 @@ static void test_auth_source_logged_out(void)
     provider->destroy(provider);
 }
 
+/* A payload_hint def appends an actionable line when the endpoint rejects a request as too
+ * large; unrelated error bodies keep the default message. */
+static void test_payload_hint(void)
+{
+    const char *body = "{\"error\": {\"code\": 400, \"message\": \"Request payload size exceeds "
+                       "the limit: 31457280 bytes\", \"status\": \"INVALID_ARGUMENT\"}}";
+    char *response =
+        xasprintf("HTTP/1.1 400 Bad Request\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",
+                  strlen(body), body);
+    struct wire_server server = {
+        .response = response,
+        .n_requests = 1,
+    };
+    pthread_t thread;
+    int port = start_server(&server, &thread);
+    EXPECT(port > 0);
+    if (port <= 0) {
+        free(response);
+        return;
+    }
+
+    char base_url[64];
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", port);
+    struct provider_def def = {
+        .id = "pl",
+        .base_url = base_url,
+        .payload_hint = "payload hint line",
+    };
+    struct provider *provider = http_provider_new(&def);
+    EXPECT(provider != NULL);
+    if (!provider) {
+        free(response);
+        return;
+    }
+
+    struct item items[] = {{.kind = ITEM_USER_MESSAGE, .text = "hello"}};
+    struct context context = {.items = items, .n_items = 1, .image_input = 1};
+    struct error_log log = {0};
+    provider->stream(provider, &context, "m", log_error, &log, NULL, NULL);
+    pthread_join(thread, NULL);
+    close(server.listener_fd);
+    EXPECT(atomic_load(&server.served) == 1);
+    EXPECT(log.n_errors == 1);
+    EXPECT(strstr(log.message, "payload size exceeds") != NULL);
+    EXPECT(strstr(log.message, "payload hint line") != NULL);
+    provider->destroy(provider);
+    free(response);
+}
+
 static void fake_load_defaults(char **default_model, char **default_effort)
 {
     *default_model = xstrdup("companion-model");
@@ -878,6 +927,7 @@ int main(void)
     test_messages_defaults_follow_def();
     test_auth_source_stream();
     test_auth_source_logged_out();
+    test_payload_hint();
     test_def_extra_body_and_defaults();
     test_def_extra_headers_follow_conversation();
     test_interleaved_reasoning_replay();

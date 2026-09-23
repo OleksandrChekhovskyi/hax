@@ -56,6 +56,13 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Added
 
+- `vertex` provider for Claude on Vertex AI: hosts the Anthropic Messages endpoint
+  (`.../locations/{loc}/publishers/anthropic/models/{model}:streamRawPredict`), authenticates with
+  a Google access token (explicit `providers.vertex.access_token`, an ADC `authorized_user` file's
+  refresh flow, or `gcloud auth application-default print-access-token`), and list its models
+  from the catalog (`google-vertex-anthropic`). Configure it with `providers.vertex.project` and
+  optionally `providers.vertex.location` (default `us-east5`; `global`, `us`, and `eu` select the
+  multi-region hosts).
 - `hax --json` (implies `-p`) streams new conversation records as JSONL, followed by a `result`
   record with the outcome, final text, cost, and session id. Plain `-p` output is unchanged, and
   the session-file schema is now a supported read surface. See [docs/sessions.md](docs/sessions.md).
@@ -110,6 +117,11 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 - OpenCode Go usage-window limits now surface immediately instead of triggering futile retries.
 - The retry indicator shows the active attempt after backoff instead of remaining at
   "retrying in 1s" while the request is in flight.
+- The `vertex` path template now resolves `{location}`/`{project}` from the same single source as
+  the base-URL host: the config registry honors `CLOUD_ML_REGION` and `ANTHROPIC_VERTEX_PROJECT_ID`
+  as fallback environment variables and applies the `us-east5` default, instead of silently
+  dropping `{location}` and producing a malformed `.../locations//...` endpoint when only
+  `CLOUD_ML_REGION` was set.
 
 ## [0.4.0] - 2026-08-22
 
