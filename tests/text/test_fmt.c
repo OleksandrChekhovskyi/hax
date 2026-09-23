@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -25,6 +26,27 @@ static void test_parse_int(void)
     EXPECT(!parse_int("", &value));
     EXPECT(!parse_int("12x", &value));
     EXPECT(!parse_int("999999999999999999999", &value));
+    EXPECT(value == 7);
+}
+
+static void test_parse_hex(void)
+{
+    uint32_t value = 0;
+    EXPECT(parse_hex("0", 1, &value));
+    EXPECT(value == 0);
+    EXPECT(parse_hex("aF", 2, &value));
+    EXPECT(value == 0xAF);
+    EXPECT(parse_hex("FFFFFFFF", 8, &value));
+    EXPECT(value == 0xFFFFFFFF);
+    /* Only count digits are read, so a digit past the end is ignored. */
+    EXPECT(parse_hex("123", 2, &value));
+    EXPECT(value == 0x12);
+
+    value = 7;
+    EXPECT(!parse_hex("1g", 2, &value));
+    EXPECT(!parse_hex("-1", 2, &value));
+    EXPECT(!parse_hex("", 0, &value));
+    EXPECT(!parse_hex("123456789", 9, &value));
     EXPECT(value == 7);
 }
 
@@ -131,6 +153,7 @@ static void test_format_usage_extremes(void)
 int main(void)
 {
     test_parse_int();
+    test_parse_hex();
 
     test_format_duration_ranges();
     test_format_duration_extreme();

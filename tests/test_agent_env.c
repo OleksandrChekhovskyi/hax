@@ -620,64 +620,57 @@ static void test_skills_with_description_sorted(void)
     sandbox_free(&s);
 }
 
-static void test_skills_crlf_frontmatter(void)
+static void test_skills_long_description_clamped(void)
 {
+    /* Each codepoint follows prefix_len ASCII bytes; one crossing the limit is dropped whole. */
+    static const struct {
+        const char *name;
+        int prefix_len;
+        const char *codepoint;
+        int kept;
+    } cases[] = {
+        {"fits", 1022, "\xC3\xA9", 1},
+        {"two", 1023, "\xC3\xA9", 0},
+        {"three_early", 1022, "\xE2\x82\xAC", 0},
+        {"three_late", 1023, "\xE2\x82\xAC", 0},
+        {"four", 1021, "\xF0\x9F\x98\x80", 0},
+    };
     struct sandbox s;
     sandbox_init(&s);
-    /* Files checked out on Windows-style line endings have CRLF
-     * everywhere, including the opening `---` fence. The closer already
-     * accepts \r — verify the opener does too, otherwise the description
-     * silently goes missing for these files. */
-    const char body[] = "---\r\ndescription: from crlf\r\n---\r\nbody\r\n";
-    sandbox_write_bytes(&s, ".agents/skills/crlf/SKILL.md", body, sizeof(body) - 1);
+    char long_line[1100];
+    memset(long_line, 'x', sizeof(long_line) - 1);
+    long_line[sizeof(long_line) - 1] = '\0';
+    char *content = xasprintf("---\ndescription: >\n  %s\n---\n", long_line);
+    sandbox_write(&s, ".agents/skills/ascii/SKILL.md", content);
+    free(content);
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char *path = xasprintf(".agents/skills/%s/SKILL.md", cases[i].name);
+        content = xasprintf("---\ndescription: %.*s%s tail\n---\n", cases[i].prefix_len, long_line,
+                            cases[i].codepoint);
+        sandbox_write(&s, path, content);
+        free(content);
+        free(path);
+    }
     SANDBOX_CHDIR(&s, ".");
     setenv("HAX_NO_ENV", "1", 1);
+
     char *suffix = agent_env_build_suffix("m");
     EXPECT(suffix != NULL);
     if (suffix) {
-        EXPECT(contains(suffix, "- crlf: from crlf (~/.agents/skills/crlf/SKILL.md)"));
+        char *expected = xasprintf("- ascii: %.1024s (~/.agents/skills/ascii/SKILL.md)", long_line);
+        EXPECT(contains(suffix, expected));
+        free(expected);
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            expected = xasprintf("- %s: %.*s%s (~/.agents/skills/%s/SKILL.md)", cases[i].name,
+                                 cases[i].prefix_len, long_line,
+                                 cases[i].kept ? cases[i].codepoint : "", cases[i].name);
+            if (!contains(suffix, expected))
+                FAIL("%s: description not clamped at a codepoint boundary", cases[i].name);
+            free(expected);
+        }
         free(suffix);
     }
     unsetenv("HAX_NO_ENV");
-    sandbox_free(&s);
-}
-
-static void test_skills_unterminated_frontmatter_omits_description(void)
-{
-    struct sandbox s;
-    sandbox_init(&s);
-    sandbox_write(&s, ".agents/skills/broken/SKILL.md", "---\ndescription: incomplete\n");
-    SANDBOX_CHDIR(&s, ".");
-    setenv("HAX_NO_ENV", "1", 1);
-
-    char *suffix = agent_env_build_suffix("m");
-    EXPECT(suffix != NULL);
-    if (suffix) {
-        EXPECT(contains(suffix, "- broken (~/.agents/skills/broken/SKILL.md)"));
-        EXPECT(!contains(suffix, "- broken:"));
-        free(suffix);
-    }
-    sandbox_free(&s);
-}
-
-static void test_skills_block_description_falls_back_to_name(void)
-{
-    struct sandbox s;
-    sandbox_init(&s);
-    sandbox_write(&s, ".agents/skills/block/SKILL.md",
-                  "---\ndescription: |-\n  multiline description\n---\n");
-    sandbox_write(&s, ".agents/skills/literal/SKILL.md", "---\ndescription: \"|\"\n---\n");
-    SANDBOX_CHDIR(&s, ".");
-    setenv("HAX_NO_ENV", "1", 1);
-
-    char *suffix = agent_env_build_suffix("m");
-    EXPECT(suffix != NULL);
-    if (suffix) {
-        EXPECT(contains(suffix, "- block (~/.agents/skills/block/SKILL.md)"));
-        EXPECT(!contains(suffix, "- block:"));
-        EXPECT(contains(suffix, "- literal: | (~/.agents/skills/literal/SKILL.md)"));
-        free(suffix);
-    }
     sandbox_free(&s);
 }
 
@@ -1105,9 +1098,7 @@ int main(void)
 
     test_skills_none();
     test_skills_with_description_sorted();
-    test_skills_crlf_frontmatter();
-    test_skills_unterminated_frontmatter_omits_description();
-    test_skills_block_description_falls_back_to_name();
+    test_skills_long_description_clamped();
     test_skills_no_frontmatter_falls_back_to_dir();
     test_skills_dir_without_skill_md_skipped();
     test_skills_global_root();

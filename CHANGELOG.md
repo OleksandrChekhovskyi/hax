@@ -49,6 +49,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 - Background task completion notes say whether output is pending or there is nothing to
   collect, and `task_wait` on an already collected task reports its final status instead of
   `no such task`.
+- Skill descriptions written as YAML block scalars (`>`, `|`) or wrapped across lines are now
+  read in full, instead of being dropped or cut off at the first line.
 
 ## [0.5.0] - 2026-09-04
 

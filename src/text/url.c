@@ -2,11 +2,13 @@
 #include "text/url.h"
 
 #include <ctype.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "buf.h"
 #include "xalloc.h"
+#include "text/fmt.h"
 
 char *url_trim_trailing_slashes(const char *url)
 {
@@ -42,17 +44,6 @@ char *url_encode(const char *value)
     return result ? result : xstrdup("");
 }
 
-static int hex_value(char c)
-{
-    if (c >= '0' && c <= '9')
-        return c - '0';
-    if (c >= 'a' && c <= 'f')
-        return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F')
-        return c - 'A' + 10;
-    return -1;
-}
-
 char *url_decode(const char *encoded, size_t len)
 {
     struct buf decoded;
@@ -63,15 +54,12 @@ char *url_decode(const char *encoded, size_t len)
             buf_append(&decoded, " ", 1);
             continue;
         }
-        if (c == '%' && i + 2 < len) {
-            int hi = hex_value(encoded[i + 1]);
-            int lo = hex_value(encoded[i + 2]);
-            if (hi >= 0 && lo >= 0) {
-                char byte = (char)(hi << 4 | lo);
-                buf_append(&decoded, &byte, 1);
-                i += 2;
-                continue;
-            }
+        uint32_t value;
+        if (c == '%' && i + 2 < len && parse_hex(encoded + i + 1, 2, &value)) {
+            char byte = (char)value;
+            buf_append(&decoded, &byte, 1);
+            i += 2;
+            continue;
         }
         buf_append(&decoded, &c, 1);
     }

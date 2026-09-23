@@ -3,9 +3,13 @@
 #define HAX_TEXT_FMT_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 /* Parse a complete base-10 integer into out. Returns 1 on success and 0 otherwise. */
 int parse_int(const char *str, int *out);
+/* Parse exactly count hex digits, one to eight, from a buffer with at least count readable bytes.
+ * Returns 1 on success and 0 otherwise, leaving out unchanged on failure. */
+int parse_hex(const char *digits, size_t count, uint32_t *out);
 
 /* Round to seconds and format compactly, omitting zero remainders ("10m", "2h"); non-positive
  * values produce "0s". */

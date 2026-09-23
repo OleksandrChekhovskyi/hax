@@ -3,6 +3,7 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +21,28 @@ int parse_int(const char *str, int *out)
     if (errno == ERANGE || value > INT_MAX || value < INT_MIN)
         return 0;
     *out = (int)value;
+    return 1;
+}
+
+int parse_hex(const char *digits, size_t count, uint32_t *out)
+{
+    if (count < 1 || count > 8)
+        return 0;
+    uint32_t value = 0;
+    for (size_t i = 0; i < count; i++) {
+        char c = digits[i];
+        uint32_t digit;
+        if (c >= '0' && c <= '9')
+            digit = (uint32_t)(c - '0');
+        else if (c >= 'a' && c <= 'f')
+            digit = (uint32_t)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F')
+            digit = (uint32_t)(c - 'A' + 10);
+        else
+            return 0;
+        value = value << 4 | digit;
+    }
+    *out = value;
     return 1;
 }
 

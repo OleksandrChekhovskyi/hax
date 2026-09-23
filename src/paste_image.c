@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "paste_image.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +14,7 @@
 #include "system/fd.h"
 #include "system/tempfiles.h"
 #include "terminal/clipboard.h"
+#include "text/fmt.h"
 #include "tools/image_sniff.h"
 
 size_t paste_image_normalize_text(char *text, size_t text_len)
@@ -67,17 +69,6 @@ static char *persist_clipboard_image(const char *image, size_t image_len, const 
     return marker;
 }
 
-static int hex_digit_value(char digit)
-{
-    if (digit >= '0' && digit <= '9')
-        return digit - '0';
-    if (digit >= 'a' && digit <= 'f')
-        return digit - 'a' + 10;
-    if (digit >= 'A' && digit <= 'F')
-        return digit - 'A' + 10;
-    return -1;
-}
-
 /* Accept only local file URIs. Keep malformed escapes verbatim, but reject decoded NULs because
  * downstream filesystem APIs would silently truncate the path. */
 static char *file_uri_to_path(const char *uri, size_t uri_len)
@@ -100,10 +91,9 @@ static char *file_uri_to_path(const char *uri, size_t uri_len)
     buf_init(&path);
     while (cursor < end) {
         char byte = *cursor;
-        int high, low;
-        if (byte == '%' && cursor + 2 < end && (high = hex_digit_value(cursor[1])) >= 0 &&
-            (low = hex_digit_value(cursor[2])) >= 0) {
-            byte = (char)((high << 4) | low);
+        uint32_t value;
+        if (byte == '%' && cursor + 2 < end && parse_hex(cursor + 1, 2, &value)) {
+            byte = (char)value;
             if (byte == '\0') {
                 buf_free(&path);
                 return NULL;

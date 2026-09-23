@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: MIT */
+#include <stdint.h>
 #include <string.h>
 
 #include "harness.h"
@@ -115,6 +116,33 @@ static void test_buffer_validity(void)
     EXPECT(!utf8_is_valid("\xC3", 1));
     EXPECT(!utf8_is_valid("\xC0\x80", 2));
     EXPECT(!utf8_is_valid("\xED\xA0\x80", 3));
+}
+
+static void expect_encoded(uint32_t codepoint, const char *want, size_t want_len)
+{
+    char out[4];
+    size_t len = utf8_encode(codepoint, out);
+    EXPECT_MEM_EQ(out, len, want, want_len);
+}
+
+static void test_encode(void)
+{
+    expect_encoded(0x00, "\x00", 1);
+    expect_encoded(0x7F, "\x7F", 1);
+    expect_encoded(0x80, "\xC2\x80", 2);
+    expect_encoded(0x7FF, "\xDF\xBF", 2);
+    expect_encoded(0x800, "\xE0\xA0\x80", 3);
+    expect_encoded(0xFFFF, "\xEF\xBF\xBF", 3);
+    expect_encoded(0x10000, "\xF0\x90\x80\x80", 4);
+    expect_encoded(0x10FFFF, "\xF4\x8F\xBF\xBF", 4);
+}
+
+static void test_encode_rejects_non_scalar(void)
+{
+    char out[4];
+    EXPECT(utf8_encode(0xD800, out) == 0);
+    EXPECT(utf8_encode(0xDFFF, out) == 0);
+    EXPECT(utf8_encode(0x110000, out) == 0);
 }
 
 static void test_next_ascii(void)
@@ -461,6 +489,8 @@ int main(void)
     test_sequence_valid_rejects_continuation_leader();
     test_sequence_valid_rejects_length_mismatch();
     test_buffer_validity();
+    test_encode();
+    test_encode_rejects_non_scalar();
 
     test_next_ascii();
     test_next_multibyte();

@@ -17,6 +17,8 @@
 #include "system/fs.h"
 #include "system/os.h"
 #include "system/path.h"
+#include "text/frontmatter.h"
+#include "text/utf8.h"
 #include "text/utf8_sanitize.h"
 #include "tools/bash_shell.h"
 
@@ -258,59 +260,24 @@ static void append_project_agents_files(struct buf *prompt, int *has_project_con
     }
 }
 
-/* Parse one-line, optionally quoted YAML descriptions. Return metadata only after a closing fence
- * confirms that the frontmatter is complete. */
-static char *parse_skill_description(const char *content, size_t content_len)
+static char *read_skill_description(const char *frontmatter, size_t frontmatter_len)
 {
-    const char *cursor;
-    if (content_len >= 4 && memcmp(content, "---\n", 4) == 0)
-        cursor = content + 4;
-    else if (content_len >= 5 && memcmp(content, "---\r\n", 5) == 0)
-        cursor = content + 5;
-    else
+    char *description = frontmatter_scalar_line(frontmatter, frontmatter_len, "description");
+    if (!description)
         return NULL;
-
-    char *description = NULL;
-    const char *content_end = content + content_len;
-    while (cursor < content_end) {
-        const char *line_end = memchr(cursor, '\n', content_end - cursor);
-        if (!line_end)
-            line_end = content_end;
-        size_t line_len = line_end - cursor;
-
-        if ((line_len == 3 && memcmp(cursor, "---", 3) == 0) ||
-            (line_len == 4 && memcmp(cursor, "---\r", 4) == 0))
-            return description;
-
-        if (!description && line_len > 12 && memcmp(cursor, "description:", 12) == 0) {
-            const char *value = cursor + 12;
-            const char *value_end = line_end;
-            while (value < value_end && (*value == ' ' || *value == '\t'))
-                value++;
-            while (value_end > value &&
-                   (value_end[-1] == ' ' || value_end[-1] == '\t' || value_end[-1] == '\r'))
-                value_end--;
-            int quoted = value_end - value >= 2 && ((*value == '"' && value_end[-1] == '"') ||
-                                                    (*value == '\'' && value_end[-1] == '\''));
-            if (quoted) {
-                value++;
-                value_end--;
-            }
-            size_t value_len = value_end > value ? (size_t)(value_end - value) : 0;
-            if (!quoted && value_len > 0 && (*value == '|' || *value == '>'))
-                value_len = 0;
-            if (value_len > SKILL_DESCRIPTION_MAX_BYTES)
-                value_len = SKILL_DESCRIPTION_MAX_BYTES;
-            if (value_len > 0)
-                description = utf8_sanitize(value, value_len);
+    size_t description_len = strlen(description);
+    if (description_len > SKILL_DESCRIPTION_MAX_BYTES) {
+        /* Keep whole codepoints only: cut at the last boundary within the limit. */
+        size_t cut = 0;
+        for (;;) {
+            size_t next = utf8_next(description, description_len, cut);
+            if (next > SKILL_DESCRIPTION_MAX_BYTES)
+                break;
+            cut = next;
         }
-        if (line_end == content_end)
-            break;
-        cursor = line_end + 1;
+        description[cut] = '\0';
     }
-
-    free(description);
-    return NULL;
+    return description;
 }
 
 struct skill_entry {
@@ -395,7 +362,7 @@ static void collect_skills(struct skill_list *skills, const char *root)
         struct skill_entry skill = {
             .name = name,
             .display_path = sanitize_display_path(skill_path),
-            .description = parse_skill_description(frontmatter, frontmatter_len),
+            .description = read_skill_description(frontmatter, frontmatter_len),
         };
         skill_list_add(skills, skill);
         free(frontmatter);
