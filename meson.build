@@ -198,6 +198,7 @@ sources = files(
     'src/tools/bash_shell.c',
     'src/tools/edit.c',
     'src/tools/image_sniff.c',
+    'src/tools/loop_control.c',
     'src/tools/output_cap.c',
     'src/tools/path_preprocess.c',
     'src/tools/read.c',

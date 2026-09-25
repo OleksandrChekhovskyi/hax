@@ -25,6 +25,7 @@ const struct tool TOOL_READ = {.def = {.name = "read"}, .run = stub_run};
 const struct tool TOOL_BASH = {.def = {.name = "bash"}, .run = stub_run};
 const struct tool TOOL_WRITE = {.def = {.name = "write"}, .run = stub_run};
 const struct tool TOOL_EDIT = {.def = {.name = "edit"}, .run = stub_run};
+const struct tool TOOL_LOOP_CONTROL = {.def = {.name = "loop_control"}, .run = stub_run};
 
 /* Link-only agent stubs retain the session effects asserted below. */
 void agent_new_conversation(struct agent_state *state)

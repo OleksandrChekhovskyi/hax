@@ -23,6 +23,8 @@ struct tool_run_ctx {
     /* Length of a trailing model-only annotation in the returned output; user-facing rendering
      * omits it. Control-free text only, so stripping the stored copy keeps the length valid. */
     size_t output_hidden_tail;
+    /* Frontend-owned context for tools implemented by the active frontend. */
+    void *user;
 };
 
 enum tool_output_style {
@@ -76,5 +78,6 @@ extern const struct tool TOOL_EDIT;
 extern const struct tool TOOL_WRITE;
 extern const struct tool TOOL_BASH;
 extern const struct tool TOOL_TASK_WAIT;
+extern const struct tool TOOL_LOOP_CONTROL;
 
 #endif /* HAX_TOOL_H */

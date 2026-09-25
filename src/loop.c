@@ -317,6 +317,29 @@ int loop_schedule_cancel_next(struct loop_schedule *schedule)
     return (int)id;
 }
 
+int loop_schedule_control(struct loop_schedule *schedule, long delay_ms, int stop)
+{
+    if (!schedule || schedule->active >= schedule->count)
+        return -1;
+    struct loop_task *task = &schedule->tasks[schedule->active];
+    if (!task->self_paced)
+        return -1;
+    if (stop) {
+        size_t active = schedule->active;
+        remove_at(schedule, active);
+        return 0;
+    }
+    if (delay_ms < LOOP_SELF_PACED_MIN_DELAY_MS || delay_ms > LOOP_SELF_PACED_MAX_DELAY_MS)
+        return -1;
+
+    long now = monotonic_ms();
+    task->next_due_ms = now + delay_ms;
+    if (task->next_due_ms >= task->expires_at_ms)
+        task->next_due_ms = task->expires_at_ms - 1;
+    task->continuation_set = 1;
+    return 0;
+}
+
 long loop_schedule_deadline(struct loop_schedule *schedule, long now_ms)
 {
     if (!schedule)

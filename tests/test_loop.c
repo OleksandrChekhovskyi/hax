@@ -4,6 +4,7 @@
 
 #include "harness.h"
 #include "loop.h"
+#include "tool.h"
 
 static void test_parse_interval(void)
 {
@@ -87,11 +88,43 @@ static void test_schedule_clear_and_limits(void)
     loop_schedule_free(schedule);
 }
 
+static void test_loop_control_tool(void)
+{
+    struct loop_schedule *schedule = loop_schedule_new();
+    EXPECT(loop_schedule_add(schedule, "poll", 1, 0, NULL) == 0);
+    long deadline = loop_schedule_deadline(schedule, 0);
+    int self_paced = 0;
+    EXPECT(loop_schedule_take_due(schedule, deadline, &self_paced) != NULL && self_paced);
+
+    struct tool_run_ctx ctx = {.user = schedule};
+    char *output = TOOL_LOOP_CONTROL.run("{}", &ctx);
+    EXPECT(strstr(output, "delay_seconds") != NULL);
+    free(output);
+    output = TOOL_LOOP_CONTROL.run("{\"delay_seconds\":30}", &ctx);
+    EXPECT(strstr(output, "delay_seconds") != NULL);
+    free(output);
+    output = TOOL_LOOP_CONTROL.run("{\"delay_seconds\":300}", &ctx);
+    EXPECT_STR_EQ(output, "self-paced loop continues in 300 seconds");
+    free(output);
+
+    long fallback = -1;
+    EXPECT(loop_schedule_finish(schedule, deadline, &fallback) == 0 && fallback == 0);
+    deadline = loop_schedule_deadline(schedule, deadline);
+    EXPECT(deadline > 0);
+    EXPECT(loop_schedule_take_due(schedule, deadline, &self_paced) != NULL && self_paced);
+    output = TOOL_LOOP_CONTROL.run("{\"stop\":true}", &ctx);
+    EXPECT_STR_EQ(output, "self-paced loop stopped");
+    free(output);
+    EXPECT(loop_schedule_count(schedule) == 0);
+    loop_schedule_free(schedule);
+}
+
 int main(void)
 {
     test_parse_interval();
     test_parse_spec();
     test_schedule_lifecycle();
     test_schedule_clear_and_limits();
+    test_loop_control_tool();
     T_REPORT();
 }

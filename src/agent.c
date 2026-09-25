@@ -19,6 +19,7 @@
 #include "diag.h"
 #include "file_mention.h"
 #include "history.h"
+#include "loop.h"
 #include "model_meta.h"
 #include "paste_image.h"
 #include "provider.h"
@@ -1002,7 +1003,7 @@ static struct item repl_loop_tool_call(const struct item *call, enum agent_loop_
         render_set_mode(render, RENDER_IDLE);
         return dispatch_tool_skipped(render, call);
     }
-    return dispatch_tool_call(render, call, image_input);
+    return dispatch_tool_call(render, call, image_input, ctx->state->loops);
 }
 
 static void repl_loop_compact(void *user)

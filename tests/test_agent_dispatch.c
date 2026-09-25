@@ -149,7 +149,7 @@ static const char *run_write(const char *path, const char *content_json, struct 
     struct render_ctx render = {0};
     render.mode = RENDER_IDLE;
     render.spinner = spinner_new(NULL);
-    *out = dispatch_tool_call(&render, &call, -1);
+    *out = dispatch_tool_call(&render, &call, -1, NULL);
     const char *cap = cap_read();
     spinner_free(render.spinner);
 
@@ -215,7 +215,7 @@ static void test_selector_overrides_non_collapsed_mode(void)
     struct render_ctx render = {.mode = RENDER_IDLE, .spinner = spinner_new(NULL)};
 
     cap_reset();
-    struct item result = dispatch_tool_call(&render, &call, -1);
+    struct item result = dispatch_tool_call(&render, &call, -1, NULL);
     const char *cap = cap_read();
 
     EXPECT(strstr(cap, "more line") != NULL);
@@ -239,7 +239,7 @@ static void test_hidden_tail_not_displayed_by_fallback(void)
     struct render_ctx render = {.mode = RENDER_IDLE, .spinner = spinner_new(NULL)};
 
     cap_reset();
-    struct item result = dispatch_tool_call(&render, &call, -1);
+    struct item result = dispatch_tool_call(&render, &call, -1, NULL);
     const char *cap = cap_read();
 
     EXPECT(strstr(cap, "body-line") != NULL);

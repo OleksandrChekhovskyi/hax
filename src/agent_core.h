@@ -28,6 +28,7 @@
 
 struct hax_opts {
     int raw;                   /* send only user content and advertise no tools */
+    int loop_tools;            /* advertise the interactive self-paced loop control */
     const char *resume_path;   /* borrowed session path; NULL starts a new session */
     int provider_autoselected; /* show the one-shot provider-selection banner */
     int json;                  /* one-shot: stream conversation records as JSONL on stdout */

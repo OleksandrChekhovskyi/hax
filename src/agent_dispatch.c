@@ -325,7 +325,8 @@ void render_collapsed_tool_call(struct render_ctx *render, const struct item *ca
 }
 
 static struct item dispatch_tool_call_collapsed(struct render_ctx *render,
-                                                struct agent_tool_call *prepared, int image_input)
+                                                struct agent_tool_call *prepared, int image_input,
+                                                void *user)
 {
     const struct item *call = &prepared->effective;
     struct spinner *spinner = render->spinner;
@@ -345,7 +346,7 @@ static struct item dispatch_tool_call_collapsed(struct render_ctx *render,
     spinner_park(spinner, is_read ? render->cluster.line_cells : 0);
     spinner_swap_end(spinner);
 
-    struct tool_run_ctx run_ctx = {.image_input = image_input};
+    struct tool_run_ctx run_ctx = {.image_input = image_input, .user = user};
     char *output = agent_tool_call_run(prepared, &run_ctx);
     spinner_request_label(spinner, "working", "working...");
 
@@ -379,7 +380,8 @@ void render_tool_solo_marker(struct render_ctx *render, const char *text)
 /* Display callbacks are user-facing only; agent_tool_result_make normalizes stored output. */
 static struct item dispatch_tool_call_verbose(struct render_ctx *render,
                                               struct agent_tool_call *prepared,
-                                              enum tool_preview_mode preview_mode, int image_input)
+                                              enum tool_preview_mode preview_mode, int image_input,
+                                              void *user)
 {
     const struct item *call = &prepared->effective;
     const struct tool *tool = prepared->tool;
@@ -401,6 +403,7 @@ static struct item dispatch_tool_call_verbose(struct render_ctx *render,
         .display = tool_render_emit,
         .display_data = &renderer,
         .image_input = image_input,
+        .user = user,
     };
     char *output = agent_tool_call_run(prepared, &run_ctx);
 
@@ -431,7 +434,8 @@ static struct item dispatch_tool_call_verbose(struct render_ctx *render,
     return result;
 }
 
-struct item dispatch_tool_call(struct render_ctx *render, const struct item *call, int image_input)
+struct item dispatch_tool_call(struct render_ctx *render, const struct item *call, int image_input,
+                               void *user)
 {
     struct agent_tool_call prepared;
     agent_tool_call_init(&prepared, call);
@@ -441,8 +445,8 @@ struct item dispatch_tool_call(struct render_ctx *render, const struct item *cal
                     preview_mode == TOOL_PREVIEW_COLLAPSED ? RENDER_TOOL_CLUSTER : RENDER_IDLE);
     struct item result =
         preview_mode == TOOL_PREVIEW_COLLAPSED
-            ? dispatch_tool_call_collapsed(render, &prepared, image_input)
-            : dispatch_tool_call_verbose(render, &prepared, preview_mode, image_input);
+            ? dispatch_tool_call_collapsed(render, &prepared, image_input, user)
+            : dispatch_tool_call_verbose(render, &prepared, preview_mode, image_input, user);
     agent_tool_call_destroy(&prepared);
     return result;
 }

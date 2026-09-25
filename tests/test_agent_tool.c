@@ -44,6 +44,7 @@ const struct tool TOOL_READ = {
 const struct tool TOOL_BASH = {.def = {.name = "bash"}, .run = record_run};
 const struct tool TOOL_WRITE = {.def = {.name = "write"}, .run = record_run};
 const struct tool TOOL_EDIT = {.def = {.name = "edit"}, .run = record_run};
+const struct tool TOOL_LOOP_CONTROL = {.def = {.name = "loop_control"}, .run = record_run};
 
 static struct item make_call(const char *name, const char *args)
 {

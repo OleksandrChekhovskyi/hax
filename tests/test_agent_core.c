@@ -23,6 +23,7 @@ const struct tool TOOL_READ = {.def = {.name = "read"}, .run = stub_run};
 const struct tool TOOL_EDIT = {.def = {.name = "edit"}, .run = stub_run};
 const struct tool TOOL_WRITE = {.def = {.name = "write"}, .run = stub_run};
 const struct tool TOOL_BASH = {.def = {.name = "bash"}, .run = stub_run};
+const struct tool TOOL_LOOP_CONTROL = {.def = {.name = "loop_control"}, .run = stub_run};
 
 static void test_session_append(void)
 {
@@ -50,6 +51,7 @@ static void test_find_tool(void)
     EXPECT(agent_find_tool("bash") == &TOOL_BASH);
     EXPECT(agent_find_tool("write") == &TOOL_WRITE);
     EXPECT(agent_find_tool("edit") == &TOOL_EDIT);
+    EXPECT(agent_find_tool("loop_control") == &TOOL_LOOP_CONTROL);
     EXPECT(agent_find_tool("nonexistent") == NULL);
     EXPECT(agent_find_tool("") == NULL);
 }
@@ -440,6 +442,31 @@ static void test_session_init_missing_provider(void)
     agent_session_free(&s);
 
     unsetenv("HAX_SYSTEM_PROMPT");
+}
+
+static int session_has_tool(const struct agent_session *session, const char *name)
+{
+    for (size_t i = 0; i < session->n_tools; i++)
+        if (strcmp(session->tools[i].name, name) == 0)
+            return 1;
+    return 0;
+}
+
+static void test_loop_control_is_interactive_only(void)
+{
+    setenv("HAX_MODEL", "model-x", 1);
+    struct provider provider = {.name = "test"};
+    struct hax_opts opts = {.loop_tools = 1};
+    struct agent_session session;
+    agent_session_init(&session, &provider, &opts);
+    EXPECT(session_has_tool(&session, "loop_control"));
+    agent_session_free(&session);
+
+    opts.loop_tools = 0;
+    agent_session_init(&session, &provider, &opts);
+    EXPECT(!session_has_tool(&session, "loop_control"));
+    agent_session_free(&session);
+    unsetenv("HAX_MODEL");
 }
 
 static void test_session_add_user(void)
@@ -899,6 +926,7 @@ int main(void)
     test_session_init_raw();
     test_session_init_missing_model();
     test_session_init_missing_provider();
+    test_loop_control_is_interactive_only();
     test_session_add_user();
     test_session_add_loop();
     test_session_absorb_no_tool_call();

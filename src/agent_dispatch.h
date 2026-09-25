@@ -9,8 +9,10 @@
  * a model call while rendering its tool block live; the render_* halves are also used alone to
  * replay recorded calls. */
 
-/* Render and run a tool call. The returned ITEM_TOOL_RESULT owns its fields. */
-struct item dispatch_tool_call(struct render_ctx *render, const struct item *call, int image_input);
+/* Render and run a tool call. `user` is frontend-owned context exposed through tool_run_ctx. The
+ * returned ITEM_TOOL_RESULT owns its fields. */
+struct item dispatch_tool_call(struct render_ctx *render, const struct item *call, int image_input,
+                               void *user);
 
 /* Render a call that was skipped after interruption and return its synthetic result. */
 struct item dispatch_tool_skipped(struct render_ctx *render, const struct item *call);

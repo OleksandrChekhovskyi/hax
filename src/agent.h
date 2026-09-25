@@ -10,6 +10,7 @@
 struct transcript_log;
 struct session_log;
 struct render_ctx;
+struct loop_schedule;
 
 /* Why an incomplete user turn can be resumed from the prompt. */
 enum agent_resume_reason {
@@ -27,8 +28,9 @@ struct agent_state {
     struct transcript_log *transcript;
     struct session_log *session_log; /* NULL when session recording is disabled or unavailable */
     struct render_ctx *render;
-    char *pending_recall;  /* owned prompt to add to editor recall after a slash command */
-    char *pending_preseed; /* owned text to seed into the next prompt */
+    struct loop_schedule *loops; /* owned by the interactive frontend */
+    char *pending_recall;        /* owned prompt to add to editor recall after a slash command */
+    char *pending_preseed;       /* owned text to seed into the next prompt */
     enum agent_resume_reason resume_reason;
     int compaction_deferred; /* settle before appending the next prompt */
 };

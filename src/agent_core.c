@@ -58,7 +58,7 @@ static const char DEFAULT_SYSTEM_PROMPT[] =
     "findings is a valid result.";
 
 static const struct tool *const TOOLS[] = {
-    &TOOL_READ, &TOOL_EDIT, &TOOL_WRITE, &TOOL_BASH, &TOOL_TASK_WAIT,
+    &TOOL_READ, &TOOL_EDIT, &TOOL_WRITE, &TOOL_BASH, &TOOL_TASK_WAIT, &TOOL_LOOP_CONTROL,
 };
 static const size_t N_TOOLS = sizeof(TOOLS) / sizeof(TOOLS[0]);
 
@@ -223,6 +223,8 @@ void agent_session_init(struct agent_session *session, struct provider *provider
     if (!opts->raw) {
         session->tools = xmalloc(N_TOOLS * sizeof(*session->tools));
         for (size_t i = 0; i < N_TOOLS; i++) {
+            if (TOOLS[i] == &TOOL_LOOP_CONTROL && !opts->loop_tools)
+                continue;
             const struct tool_def *def =
                 TOOLS[i]->advertise ? TOOLS[i]->advertise() : &TOOLS[i]->def;
             if (def)
