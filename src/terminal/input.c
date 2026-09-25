@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <libgen.h>
+#include <limits.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -19,6 +20,7 @@
 
 #include "buf.h"
 #include "xalloc.h"
+#include "system/clock.h"
 #include "system/fd.h"
 #include "system/fs.h"
 #include "system/locale.h"
@@ -139,6 +141,30 @@ static int read_byte_timeout(unsigned char *out, int timeout_ms)
     return read_byte_blocking(out);
 }
 
+static int read_byte_until(unsigned char *out, long deadline_ms)
+{
+    if (deadline_ms <= 0)
+        return read_byte_blocking(out);
+
+    for (;;) {
+        long remaining_ms = deadline_ms - monotonic_ms();
+        if (remaining_ms <= 0)
+            return 0;
+        int timeout_ms = remaining_ms > INT_MAX ? INT_MAX : (int)remaining_ms;
+        struct pollfd input = {.fd = STDIN_FILENO, .events = POLLIN};
+        int result = poll(&input, 1, timeout_ms);
+        if (result < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (result == 0)
+            return 0;
+        int byte_result = read_byte_blocking(out);
+        return byte_result == 0 ? -1 : byte_result;
+    }
+}
+
 /* ---------------- bracketed paste ---------------- */
 
 typedef void (*paste_sink_fn)(void *user, const char *bytes, size_t len);
@@ -236,6 +262,21 @@ static int read_escape_byte(void *user)
     return b;
 }
 
+struct escape_prefix {
+    unsigned char byte;
+    int pending;
+};
+
+static int read_escape_prefix(void *user)
+{
+    struct escape_prefix *prefix = user;
+    if (prefix->pending) {
+        prefix->pending = 0;
+        return prefix->byte;
+    }
+    return read_escape_byte(NULL);
+}
+
 static void apply_action(struct input *in, enum input_action a)
 {
     switch (a) {
@@ -288,9 +329,19 @@ static void apply_action(struct input *in, enum input_action a)
     }
 }
 
-static void handle_escape_sequence(struct input *in)
+/* Return 1 for a bare Escape, -1 for an input error, and 0 after consuming a sequence. */
+static int handle_escape_sequence(struct input *in)
 {
-    apply_action(in, input_core_decode_escape(read_escape_byte, NULL));
+    unsigned char first;
+    int result = read_byte_timeout(&first, ESC_TIMEOUT_MS);
+    if (result < 0)
+        return -1;
+    if (result == 0)
+        return 1;
+
+    struct escape_prefix prefix = {.byte = first, .pending = 1};
+    apply_action(in, input_core_decode_escape(read_escape_prefix, &prefix));
+    return 0;
 }
 
 /* ---------------- render / paint ---------------- */
@@ -1372,19 +1423,29 @@ void input_history_open_tty(struct input *in, const char *path, int persist)
 
 /* ---------------- public API ---------------- */
 
-char *input_readline(struct input *in, const char *prompt)
+enum input_readline_result input_readline_until(struct input *in, const char *prompt,
+                                                long deadline_ms, char **line_out)
 {
+    if (line_out)
+        *line_out = NULL;
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
         /* Prevent a stale seed from reaching a later interactive read. */
         free(in->preseed);
         in->preseed = NULL;
         size_t n;
         char *raw = read_line_canonical(&n);
-        if (!raw)
-            return NULL;
+        if (!raw) {
+            if (line_out)
+                *line_out = NULL;
+            return INPUT_READLINE_EOF;
+        }
         char *clean = utf8_sanitize(raw, n);
         free(raw);
-        return clean;
+        if (line_out)
+            *line_out = clean;
+        else
+            free(clean);
+        return INPUT_READLINE_LINE;
     }
 
     in->prompt = prompt;
@@ -1415,11 +1476,17 @@ char *input_readline(struct input *in, const char *prompt)
 
     int submit = 0;
     int eof = 0;
+    int timed_out = 0;
+    int cancelled = 0;
 
-    while (!submit && !eof) {
+    while (!submit && !eof && !timed_out && !cancelled) {
         unsigned char c;
-        int r = read_byte_blocking(&c);
-        if (r <= 0) {
+        int r = read_byte_until(&c, deadline_ms);
+        if (r == 0) {
+            timed_out = 1;
+            break;
+        }
+        if (r < 0) {
             eof = 1;
             break;
         }
@@ -1520,7 +1587,8 @@ char *input_readline(struct input *in, const char *prompt)
             refresh_terminal_size(in);
             break;
         case 0x1b: /* ESC — start of escape sequence */
-            handle_escape_sequence(in);
+            if (handle_escape_sequence(in) > 0 && deadline_ms > 0)
+                cancelled = 1;
             break;
         default:
             if (c >= 0x20) {
@@ -1543,7 +1611,7 @@ char *input_readline(struct input *in, const char *prompt)
             break;
         }
 
-        if (!eof && !submit)
+        if (!eof && !submit && !timed_out && !cancelled)
             paint(in);
     }
 
@@ -1554,7 +1622,26 @@ char *input_readline(struct input *in, const char *prompt)
     disable_raw_mode(in);
 
     if (eof && in->len == 0)
-        return NULL;
+        return INPUT_READLINE_EOF;
     /* Jansson rejects malformed UTF-8, so normalize external input before returning it. */
-    return utf8_sanitize(in->buf, in->len);
+    char *line = utf8_sanitize(in->buf, in->len);
+    if (line_out)
+        *line_out = line;
+    else
+        free(line);
+    if (timed_out)
+        return INPUT_READLINE_TIMEOUT;
+    if (cancelled)
+        return INPUT_READLINE_CANCELLED;
+    return INPUT_READLINE_LINE;
+}
+
+char *input_readline(struct input *in, const char *prompt)
+{
+    char *line = NULL;
+    enum input_readline_result result = input_readline_until(in, prompt, 0, &line);
+    if (result == INPUT_READLINE_LINE)
+        return line;
+    free(line);
+    return NULL;
 }

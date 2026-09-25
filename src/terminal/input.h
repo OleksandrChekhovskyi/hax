@@ -13,6 +13,19 @@ struct input;
 struct input *input_new(void);
 void input_free(struct input *in);
 
+enum input_readline_result {
+    INPUT_READLINE_LINE,
+    INPUT_READLINE_EOF,
+    INPUT_READLINE_TIMEOUT,
+    INPUT_READLINE_CANCELLED,
+};
+
+/* Read one editor line. A nonzero deadline is an absolute monotonic instant; when it passes,
+ * `line_out` receives the current draft and INPUT_READLINE_TIMEOUT is returned. A bare Escape
+ * returns INPUT_READLINE_CANCELLED under the same deadline. The returned text is malloc'd. */
+enum input_readline_result input_readline_until(struct input *in, const char *prompt,
+                                                long deadline_ms, char **line_out);
+
 /* Return a malloc'd message, which may contain '\n'; return NULL on EOF or a
  * double Ctrl-C quit. Ctrl-C with text clears the buffer and editing continues. */
 char *input_readline(struct input *in, const char *prompt);
