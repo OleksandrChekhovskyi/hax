@@ -219,6 +219,13 @@ static void test_synthetic_user_messages_have_distinct_labels(void)
     EXPECT(!contains(continuation_output, "── user ──"));
     EXPECT(!contains(continuation_output, ANSI_BRIGHT_MAGENTA));
     free(continuation_output);
+
+    struct item loop_items[] = {
+        {.kind = ITEM_USER_MESSAGE, .text = (char *)"scheduled work", .origin = ITEM_ORIGIN_LOOP}};
+    char *loop_output = render_to_string(NULL, loop_items, 1);
+    EXPECT(contains(loop_output, "── loop ──"));
+    EXPECT(contains(loop_output, "scheduled work"));
+    free(loop_output);
 }
 
 static void test_user_multiline_raw(void)

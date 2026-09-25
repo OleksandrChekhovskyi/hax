@@ -385,6 +385,28 @@ void agent_session_add_user(struct agent_session *session, const char *text)
     agent_session_append(session, (struct item){.kind = ITEM_USER_MESSAGE, .text = xstrdup(text)});
 }
 
+void agent_session_add_loop(struct agent_session *session, const char *text, int self_paced)
+{
+    char *model_text =
+        self_paced ? xasprintf(LOOP_SELF_PACED_INSTRUCTION "%s", text) : xstrdup(text);
+    agent_session_append(session, (struct item){.kind = ITEM_TURN_BOUNDARY});
+    agent_session_append(session, (struct item){
+                                      .kind = ITEM_USER_MESSAGE,
+                                      .text = model_text,
+                                      .origin = ITEM_ORIGIN_LOOP,
+                                  });
+}
+
+const char *agent_loop_prompt_text(const struct item *item)
+{
+    if (!item || item->origin != ITEM_ORIGIN_LOOP || !item->text)
+        return item ? item->text : NULL;
+    size_t instruction_length = strlen(LOOP_SELF_PACED_INSTRUCTION);
+    if (strncmp(item->text, LOOP_SELF_PACED_INSTRUCTION, instruction_length) == 0)
+        return item->text + instruction_length;
+    return item->text;
+}
+
 void agent_session_add_continuation(struct agent_session *session)
 {
     agent_session_append(session, (struct item){.kind = ITEM_TURN_BOUNDARY});

@@ -235,6 +235,8 @@ static void render_streamed_range(struct render_ctx *render, const struct item *
                 render_compaction_marker(render);
             else if (item->origin == ITEM_ORIGIN_TASK_NOTE)
                 render_dim_marker(render, item->text ? item->text : "");
+            else if (item->origin == ITEM_ORIGIN_LOOP)
+                render_user_message(render, agent_loop_prompt_text(item));
             else if (item->origin == ITEM_ORIGIN_NONE)
                 render_user_message(render, item->text);
             break;

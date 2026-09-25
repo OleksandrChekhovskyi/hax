@@ -461,6 +461,26 @@ static void test_session_add_user(void)
     EXPECT(s.n_items == 0);
 }
 
+static void test_session_add_loop(void)
+{
+    struct agent_session s = {0};
+    agent_session_add_loop(&s, "check CI", 1);
+    EXPECT(s.n_items == 2);
+    EXPECT(s.items[0].kind == ITEM_TURN_BOUNDARY);
+    EXPECT(s.items[1].kind == ITEM_USER_MESSAGE);
+    EXPECT(s.items[1].origin == ITEM_ORIGIN_LOOP);
+    EXPECT(strstr(s.items[1].text, "loop_control") != NULL);
+    EXPECT(!item_is_typed_prompt(&s.items[1]));
+    EXPECT_STR_EQ(agent_loop_prompt_text(&s.items[1]), "check CI");
+    agent_session_free(&s);
+
+    memset(&s, 0, sizeof(s));
+    agent_session_add_loop(&s, "fixed", 0);
+    EXPECT_STR_EQ(s.items[1].text, "fixed");
+    EXPECT_STR_EQ(agent_loop_prompt_text(&s.items[1]), "fixed");
+    agent_session_free(&s);
+}
+
 static void feed_turn(struct turn *turn, struct stream_event event)
 {
     turn_consume(turn, &event);
@@ -880,6 +900,7 @@ int main(void)
     test_session_init_missing_model();
     test_session_init_missing_provider();
     test_session_add_user();
+    test_session_add_loop();
     test_session_absorb_no_tool_call();
     test_session_absorb_with_tool_call();
     test_session_context_snapshot();

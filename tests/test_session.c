@@ -216,6 +216,12 @@ static void test_item_codec_round_trip(void)
 {
     for (size_t i = 0; i < CONVERSATION_COUNT; i++)
         expect_item_codec_round_trip(&CONVERSATION[i]);
+    struct item loop = {
+        .kind = ITEM_USER_MESSAGE,
+        .text = (char *)"scheduled prompt",
+        .origin = ITEM_ORIGIN_LOOP,
+    };
+    expect_item_codec_round_trip(&loop);
 }
 
 static void test_recording_control(void)

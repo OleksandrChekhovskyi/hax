@@ -21,6 +21,11 @@
 /* Synthetic user text for an empty-send resume. Origin, not text, identifies continuations. */
 #define CONTINUE_MARKER "[continue]"
 
+#define LOOP_SELF_PACED_INSTRUCTION                                                                \
+    "This is an iteration of a self-paced loop. After doing the work, call "                       \
+    "loop_control with delay_seconds between 60 and 3600, or with stop=true when "                 \
+    "the task is complete.\n\n"
+
 struct hax_opts {
     int raw;                   /* send only user content and advertise no tools */
     const char *resume_path;   /* borrowed session path; NULL starts a new session */
@@ -107,6 +112,13 @@ void agent_session_append(struct agent_session *session, struct item item);
 
 /* Append a turn boundary followed by a copied user message. */
 void agent_session_add_user(struct agent_session *session, const char *text);
+
+/* Append a scheduled loop turn. Self-paced turns carry model-facing continuation guidance while
+ * history keeps the user-visible prompt separate. */
+void agent_session_add_loop(struct agent_session *session, const char *text, int self_paced);
+
+/* Return the user-visible portion of a loop item, or `item` text unchanged. */
+const char *agent_loop_prompt_text(const struct item *item);
 
 /* Append the synthetic user turn used to resume an interrupted response. */
 void agent_session_add_continuation(struct agent_session *session);

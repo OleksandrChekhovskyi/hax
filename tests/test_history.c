@@ -635,6 +635,19 @@ static void test_compaction_seed_renders_as_marker(void)
     free(out);
 }
 
+static void test_loop_prompt_hides_model_guidance(void)
+{
+    struct item items[1] = {0};
+    items[0].kind = ITEM_USER_MESSAGE;
+    items[0].text = (char *)LOOP_SELF_PACED_INSTRUCTION "check CI";
+    items[0].origin = ITEM_ORIGIN_LOOP;
+
+    char *out = render(HISTORY_FULL, items, 1, 0);
+    EXPECT(strstr(out, "check CI") != NULL);
+    EXPECT(strstr(out, "loop_control") == NULL);
+    free(out);
+}
+
 /* A session resumed on a compaction seed must not print its first real prompt
  * onto the marker's row. */
 static void test_marker_separates_from_next_block(void)
@@ -1086,6 +1099,7 @@ int main(void)
     test_repeated_call_ids_do_not_pair_across_turns();
     test_orphan_call_renders_header();
     test_compaction_seed_renders_as_marker();
+    test_loop_prompt_hides_model_guidance();
     test_marker_separates_from_next_block();
     test_reasoning_follows_setting();
     test_interrupt_marker_split_out();
