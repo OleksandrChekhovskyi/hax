@@ -734,8 +734,7 @@ static void stop_loops(struct agent_state *state, const char *argument)
     unsigned long long value = strtoull(argument, &end, 10);
     while (*end && isspace((unsigned char)*end))
         end++;
-    if (errno == ERANGE || end == argument || *end || value == 0 ||
-        (unsigned long long)(size_t)value != value) {
+    if (errno == ERANGE || end == argument || *end || value == 0 || value > SIZE_MAX) {
         ui_error("%s", LOOP_USAGE);
         return;
     }
