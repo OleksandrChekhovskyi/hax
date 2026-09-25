@@ -92,12 +92,23 @@ Type `/help` for the authoritative live list.
 | `/preset-save <name> [tint]` | Save the current provider/model/effort as a preset. |
 | `/config [key [value]]` | Inspect settings or change one for this process. |
 | `/compact [focus]` | Summarize older context, optionally emphasizing a focus. |
+| `/loop [interval] [prompt]` | Run a prompt on a fixed or adaptive schedule. |
+| `/loop list` | List active loops and their next runs. |
+| `/loop stop <id\|all>` | Stop one loop or all loops. |
 | `/copy` | Copy the latest assistant response. |
 | `/tasks [kill <id>... \| kill all]` | List or stop background tasks. |
 | `/session` | Show the session's selection and usage totals. |
 | `/usage` | Query provider account/subscription usage when supported. |
 | `/login [provider]` | Log in to a provider account with a hax-managed token (ChatGPT/codex). |
 | `/logout [provider]` | Revoke and remove a hax-managed login. |
+
+`/loop 5m check the deployment` runs the prompt every five minutes. Intervals accept `s`, `m`,
+`h`, and `d`; values below one minute round up. With no interval, the loop starts immediately and
+the model chooses each following delay, from one minute to one hour. `/loop` without a prompt
+uses a maintenance prompt for unfinished work, the current pull request, and small cleanups.
+Press Escape while waiting to cancel the next loop, or use `/loop list` and `/loop stop`.
+Loops are session-scoped, do not survive a new conversation or resume, and expire after seven
+days. A due loop waits for the current turn to finish; missed intervals are not replayed.
 
 Prefer `/fork` when trying an alternative: the original session stays intact. `/undo` has no redo;
 the removed user turns still count toward the session's usage totals.

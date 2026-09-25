@@ -77,8 +77,9 @@ Conversation records, in order. `kind` is one of:
 | `turn_usage` | Usage footer for one round-trip; see below. |
 
 `origin` marks synthetic records: `compact_seed` (a compaction summary), `continuation`,
-`interrupted`, `skipped`, `refused`, `summarized`, `task_note` (a background-task report), and
-`compaction` (a `turn_usage` footer for a summarization request rather than an agent turn).
+`loop` (a scheduled iteration), `interrupted`, `skipped`, `refused`, `summarized`, `task_note`
+(a background-task report), and `compaction` (a `turn_usage` footer for a summarization request
+rather than an agent turn).
 Items without `origin` are ordinary typed or streamed content. `inherited: true` marks items
 `/fork` copied from the source session: context this conversation reads but did not pay for.
 
