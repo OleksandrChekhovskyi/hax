@@ -99,6 +99,7 @@ sources = files(
     'src/file_mention.c',
     'src/history.c',
     'src/login.c',
+    'src/loop.c',
     'src/model_meta.c',
     'src/model_sort.c',
     'src/oneshot.c',
