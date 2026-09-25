@@ -45,6 +45,7 @@
 #include "terminal/ui.h"
 #include "terminal/vt_resolve.h"
 #include "terminal/width.h"
+#include "text/fmt.h"
 #include "tools/bash_process.h"
 #include "tools/task_registry.h"
 
@@ -553,6 +554,7 @@ static void finalize_tasks(struct agent_state *state)
 void agent_new_conversation(struct agent_state *state)
 {
     finalize_tasks(state);
+    loop_schedule_clear(state->loops);
     clear_resume_state(state);
     agent_session_reset(state->session);
     transcript_log_reset(state->transcript, state->session->system_prompt, state->session->tools,
@@ -667,6 +669,8 @@ void agent_resume_session(struct agent_state *state, const char *path)
         disp_sync_external_line(&state->render->disp);
         return;
     }
+
+    loop_schedule_clear(state->loops);
 
     /* Resolve tasks into the conversation being left while its logs still record it. */
     finalize_tasks(state);
@@ -1031,6 +1035,35 @@ static void repl_loop_task_note(const char *text, void *user)
     disp_flush(&render->disp);
 }
 
+static void render_loop_prompt(struct render_ctx *render, const char *text)
+{
+    render_open_block(render);
+    char *label = xasprintf("[loop] %s", text);
+    input_render_user_message_to(disp_sink(&render->disp), label, strlen(label),
+                                 input_display_cols());
+    free(label);
+    disp_sync_external_line(&render->disp);
+}
+
+static void finish_scheduled_loop(struct agent_state *state, int scheduled)
+{
+    if (!scheduled)
+        return;
+    long fallback_delay_ms = 0;
+    if (!loop_schedule_finish(state->loops, monotonic_ms(), &fallback_delay_ms))
+        return;
+
+    char delay[32];
+    format_duration(delay, sizeof(delay), fallback_delay_ms);
+    struct render_ctx *render = state->render;
+    render_open_block(render);
+    disp_write_ansi(&render->disp, ANSI_DIM);
+    disp_printf(&render->disp, "loop continues in %s", delay);
+    disp_write_ansi(&render->disp, ANSI_RESET);
+    disp_putc(&render->disp, '\n');
+    disp_flush(&render->disp);
+}
+
 static char *slash_hint_cb(const char *buf, void *user)
 {
     (void)user;
@@ -1085,8 +1118,10 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
     /* Slash handlers replace state.provider; resynchronize this local after each dispatch and
      * return the final live provider to the caller. */
     struct provider *current_provider = *provider_io;
+    struct hax_opts interactive_options = *options;
+    interactive_options.loop_tools = 1;
     struct agent_session session;
-    agent_session_init(&session, current_provider, options);
+    agent_session_init(&session, current_provider, &interactive_options);
 
     /* Recording controls new session and prompt-history writes, not reads. Mid-run resume
      * re-evaluates it after restoring the provider. */
@@ -1118,10 +1153,12 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
         transcript_log_open(session.system_prompt, session.tools, session.n_tools);
     /* Slash handlers borrow this frame. Keep the session log on state because /resume can replace
      * and close it mid-run. */
+    struct loop_schedule *loops = loop_schedule_new();
     struct agent_state state = {.session = &session,
                                 .provider = current_provider,
                                 .transcript = transcript,
-                                .render = &render};
+                                .render = &render,
+                                .loops = loops};
     if (options->resume_path) {
         struct agent_resumed resumed;
         agent_session_prepare_resumed(&session, current_provider, options->resume_path,
@@ -1163,15 +1200,43 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
         /* Only a resumable turn gives an empty send a meaning; otherwise
          * the editor keeps swallowing bare Enter. */
         input_set_empty_submit(input, state.resume_reason != AGENT_RESUME_NONE);
+        long deadline_ms = state.resume_reason == AGENT_RESUME_NONE
+                               ? loop_schedule_deadline(state.loops, monotonic_ms())
+                               : 0;
         cursor_show();
         /* Rebuilt each iteration so a runtime theme change (/config theme …)
          * recolors the prompt instead of keeping the startup theme's bytes. */
-        char *line = input_readline(input, build_prompt(prompt_buffer, sizeof(prompt_buffer)));
+        char *line = NULL;
+        enum input_readline_result read_result = input_readline_until(
+            input, build_prompt(prompt_buffer, sizeof(prompt_buffer)), deadline_ms, &line);
         cursor_hide();
-        if (!line) {
+
+        int scheduled = 0;
+        int loop_self_paced = 0;
+        if (read_result == INPUT_READLINE_TIMEOUT) {
+            input_set_preseed(input, line);
+            free(line);
+            const char *prompt =
+                loop_schedule_take_due(state.loops, monotonic_ms(), &loop_self_paced);
+            if (!prompt)
+                continue;
+            line = xstrdup(prompt);
+            scheduled = 1;
+        } else if (read_result == INPUT_READLINE_CANCELLED) {
+            input_set_preseed(input, line);
+            free(line);
+            int id = loop_schedule_cancel_next(state.loops);
+            if (id > 0) {
+                disp_block_separator(&render.disp);
+                ui_note("stopped loop %d", id);
+                disp_sync_external_line(&render.disp);
+            }
+            continue;
+        } else if (read_result == INPUT_READLINE_EOF || !line) {
             putchar('\n');
             break;
         }
+
         /* Empty input continues only resumable turns. */
         if (!*line && state.resume_reason == AGENT_RESUME_NONE) {
             free(line);
@@ -1180,13 +1245,15 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
 
         /* Slash handlers may override this when they drive the display themselves. */
         disp_sync_external_line(&render.disp);
-        if (handle_slash_input(input, &state, line)) {
+        if (!scheduled && handle_slash_input(input, &state, line)) {
             current_provider = state.provider;
             free(line);
             continue;
         }
-        if (*line)
+        if (!scheduled && *line)
             input_history_add(input, line);
+        if (scheduled)
+            render_loop_prompt(&render, line);
 
         /* Provider absence takes precedence over a possibly configured model. */
         if (!current_provider) {
@@ -1194,6 +1261,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
             disp_block_separator(&render.disp);
             ui_note("no provider selected — use /provider to choose one, then resend");
             disp_sync_external_line(&render.disp);
+            finish_scheduled_loop(&state, scheduled);
             free(line);
             continue;
         }
@@ -1203,6 +1271,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
             disp_block_separator(&render.disp);
             ui_note("no model selected — use /model (or /provider) to choose one, then resend");
             disp_sync_external_line(&render.disp);
+            finish_scheduled_loop(&state, scheduled);
             free(line);
             continue;
         }
@@ -1214,6 +1283,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
             /* A newly latched interrupt belongs to compaction and cancels the whole send; retain
              * the debt for the next attempt. */
             if (interrupt_abort_requested() || interrupt_pause_requested()) {
+                finish_scheduled_loop(&state, scheduled);
                 free(line);
                 continue;
             }
@@ -1225,7 +1295,9 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
         int continued = 0;
         /* Boundaries precede fresh prompts. An empty send asks the recorded tail how to
          * continue, so a compaction seed just appended above supersedes an older marker. */
-        if (*line) {
+        if (scheduled) {
+            agent_session_add_loop(&session, line, loop_self_paced);
+        } else if (*line) {
             agent_session_add_user(&session, line);
         } else {
             switch (agent_session_resume_tail(&session)) {
@@ -1355,6 +1427,8 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
                 state.compaction_deferred = 1;
         }
 
+        finish_scheduled_loop(&state, scheduled);
+
         /* Esc means the user is already present; otherwise notify when the REPL becomes idle,
          * including errors and max-turn pauses. */
         if (!user_pressed_escape)
@@ -1376,6 +1450,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
     transcript_log_close(transcript);
     session_log_close(state.session_log);
     free(state.pending_preseed);
+    loop_schedule_free(state.loops);
     agent_session_free(&session);
     return 0;
 }

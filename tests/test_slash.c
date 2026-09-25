@@ -7,6 +7,7 @@
 #include "agent.h"
 #include "agent_core.h"
 #include "harness.h"
+#include "loop.h"
 #include "provider.h"
 #include "slash.h"
 #include "tool.h"
@@ -265,6 +266,7 @@ static void test_help_lists_commands_and_shortcuts(void)
     EXPECT(strstr(out, "/new") != NULL);
     EXPECT(strstr(out, "start a fresh conversation [preset]") != NULL);
     EXPECT(strstr(out, "/clear") != NULL);
+    EXPECT(strstr(out, "/loop") != NULL);
     EXPECT(strstr(out, "/help") != NULL);
     EXPECT(strstr(out, "shortcuts") != NULL);
     EXPECT(strstr(out, "esc") != NULL);
@@ -325,6 +327,40 @@ static void test_help_wraps_to_narrow_width(void)
     EXPECT(strstr(out, "shift-enter") != NULL);
     EXPECT(strstr(out, "configured to send") != NULL);
     free(out);
+}
+
+static void test_loop_management(void)
+{
+    struct render_ctx r = {0};
+    r.disp.committed_newlines = 1;
+    struct loop_schedule *schedule = loop_schedule_new();
+    size_t fixed_id = 0;
+    EXPECT(loop_schedule_add(schedule, "check CI", 0, 60000L, &fixed_id) == 0);
+    EXPECT(loop_schedule_add(schedule, "poll", 1, 0, NULL) == 0);
+    struct agent_state state = {.render = &r, .loops = schedule};
+    struct dispatch_call c = {.line = "/loop list", .state = &state};
+
+    char *out = capture_stdout(do_dispatch, &c);
+    EXPECT(c.result == SLASH_HANDLED);
+    EXPECT(strstr(out, "loop 1") != NULL);
+    EXPECT(strstr(out, "check CI") != NULL);
+    EXPECT(strstr(out, "adaptive") != NULL);
+    free(out);
+
+    char command[64];
+    snprintf(command, sizeof(command), "/loop stop %zu", fixed_id);
+    c.line = command;
+    out = capture_stdout(do_dispatch, &c);
+    EXPECT(strstr(out, "stopped loop 1") != NULL);
+    EXPECT(loop_schedule_count(schedule) == 1);
+    free(out);
+
+    c.line = "/loop stop all";
+    out = capture_stdout(do_dispatch, &c);
+    EXPECT(strstr(out, "stopped 1 loop") != NULL);
+    EXPECT(loop_schedule_count(schedule) == 0);
+    free(out);
+    loop_schedule_free(schedule);
 }
 
 /* ---------- /session ---------- */
@@ -864,6 +900,7 @@ static void test_hint_shows_argument_placeholder(void)
     expect_hint("/new   ", "[preset]");
     expect_hint("/preset", " [name]");
     expect_hint("/clear", " [preset]");
+    expect_hint("/loop", " [interval] [prompt | list | stop <id|all>]");
 }
 
 static void test_hint_stays_quiet_otherwise(void)
@@ -903,6 +940,7 @@ int main(void)
     test_dispatch_bad_usage();
     test_help_lists_commands_and_shortcuts();
     test_help_wraps_to_narrow_width();
+    test_loop_management();
     test_session_prints_totals();
     test_session_hides_unreported_rows();
     test_session_shows_window_before_first_request();

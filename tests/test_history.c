@@ -643,7 +643,7 @@ static void test_loop_prompt_hides_model_guidance(void)
     items[0].origin = ITEM_ORIGIN_LOOP;
 
     char *out = render(HISTORY_FULL, items, 1, 0);
-    EXPECT(strstr(out, "check CI") != NULL);
+    EXPECT(strstr(out, "[loop] check CI") != NULL);
     EXPECT(strstr(out, "loop_control") == NULL);
     free(out);
 }

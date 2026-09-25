@@ -2,9 +2,12 @@
 #include "slash.h"
 
 #include <ctype.h>
+#include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 #include "agent.h"
@@ -15,6 +18,7 @@
 #include "config.h"
 #include "file_mention.h"
 #include "login.h"
+#include "loop.h"
 #include "model_meta.h"
 #include "provider.h"
 #include "select.h"
@@ -23,6 +27,7 @@
 #include "xalloc.h"
 #include "render/disp.h"
 #include "render/render_ctx.h"
+#include "system/clock.h"
 #include "terminal/ansi.h"
 #include "terminal/clipboard.h"
 #include "terminal/input_core.h"
@@ -77,6 +82,7 @@ static void run_preset(const struct command_call *call);
 static void run_preset_save(const struct command_call *call);
 static void run_config(const struct command_call *call);
 static void run_compact(const struct command_call *call);
+static void run_loop(const struct command_call *call);
 static void run_copy(const struct command_call *call);
 static void run_session(const struct command_call *call);
 static void run_tasks(const struct command_call *call);
@@ -160,6 +166,12 @@ static const struct slash_command COMMANDS[] = {
         .usage = "[focus]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_compact,
+    },
+    {
+        .name = "loop",
+        .summary = "repeat a prompt on a fixed or adaptive schedule",
+        .usage = "[interval] [prompt | list | stop <id|all>]",
+        .handler = run_loop,
     },
     {
         .name = "copy",
@@ -641,6 +653,168 @@ static void run_config(const struct command_call *call)
 static void run_compact(const struct command_call *call)
 {
     agent_compact(call->state, call->argument, 0);
+}
+
+/* ---------- /loop ---------- */
+
+#define LOOP_USAGE "usage: /loop [interval] [prompt] | /loop list | /loop stop <id|all>"
+
+static const char *loop_subcommand_tail(const char *argument, const char *name)
+{
+    const char *cursor = argument ? argument : "";
+    while (*cursor && isspace((unsigned char)*cursor))
+        cursor++;
+    size_t length = strlen(name);
+    if (strncasecmp(cursor, name, length) != 0)
+        return NULL;
+    cursor += length;
+    if (*cursor && !isspace((unsigned char)*cursor))
+        return NULL;
+    while (*cursor && isspace((unsigned char)*cursor))
+        cursor++;
+    return cursor;
+}
+
+static int has_loop_control(const struct agent_session *session)
+{
+    for (size_t i = 0; i < session->n_tools; i++)
+        if (strcmp(session->tools[i].name, "loop_control") == 0)
+            return 1;
+    return 0;
+}
+
+static void list_loops(struct agent_state *state)
+{
+    long now_ms = monotonic_ms();
+    (void)loop_schedule_deadline(state->loops, now_ms);
+    size_t count = loop_schedule_count(state->loops);
+    if (count == 0) {
+        ui_note("no loops");
+        return;
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        struct loop_task_info info;
+        if (loop_schedule_info(state->loops, i, now_ms, &info) != 0)
+            continue;
+        char cadence[32];
+        if (info.self_paced)
+            snprintf(cadence, sizeof(cadence), "adaptive");
+        else
+            format_duration(cadence, sizeof(cadence), info.interval_ms);
+        char due[32];
+        if (info.remaining_ms == 0)
+            snprintf(due, sizeof(due), "now");
+        else
+            format_duration(due, sizeof(due), info.remaining_ms);
+        char *prompt = flatten_for_display(info.prompt);
+        char *summary = xasprintf("%s · next %s · %s", cadence, due, prompt);
+        char label[32];
+        snprintf(label, sizeof(label), "loop %zu", info.id);
+        ui_label_row(label, theme_open(THEME_CHROME), summary, ANSI_DIM, 10, display_width());
+        free(summary);
+        free(prompt);
+    }
+}
+
+static void stop_loops(struct agent_state *state, const char *argument)
+{
+    size_t argument_length = strlen(argument);
+    while (argument_length > 0 && isspace((unsigned char)argument[argument_length - 1]))
+        argument_length--;
+    if (argument_length == 3 && strncasecmp(argument, "all", 3) == 0) {
+        size_t count = loop_schedule_count(state->loops);
+        loop_schedule_stop_all(state->loops);
+        ui_note("stopped %zu loop%s", count, count == 1 ? "" : "s");
+        return;
+    }
+
+    errno = 0;
+    char *end = NULL;
+    unsigned long long value = strtoull(argument, &end, 10);
+    while (*end && isspace((unsigned char)*end))
+        end++;
+    if (errno == ERANGE || end == argument || *end || value == 0 ||
+        (unsigned long long)(size_t)value != value) {
+        ui_error("%s", LOOP_USAGE);
+        return;
+    }
+    size_t id = (size_t)value;
+    if (loop_schedule_stop(state->loops, id) != 0) {
+        ui_error("no loop with id %zu", id);
+        return;
+    }
+    ui_note("stopped loop %zu", id);
+}
+
+static int interval_was_requested(const char *argument)
+{
+    if (!argument)
+        return 0;
+    while (*argument && isspace((unsigned char)*argument))
+        argument++;
+    if (isdigit((unsigned char)*argument))
+        return 1;
+    size_t length = strlen(argument);
+    return length >= 5 && strncasecmp(argument, "every", 5) == 0 &&
+           (length == 5 || isspace((unsigned char)argument[5]));
+}
+
+static void run_loop(const struct command_call *call)
+{
+    struct agent_state *state = call->state;
+    if (!state->loops) {
+        ui_error("loop scheduling is unavailable");
+        return;
+    }
+
+    const char *list_argument = loop_subcommand_tail(call->argument, "list");
+    if (list_argument) {
+        if (*list_argument)
+            ui_error("%s", LOOP_USAGE);
+        else
+            list_loops(state);
+        return;
+    }
+
+    const char *stop_argument = loop_subcommand_tail(call->argument, "stop");
+    if (stop_argument) {
+        if (!*stop_argument)
+            ui_error("%s", LOOP_USAGE);
+        else
+            stop_loops(state, stop_argument);
+        return;
+    }
+
+    if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+        ui_error("/loop requires an interactive terminal");
+        return;
+    }
+
+    struct loop_spec spec;
+    loop_parse_spec(call->argument, &spec);
+    if (interval_was_requested(call->argument) && spec.self_paced) {
+        ui_error("invalid interval; use values such as 30s, 5m, 2h, or 1d");
+        return;
+    }
+    if (spec.self_paced && !has_loop_control(state->session)) {
+        ui_error("adaptive loops require tools; add a fixed interval instead");
+        return;
+    }
+
+    const char *prompt = spec.prompt && *spec.prompt ? spec.prompt : LOOP_DEFAULT_PROMPT;
+    size_t id = 0;
+    if (loop_schedule_add(state->loops, prompt, spec.self_paced, spec.interval_ms, &id) != 0) {
+        ui_error("could not schedule loop (%d active maximum)", LOOP_MAX_TASKS);
+        return;
+    }
+    if (spec.self_paced) {
+        ui_note("loop %zu scheduled; the model chooses each delay", id);
+    } else {
+        char interval[32];
+        format_duration(interval, sizeof(interval), spec.interval_ms);
+        ui_note("loop %zu scheduled every %s", id, interval);
+    }
 }
 
 /* ---------- /copy ---------- */
