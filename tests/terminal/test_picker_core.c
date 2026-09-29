@@ -150,6 +150,33 @@ static void test_update_matches_resets_selection(void)
     buf_free(&fixture.core.query);
 }
 
+static void test_truncate_query_refilters(void)
+{
+    struct navigation_fixture fixture;
+    init_navigation_fixture(&fixture, 3, 10);
+    fixture.items[0].label = "openai";
+    fixture.items[1].label = "openrouter";
+    fixture.items[2].label = "anthropic";
+
+    buf_init(&fixture.core.query);
+    buf_append_str(&fixture.core.query, "openai");
+    picker_core_update_matches(&fixture.core);
+    EXPECT(fixture.core.match_count == 1);
+
+    picker_core_truncate_query(&fixture.core, 4);
+    EXPECT_STR_EQ(fixture.core.query.data, "open");
+    EXPECT(fixture.core.match_count == 2);
+
+    fixture.core.selection = 1;
+    picker_core_truncate_query(&fixture.core, 4);
+    EXPECT(fixture.core.selection == 1);
+
+    picker_core_truncate_query(&fixture.core, 0);
+    EXPECT(fixture.core.query.len == 0);
+    EXPECT(fixture.core.match_count == 3);
+    buf_free(&fixture.core.query);
+}
+
 static void test_sanitize_replaces_escape_sequences(void)
 {
     const char *unsafe = "safe\x1b[2J\x1b[Hgone";
@@ -292,5 +319,6 @@ int main(void)
     test_zero_viewport_still_clamps_view();
     test_select_item_centers();
     test_update_matches_resets_selection();
+    test_truncate_query_refilters();
     T_REPORT();
 }

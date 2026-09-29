@@ -204,29 +204,28 @@ void input_core_kill_to_bol(struct input *in)
     buf_erase(in, b, in->cursor - b);
 }
 
-/* Ctrl-W uses whitespace boundaries; Meta word operations use readline's alphanumeric
- * boundaries. Bytes >= 0x80 count as word bytes so neither scan splits a UTF-8 sequence. */
-static size_t scan_ws_left(const char *buf, size_t i)
+size_t input_core_word_start(const char *text, size_t end)
 {
-    while (i > 0 && isspace((unsigned char)buf[i - 1]))
-        i--;
-    while (i > 0 && !isspace((unsigned char)buf[i - 1]))
-        i--;
-    return i;
+    while (end > 0 && isspace((unsigned char)text[end - 1]))
+        end--;
+    while (end > 0 && !isspace((unsigned char)text[end - 1]))
+        end--;
+    return end;
 }
 
+/* Bytes >= 0x80 count as word bytes so alnum scans never split a UTF-8 sequence. */
 static int is_word_byte(unsigned char c)
 {
     return c >= 0x80 || isalnum(c);
 }
 
-static size_t scan_alnum_left(const char *buf, size_t i)
+size_t input_core_alnum_word_start(const char *text, size_t end)
 {
-    while (i > 0 && !is_word_byte((unsigned char)buf[i - 1]))
-        i--;
-    while (i > 0 && is_word_byte((unsigned char)buf[i - 1]))
-        i--;
-    return i;
+    while (end > 0 && !is_word_byte((unsigned char)text[end - 1]))
+        end--;
+    while (end > 0 && is_word_byte((unsigned char)text[end - 1]))
+        end--;
+    return end;
 }
 
 static size_t scan_alnum_right(const char *buf, size_t len, size_t i)
@@ -240,7 +239,7 @@ static size_t scan_alnum_right(const char *buf, size_t len, size_t i)
 
 void input_core_move_word_left(struct input *in)
 {
-    in->cursor = scan_alnum_left(in->buf, in->cursor);
+    in->cursor = input_core_alnum_word_start(in->buf, in->cursor);
 }
 
 void input_core_move_word_right(struct input *in)
@@ -250,13 +249,13 @@ void input_core_move_word_right(struct input *in)
 
 void input_core_kill_word_back(struct input *in)
 {
-    size_t i = scan_ws_left(in->buf, in->cursor);
+    size_t i = input_core_word_start(in->buf, in->cursor);
     buf_erase(in, i, in->cursor - i);
 }
 
 void input_core_kill_word_back_alnum(struct input *in)
 {
-    size_t i = scan_alnum_left(in->buf, in->cursor);
+    size_t i = input_core_alnum_word_start(in->buf, in->cursor);
     buf_erase(in, i, in->cursor - i);
 }
 

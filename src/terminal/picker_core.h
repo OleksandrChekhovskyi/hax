@@ -43,6 +43,9 @@ int picker_core_match(const char *text, const char *query);
 /* Rebuilds `matches` for the current query; storage must hold `options->item_count` entries. */
 void picker_core_update_matches(struct picker_core *core);
 
+/* Shortens the query to `len` bytes and refilters; a `len` at or past the end is a no-op. */
+void picker_core_truncate_query(struct picker_core *core, size_t len);
+
 /* Restores selection and scroll invariants after a viewport change. */
 void picker_core_clamp_view(struct picker_core *core);
 

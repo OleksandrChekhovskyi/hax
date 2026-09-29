@@ -10,6 +10,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 ### Added
 
 - Shell-like Tab completion of `/` commands, with a dim placeholder for a command's arguments.
+- The built-in pickers take fzf's keys: Ctrl-J/Ctrl-K move the selection, and Ctrl-W and
+  Alt-Backspace delete a word of the query.
 - A preset name right after `hax` starts with that preset: `hax review` is short for
   `hax --preset review`, and `hax review -p "..."` works the same way in one-shot mode.
 - `/session` shows a token row per model when the conversation switched models, how many user

@@ -143,6 +143,15 @@ void picker_core_update_matches(struct picker_core *core)
     core->first_visible = 0;
 }
 
+void picker_core_truncate_query(struct picker_core *core, size_t len)
+{
+    if (len >= core->query.len)
+        return;
+    core->query.len = len;
+    core->query.data[len] = '\0';
+    picker_core_update_matches(core);
+}
+
 void picker_core_move_selection(struct picker_core *core, enum picker_direction direction)
 {
     if (core->match_count == 0)

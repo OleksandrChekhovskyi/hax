@@ -575,6 +575,15 @@ static void test_kill_word_back(void)
     input_free(in);
 }
 
+static void test_word_start_scans_back_from_end(void)
+{
+    const char *text = "foo/bar  baz";
+    EXPECT(input_core_word_start(text, 9) == 0);
+    EXPECT(input_core_alnum_word_start(text, 9) == 4);
+    EXPECT(input_core_word_start(text, 0) == 0);
+    EXPECT(input_core_alnum_word_start(NULL, 0) == 0);
+}
+
 static void test_move_word_left(void)
 {
     struct input *in = new_with("foo bar  baz");
@@ -1172,6 +1181,7 @@ int main(void)
     test_line_start_end();
     test_delete_back_fwd();
     test_kill_word_back();
+    test_word_start_scans_back_from_end();
     test_move_word_left();
     test_move_word_right();
     test_move_word_utf8();

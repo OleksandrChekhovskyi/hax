@@ -118,6 +118,12 @@ void input_core_commit_paste(struct input *in, const char *body, size_t len);
  * of range. */
 void input_core_replace_span(struct input *in, size_t start, size_t end, const char *text);
 
+/* Offset of the word that ends before `end` in `text`, after skipping the separators just before
+ * `end`. Words are whitespace-delimited for Ctrl-W and alphanumeric, like readline's Meta word
+ * operations, for the alnum variant. `text` may be NULL when `end` is 0. */
+size_t input_core_word_start(const char *text, size_t end);
+size_t input_core_alnum_word_start(const char *text, size_t end);
+
 /* ---- motions / edits (operate on the buffer at in->cursor) ---- */
 size_t input_core_line_start(const struct input *in);
 size_t input_core_line_end(const struct input *in);
