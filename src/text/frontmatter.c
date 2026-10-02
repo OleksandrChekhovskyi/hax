@@ -70,7 +70,7 @@ static const char *decode_escape(struct buf *out, const char *p, const char *end
     uint32_t codepoint;
     char encoded[4];
     size_t escape_len = parse_escape(p, end, &codepoint);
-    size_t encoded_len = escape_len > 0 ? utf8_encode(codepoint, encoded) : 0;
+    size_t encoded_len = escape_len > 0 ? utf8_encode_codepoint(codepoint, encoded) : 0;
     if (encoded_len == 0) {
         buf_append(out, "\\", 1);
         return p;

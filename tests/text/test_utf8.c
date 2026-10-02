@@ -121,7 +121,7 @@ static void test_buffer_validity(void)
 static void expect_encoded(uint32_t codepoint, const char *want, size_t want_len)
 {
     char out[4];
-    size_t len = utf8_encode(codepoint, out);
+    size_t len = utf8_encode_codepoint(codepoint, out);
     EXPECT_MEM_EQ(out, len, want, want_len);
 }
 
@@ -140,9 +140,9 @@ static void test_encode(void)
 static void test_encode_rejects_non_scalar(void)
 {
     char out[4];
-    EXPECT(utf8_encode(0xD800, out) == 0);
-    EXPECT(utf8_encode(0xDFFF, out) == 0);
-    EXPECT(utf8_encode(0x110000, out) == 0);
+    EXPECT(utf8_encode_codepoint(0xD800, out) == 0);
+    EXPECT(utf8_encode_codepoint(0xDFFF, out) == 0);
+    EXPECT(utf8_encode_codepoint(0x110000, out) == 0);
 }
 
 static void test_next_ascii(void)

@@ -18,7 +18,7 @@ int utf8_is_valid(const char *bytes, size_t length);
 
 /* Write the encoding of a Unicode scalar value to out and return its length, one to four. Returns
  * zero without writing for surrogates and values above U+10FFFF. */
-size_t utf8_encode(uint32_t codepoint, char out[4]);
+size_t utf8_encode_codepoint(uint32_t codepoint, char out[4]);
 
 /* Move by one valid codepoint. Malformed or truncated input is traversed one byte at a time.
  * utf8_next returns length at or beyond the end; utf8_prev returns zero at the start. */
