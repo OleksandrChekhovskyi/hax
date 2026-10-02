@@ -1,24 +1,30 @@
 #!/bin/sh
 # Install the dependencies for building hax on the current platform. The default serves users
-# building from source: the build/test dependencies plus optional tools hax uses when available
-# (fzf, for @file completion). `ci` restricts it to the build/test dependencies; `lint`
-# additionally installs the lint toolchain (clang-format, clang-tidy). Package managers prompt
-# as usual on a tty and run unattended without one.
-# Usage: scripts/install_deps.sh [ci] [lint]
+# building from source: the build dependencies plus optional tools hax uses when available (fzf,
+# for @file completion). `tests` adds tmux for the interactive e2e scenarios; `ci` installs the
+# build and test dependencies without the optional tools; `lint` adds the lint toolchain
+# (clang-format, clang-tidy). Package managers prompt as usual on a tty and run unattended
+# without one.
+# Usage: scripts/install_deps.sh [ci] [tests] [lint]
 
 set -eu
 
 usage() {
-    printf '%s\n' 'usage: scripts/install_deps.sh [ci] [lint]' >&2
+    printf '%s\n' 'usage: scripts/install_deps.sh [ci] [tests] [lint]' >&2
     exit 2
 }
 
 extras=1
+tests=
 lint=
 for arg; do
     case $arg in
     ci)
         extras=
+        tests=1
+        ;;
+    tests)
+        tests=1
         ;;
     lint)
         lint=1
@@ -65,7 +71,7 @@ reject_lint() {
 # such file, and reaching the sourcing below would abort the script outright.
 case "$(uname)" in
 Darwin)
-    brew install jansson meson ninja pkg-config ${extras:+fzf} ${lint:+llvm}
+    brew install jansson meson ninja pkg-config ${tests:+tmux} ${extras:+fzf} ${lint:+llvm}
     exit 0
     ;;
 FreeBSD)
@@ -74,13 +80,13 @@ FreeBSD)
     # pkg-config. python3 is explicit because meson depends on a versioned
     # python package that need not provide the unversioned command.
     as_root pkg install $assume_yes curl jansson meson ninja pkgconf \
-        python3 ${extras:+fzf}
+        python3 ${tests:+tmux} ${extras:+fzf}
     exit 0
     ;;
 OpenBSD)
     reject_lint OpenBSD
-    # clang, make and pkg-config all come from the base system here, and meson
-    # brings a python3 that the e2e tests can use.
+    # clang, make, pkg-config and tmux (for `tests`) all come from the base
+    # system here, and meson brings a python3 that the e2e tests can use.
     as_root pkg_add -I curl jansson meson ninja ${extras:+fzf}
     exit 0
     ;;
@@ -93,12 +99,12 @@ case "$ID ${ID_LIKE:-}" in
     as_root apt-get update
     as_root apt-get install $assume_yes --no-install-recommends \
         build-essential libcurl4-openssl-dev libjansson-dev \
-        meson ninja-build pkg-config python3 ${extras:+fzf} \
+        meson ninja-build pkg-config python3 ${tests:+tmux} ${extras:+fzf} \
         ${lint:+clang-format clang-tidy}
     ;;
 *fedora* | *rhel* | *centos*)
     as_root dnf install $assume_yes gcc make libcurl-devel jansson-devel \
-        meson ninja-build pkgconf-pkg-config python3 ${lint:+clang-tools-extra} || {
+        meson ninja-build pkgconf-pkg-config python3 ${tests:+tmux} ${lint:+clang-tools-extra} || {
         printf '%s\n' 'hint: RHEL-family systems may need the CRB and EPEL repositories enabled' >&2
         exit 1
     }
@@ -111,10 +117,11 @@ case "$ID ${ID_LIKE:-}" in
     ;;
 *suse*)
     as_root zypper install $assume_yes gcc make libcurl-devel libjansson-devel \
-        meson ninja pkgconf-pkg-config python3 ${extras:+fzf} ${lint:+clang-tools}
+        meson ninja pkgconf-pkg-config python3 ${tests:+tmux} ${extras:+fzf} ${lint:+clang-tools}
     ;;
 *arch*)
-    arch_pkgs="gcc make curl jansson meson ninja pkgconf python ${extras:+fzf} ${lint:+clang}"
+    arch_pkgs="gcc make curl jansson meson ninja pkgconf python"
+    arch_pkgs="$arch_pkgs ${tests:+tmux} ${extras:+fzf} ${lint:+clang}"
     # Disposable containers need the full sync-and-upgrade (a bare -Sy install risks a
     # partial upgrade), but only on explicit opt-in from the CI workflow: `CI` alone also
     # describes self-hosted runners on real machines. Elsewhere only the listed packages
@@ -133,7 +140,7 @@ case "$ID ${ID_LIKE:-}" in
 *alpine*)
     reject_lint Alpine
     as_root apk add --no-cache \
-        build-base meson samurai curl-dev jansson-dev python3 ${extras:+fzf}
+        build-base meson samurai curl-dev jansson-dev python3 ${tests:+tmux} ${extras:+fzf}
     ;;
 *)
     printf "error: unsupported platform '%s'; see README.md for dependencies\n" "$ID" >&2

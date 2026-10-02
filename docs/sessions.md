@@ -127,6 +127,5 @@ hax --json "run the tests and fix the first failure" |
     jq 'select(.kind == "tool_call" or .type == "result")'
 ```
 
-The stream can be tried without a provider — from a scratch directory, since the scripted tool
-call writes `out.txt` into the cwd:
-`HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/tool_roundtrip.txt hax --json go`.
+The stream can be tried without a provider, from the repository root:
+`HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/demo.txt hax --json go`.

@@ -141,8 +141,10 @@ names are path-derived: `tools/test_read.c` becomes `tools/read`, and `test_buf.
 
 End-to-end scenarios follow the same conventions in Python: standalone scripts under
 `tests/e2e/`, registered in `e2e_scenarios` in `tests/meson.build`. They run the built binary
-hermetically against mock scripts from `scripts/mock/` via `tests/e2e/harness.py`; its
-docstrings are the how-to.
+hermetically against inline mock-provider scripts via `tests/e2e/harness.py`; its docstrings are
+the how-to, and `scripts/mock/` holds the fixtures for manual checks instead. REPL scenarios drive
+the binary through tmux with its `Terminal`; a change to REPL layout or terminal handling comes
+with one.
 
 Where a test goes:
 

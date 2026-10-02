@@ -72,8 +72,9 @@ make install              # optional; may prompt for sudo
 completion when available. On other platforms, install those packages by hand and run `make`.
 
 For hacking on hax, `make symlink` links the freshly built binary into `~/.local/bin` so it
-stays on `PATH` across rebuilds. `make lint` additionally needs `clang-format` and
-`clang-tidy` (`scripts/install_deps.sh lint` installs them).
+stays on `PATH` across rebuilds. `make tests` additionally needs `tmux`, which drives the
+interactive scenarios (`scripts/install_deps.sh tests` installs it), and `make lint` needs
+`clang-format` and `clang-tidy` (`scripts/install_deps.sh lint` installs them).
 
 The examples below use `hax` as if it is on `PATH`; after a plain build, use `./build/hax`.
 

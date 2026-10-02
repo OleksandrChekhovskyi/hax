@@ -87,12 +87,14 @@ as_root() {
     fi
 }
 
+# The binary is tested before it ships, so it needs what a CI run installs; errors still reach
+# stderr.
+scripts/install_deps.sh ci >/dev/null
 # The static link resolves every library in libcurl.pc's Libs.private, so each one must be
 # present as a static archive (c-ares ships its .a in the dev package). git is for the
 # version stamp.
 as_root apk add --no-cache -q \
-    build-base git meson samurai python3 \
-    curl-dev curl-static jansson-dev jansson-static \
+    git curl-static jansson-static \
     brotli-static c-ares-dev libidn2-static libpsl-static libunistring-static \
     nghttp2-static openssl-libs-static zlib-static zstd-static
 printf '%s\n' 'deps OK'
