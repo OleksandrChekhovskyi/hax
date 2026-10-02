@@ -566,35 +566,35 @@ void agent_new_conversation(struct agent_state *state)
     banner_print(state->provider, state->session);
 }
 
-/* Redraw with every prompt so slash-command output cannot hide the empty-send meaning. */
-static void render_resume_hint(struct render_ctx *render, enum agent_resume_reason reason)
+/* A pause or turn limit leaves no trace in the conversation, so only the prompt names it; an
+ * interruption or provider error is already explained above. The prompt carries the empty-send
+ * meaning, so slash-command output cannot scroll it away. */
+static const char *resume_placeholder(enum agent_resume_reason reason)
 {
-    const char *status;
-    const char *action = "enter to continue";
     switch (reason) {
+    case AGENT_RESUME_NONE:
+        return NULL;
     case AGENT_RESUME_PAUSED:
-        status = "paused";
-        break;
+        return "paused — enter to continue";
     case AGENT_RESUME_MAX_TURNS:
-        status = "max turns reached";
-        break;
+        return "max turns reached — enter to continue";
     case AGENT_RESUME_INTERRUPTED:
-        status = "interrupted";
-        break;
+        return "enter to continue";
     case AGENT_RESUME_ERROR:
-        status = "provider error";
-        action = "enter to retry";
-        break;
-    default:
-        return;
+        return "enter to retry";
     }
+    return NULL;
+}
+
+/* Ends every hard-interrupted user turn: a tool's own marker covers only its call, and collapsed or
+ * undispatched calls draw none. */
+static void render_interrupt_marker(struct render_ctx *render)
+{
+    render_open_block(render);
     disp_write_ansi(&render->disp, ANSI_DIM);
-    disp_printf(&render->disp, "[%s — %s]", status, action);
+    disp_printf(&render->disp, "%s", INTERRUPT_MARKER);
     disp_write_ansi(&render->disp, ANSI_RESET);
     disp_putc(&render->disp, '\n');
-    disp_putc(&render->disp, '\n'); /* one blank line between hint and prompt */
-    /* Commit newlines before the editor erases and repaints the prompt row. */
-    disp_commit_newlines(&render->disp);
     disp_flush(&render->disp);
 }
 
@@ -1156,12 +1156,9 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
 
     for (;;) {
         disp_block_separator(&render.disp);
-        /* Redraw the resumable hint so slash output cannot hide the empty-send meaning. */
-        if (state.resume_reason != AGENT_RESUME_NONE)
-            render_resume_hint(&render, state.resume_reason);
         /* Only a resumable turn gives an empty send a meaning; otherwise
          * the editor keeps swallowing bare Enter. */
-        input_set_empty_submit(input, state.resume_reason != AGENT_RESUME_NONE);
+        input_set_empty_submit(input, resume_placeholder(state.resume_reason));
         cursor_show();
         /* Rebuilt each iteration so a runtime theme change (/config theme …)
          * recolors the prompt instead of keeping the startup theme's bytes. */
@@ -1177,8 +1174,10 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
             continue;
         }
 
-        /* Slash handlers may override this when they drive the display themselves. */
-        disp_sync_external_line(&render.disp);
+        /* An empty send erased its prompt row, so the separator above it still stands. Slash
+         * handlers may override this when they drive the display themselves. */
+        if (*line)
+            disp_sync_external_line(&render.disp);
         if (handle_slash_input(input, &state, line)) {
             current_provider = state.provider;
             free(line);
@@ -1240,8 +1239,6 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
             }
         }
         free(line);
-        /* input_readline left the cursor at column 0 of a fresh row. */
-        disp_sync_external_line(&render.disp);
 
         /* A background metadata probe may refine effort before the first request; announce the
          * value that will actually be sent. */
@@ -1321,17 +1318,8 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
         /* Close active rendering before post-turn output can emit terminal control sequences. */
         render_set_mode(&render, RENDER_IDLE);
 
-        /* History and the resume hint already expose interruptions; another live marker duplicates
-         * them. */
-        if (user_turn_complete && user_pressed_escape) {
-            /* Confirm an Esc that arrived after the last pause point. */
-            render_open_block(&render);
-            disp_write_ansi(&render.disp, ANSI_DIM);
-            disp_printf(&render.disp, "[finished before pause]");
-            disp_write_ansi(&render.disp, ANSI_RESET);
-            disp_putc(&render.disp, '\n');
-            disp_flush(&render.disp);
-        }
+        if (state.resume_reason == AGENT_RESUME_INTERRUPTED)
+            render_interrupt_marker(&render);
 
         /* Time worked counts errored/interrupted turns too — the wall time
          * was spent either way, and /session's total should reflect it. */

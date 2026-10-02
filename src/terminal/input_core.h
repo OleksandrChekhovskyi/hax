@@ -86,8 +86,8 @@ struct input {
     char *(*paste_filter)(const char *text, void *user);
     void *paste_filter_user;
 
-    /* Enter on an empty buffer submits when set. */
-    int empty_submit;
+    /* Owned; non-NULL lets Enter submit an empty buffer, which shows it as ghost text. */
+    char *empty_placeholder;
 
     /* Ctrl-C on an empty buffer arms this; a consecutive Ctrl-C quits and
      * any other key disarms. */

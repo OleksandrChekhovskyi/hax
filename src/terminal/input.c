@@ -368,6 +368,8 @@ static char *ghost_text(struct input *in)
         return xstrdup("ctrl+c again to exit");
     if (in->candidates)
         return xstrdup(in->candidates);
+    if (in->len == 0 && in->empty_placeholder)
+        return xstrdup(in->empty_placeholder);
     if (in->hint_fn)
         return in->hint_fn(in->buf, in->hint_user);
     return NULL;
@@ -1348,9 +1350,10 @@ void input_set_paste_filter(struct input *in, char *(*fn)(const char *text, void
     in->paste_filter_user = user;
 }
 
-void input_set_empty_submit(struct input *in, int enabled)
+void input_set_empty_submit(struct input *in, const char *placeholder)
 {
-    in->empty_submit = enabled;
+    free(in->empty_placeholder);
+    in->empty_placeholder = placeholder ? xstrdup(placeholder) : NULL;
 }
 
 void input_set_preseed(struct input *in, const char *text)
@@ -1489,8 +1492,8 @@ char *input_readline(struct input *in, const char *prompt)
             in->painted_cursor_row = 0;
             in->painted_rows = 0;
             break;
-        case 0x0d: /* CR — Enter; empty requires empty_submit */
-            if (in->len > 0 || in->empty_submit)
+        case 0x0d: /* CR — Enter; empty requires a placeholder */
+            if (in->len > 0 || in->empty_placeholder)
                 submit = 1;
             break;
         case 0x0e: /* Ctrl-N */
@@ -1549,6 +1552,8 @@ char *input_readline(struct input *in, const char *prompt)
 
     if (submit && in->len > 0)
         render_submitted(in);
+    else if (submit)
+        erase_edit_area(in);
     else
         leave_edit_area(in);
     disable_raw_mode(in);

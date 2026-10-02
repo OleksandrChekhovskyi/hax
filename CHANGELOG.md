@@ -19,6 +19,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Changed
 
+- After a pause or interruption, "enter to continue" now appears as a placeholder in the prompt
+  instead of a separate hint line, and continuing leaves no empty prompt behind.
 - Prompt history (Up, Ctrl-R) is scoped to the working directory like sessions: each directory
   keeps its own `history` file beside its session files, so a prompt typed in one project no
   longer comes back in another. The old global `~/.local/state/hax/history` is no longer read and
