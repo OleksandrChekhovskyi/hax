@@ -17,6 +17,7 @@
 #include "system/tempfiles.h"
 #include "terminal/interrupt.h"
 #include "tools/bash_env.h"
+#include "tools/bash_fixtures.h"
 
 static char *call_bash(const char *escaped_command)
 {
@@ -36,16 +37,6 @@ static char *call_bash_long_line(size_t bytes)
     return out;
 }
 
-struct display_capture {
-    struct buf buf;
-};
-
-static void append_display(const char *bytes, size_t len, void *data)
-{
-    struct display_capture *capture = data;
-    buf_append(&capture->buf, bytes, len);
-}
-
 static char *call_bash_streamed(const char *escaped_command, struct display_capture *capture)
 {
     char *args = xasprintf("{\"command\":\"%s\"}", escaped_command);
@@ -55,8 +46,8 @@ static char *call_bash_streamed(const char *escaped_command, struct display_capt
     return out;
 }
 
-/* A latched abort kills the command and reports the cut through both the output marker and the
- * run context's interrupted provenance. */
+/* A latched abort kills the command and reports the cut through both the output marker and the run
+ * context's interrupted provenance. */
 static void test_bash_interrupt_sets_provenance(void)
 {
     interrupt_install_request_signal_handlers();
@@ -239,12 +230,12 @@ static void test_bash_timeout_grace_allows_cleanup(void)
     /* Reproducible with a sanitized parent and a plain pipe alone, no hax code involved. */
     T_SKIP("bash sporadically drops its TERM trap when spawned from a sanitized macOS parent");
 #endif
-    /* An armed trap must flush cleanup output during the grace period. "armed" prints only
-     * after the trap is installed and only from the exec'd foreground child: a TERM landing
-     * in that child's fork-to-exec window is consumed by the inherited trap disposition,
-     * leaving a TERM-proof sleep the shell then defers the trap to for its full length.
-     * The trap's exit ends the run at pipe EOF, so the grace never elapses on the happy path;
-     * it only needs to outlast the trap's pause. */
+    /* An armed trap must flush cleanup output during the grace period. "armed" prints only after
+     * the trap is installed and only from the exec'd foreground child: a TERM landing in that
+     * child's fork-to-exec window is consumed by the inherited trap disposition, leaving a
+     * TERM-proof sleep the shell then defers the trap to for its full length. The trap's exit ends
+     * the run at pipe EOF, so the grace never elapses on the happy path; it only needs to outlast
+     * the trap's pause. */
     setenv("HAX_BASH_TIMEOUT", "50ms", 1);
     setenv("HAX_BASH_TIMEOUT_GRACE", "500ms", 1);
     setenv("HAX_BASH_TRANSITION_MIN_BYTES", "6", 1); /* "armed\n" */
@@ -322,9 +313,9 @@ static void test_bash_timeout_grace_no_escape_via_pipe_close(void)
     unlink(path);
     EXPECT(pgid > 0);
 
-    /* ESRCH on Linux or EPERM on Darwin means the group is gone; clean up before failing.
-     * The killed group lingers as an unreaped zombie until init collects it, which a loaded
-     * machine may delay well past the kill itself. */
+    /* ESRCH on Linux or EPERM on Darwin means the group is gone; clean up before failing. The
+     * killed group lingers as an unreaped zombie until init collects it, which a loaded machine may
+     * delay well past the kill itself. */
     int alive = 1;
     for (int i = 0; i < 2000; i++) {
         if (kill(-pgid, 0) < 0 && (errno == ESRCH || errno == EPERM)) {
@@ -483,8 +474,8 @@ static void test_bash_saved_path_holds_full_output(void)
         EXPECT(stat(path, &st) == 0);
         /* `echo HEAD` + seq 1..20000 + `echo TAIL` = ~108 KiB. */
         EXPECT(st.st_size > 100 * 1024);
-        /* Contents start with "HEAD\n" — the saved file holds the full,
-         * untruncated output, head+tail preview notwithstanding. */
+        /* Contents start with "HEAD\n" — the saved file holds the full, untruncated output,
+         * head+tail preview notwithstanding. */
         FILE *f = fopen(path, "r");
         EXPECT(f != NULL);
         if (f) {
@@ -505,8 +496,7 @@ static void test_bash_single_line_over_cap_keeps_body(void)
     EXPECT(strstr(out, "saved to ") != NULL);
     /* Body must contain the line content, not just the marker. */
     EXPECT(strstr(out, "xxxx") != NULL);
-    /* Per-line cap (500) means the kept line is far smaller than the
-     * 60 KiB original. */
+    /* Per-line cap (500) means the kept line is far smaller than the 60 KiB original. */
     EXPECT(strlen(out) < 4 * 1024);
     free(out);
 }
@@ -554,8 +544,8 @@ static void test_bash_tail_keeps_line_at_window_boundary(void)
     EXPECT(first != NULL);
     if (first)
         EXPECT(strncmp(first, "line0 ", 6) == 0);
-    /* The tail slice follows the gap marker; its first line is line600,
-     * kept whole (no mid-line truncation at the boundary). */
+    /* The tail slice follows the gap marker; its first line is line600, kept whole (no mid-line
+     * truncation at the boundary). */
     const char *marker = strstr(out, "[output truncated");
     EXPECT(marker != NULL);
     if (marker) {
@@ -576,11 +566,11 @@ static void test_bash_invalid_utf8_tmpdir_falls_back(void)
     setenv("TMPDIR", "/tmp/hax-test-bad-\xff-XXXXXX-NOTREAL", 1);
     char *out = call_bash("seq 1 20000");
     EXPECT(strstr(out, "[output truncated") != NULL);
-    /* No raw 0xff in the result — both the validator (rejecting the
-     * env) and utf8_sanitize (defense in depth) help here. */
+    /* No raw 0xff in the result — both the validator (rejecting the env) and utf8_sanitize (defense
+     * in depth) help here. */
     EXPECT(strchr(out, (char)0xff) == NULL);
-    /* The advertised path must point at a real file under the /tmp
-     * fallback: extract it, stat it, confirm it exists. */
+    /* The advertised path must point at a real file under the /tmp fallback: extract it, stat it,
+     * confirm it exists. */
     const char *p = strstr(out, "saved to ");
     EXPECT(p != NULL);
     if (p) {
@@ -610,9 +600,8 @@ static void test_bash_long_line_with_trailing_newline_keeps_body(void)
     /* Alignment must not erase a long line when its only newline is the final byte. */
     char *out = call_bash("printf 'x%.0s' $(seq 1 60000); printf '\\n'");
     EXPECT(strstr(out, "[output truncated") != NULL);
-    /* Body must contain at least the line content tail, not be empty.
-     * 'xxxx' is a uniquely identifiable run that's nowhere in the
-     * truncation marker. */
+    /* Body must contain at least the line content tail, not be empty. 'xxxx' is a uniquely
+     * identifiable run that's nowhere in the truncation marker. */
     EXPECT(strstr(out, "xxxx") != NULL);
     free(out);
 }
@@ -651,10 +640,9 @@ static void test_bash_caps_long_line(void)
 
 static void test_bash_sanitizes_non_utf8(void)
 {
-    /* printf \377 produces an invalid UTF-8 byte which must be replaced.
-     * Octal, not \xff: POSIX printf only mandates octal escapes and dash
-     * (Debian's /bin/sh) emits hex escapes literally. Quadruple-backslash:
-     * C-literal → JSON → shell each eat one layer. */
+    /* printf \377 produces an invalid UTF-8 byte which must be replaced. Octal, not \xff: POSIX
+     * printf only mandates octal escapes and dash (Debian's /bin/sh) emits hex escapes literally.
+     * Quadruple-backslash: C-literal → JSON → shell each eat one layer. */
     char *out = call_bash("printf '\\\\377'");
     EXPECT(strstr(out, "\xEF\xBF\xBD") != NULL);
     free(out);
@@ -841,10 +829,9 @@ static void test_bash_subagent_env(void)
     free(want);
     free(out);
 
-    /* Clearing the export reverts the selection vars to raw passthrough;
-     * the depth marker and the trace/transcript clearing are unconditional
-     * (a nested hax truncates those paths at startup — inheriting them
-     * would destroy this process's live logs). */
+    /* Clearing the export reverts the selection vars to raw passthrough; the depth marker and the
+     * trace/transcript clearing are unconditional (a nested hax truncates those paths at startup —
+     * inheriting them would destroy this process's live logs). */
     bash_env_set_selection(NULL, NULL, NULL);
     out = call_bash("echo p=$HAX_PROVIDER; echo ps=$HAX_PRESET; echo d=$HAX_SUBAGENT_DEPTH; "
                     "echo tr=$HAX_TRACE; echo tl=$HAX_TRANSCRIPT");

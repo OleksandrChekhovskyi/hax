@@ -45,8 +45,8 @@ static void send_text(int fd, const char *text)
     }
 }
 
-/* Read until the server closes the connection; a reply that never comes fails the test after
- * three seconds instead of hanging it. */
+/* Read until the server closes the connection; a reply that never comes fails the test after three
+ * seconds instead of hanging it. */
 static void read_reply(int fd, char *reply, size_t capacity)
 {
     size_t len = 0;

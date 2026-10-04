@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-/* Forked children exit via exit(), not _exit(): the t_tempdir() cleanup under test is an
- * atexit handler. */
+/* Forked children exit via exit(), not _exit(): the t_tempdir() cleanup under test is an atexit
+ * handler. */
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,19 +39,17 @@ static void test_child_exit_leaves_parent_dirs(void)
 
 static void test_child_tempdir_cleaned_on_child_exit(void)
 {
-    /* Parent-owned dir created before the fork: the child inherits the
-     * parent's bookkeeping and must still clean its own dir on exit —
-     * while leaving this one alone. */
+    /* Parent-owned dir created before the fork: the child inherits the parent's bookkeeping and
+     * must still clean its own dir on exit — while leaving this one alone. */
     char *parent_dir = t_tempdir();
 
     int fds[2];
     EXPECT(pipe(fds) == 0);
     pid_t pid = fork_flushed();
     if (pid == 0) {
-        /* Snapshot the inherited path first: if t_tempdir() (wrongly)
-         * freed the inherited entries, its own strdup could reuse the
-         * storage and parent_dir would silently alias the child's dir —
-         * so compare against the copy, not just stat the pointer. */
+        /* Snapshot the inherited path first: if t_tempdir() (wrongly) freed the inherited entries,
+         * its own strdup could reuse the storage and parent_dir would silently alias the child's
+         * dir — so compare against the copy, not just stat the pointer. */
         char saved[256] = {0};
         snprintf(saved, sizeof(saved), "%s", parent_dir);
         char *dir = t_tempdir();
@@ -74,11 +72,10 @@ static void test_child_tempdir_cleaned_on_child_exit(void)
 
 static void test_child_cleans_unsearchable_tree(void)
 {
-    /* Tests may lock fixture dirs down to mode 0000 to provoke EACCES;
-     * cleanup must restore permissions first or it silently reverts to
-     * leaking, since nothing can traverse the locked dir. Nested
-     * locked dirs pin the traversal order too: each dir must be
-     * chmod'ed before cleanup descends into it. */
+    /* Tests may lock fixture dirs down to mode 0000 to provoke EACCES; cleanup must restore
+     * permissions first or it silently reverts to leaking, since nothing can traverse the locked
+     * dir. Nested locked dirs pin the traversal order too: each dir must be chmod'ed before cleanup
+     * descends into it. */
     int fds[2];
     EXPECT(pipe(fds) == 0);
     pid_t pid = fork_flushed();
@@ -110,9 +107,9 @@ static void test_child_cleans_unsearchable_tree(void)
 
 static void test_cleanup_leaves_hard_linked_file_modes(void)
 {
-    /* A hard link inside a fixture shares its inode with the external
-     * path. Cleanup must not touch file modes while removing the fixture,
-     * or the external file's permissions get rewritten through the link. */
+    /* A hard link inside a fixture shares its inode with the external path. Cleanup must not touch
+     * file modes while removing the fixture, or the external file's permissions get rewritten
+     * through the link. */
     char *outside = t_tempdir(); /* parent-owned; survives the child */
     char file[256];
     snprintf(file, sizeof(file), "%s/keep", outside);

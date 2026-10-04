@@ -11,15 +11,15 @@
 #include "tool.h"
 #include "xalloc.h"
 #include "system/fs.h"
-#include "tools/task_helpers.h"
+#include "tools/bash_fixtures.h"
 #include "tools/task_registry.h"
 
 static void test_wait_streams_output_live(void)
 {
     setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
     char *gate = gate_create();
-    /* The final line waits until the display has shown the first, so only a live stream can
-     * deliver both. */
+    /* The final line waits until the display has shown the first, so only a live stream can deliver
+     * both. */
     char *shown_gate = gate_create();
     char *cmd = xasprintf("read -r _ <%s; echo streamed-line; read -r _ <%s; echo final-line", gate,
                           shown_gate);
@@ -187,8 +187,8 @@ static void test_kill_delivers_pending_output(void)
 
     gate_release(first_gate);
     free(first_gate);
-    /* Let post-detach output land in the spool before killing; the task stays blocked on the
-     * second gate, which is never released. */
+    /* Let post-detach output land in the spool before killing; the task stays blocked on the second
+     * gate, which is never released. */
     int has_output = 0;
     time_t start = time(NULL);
     while (!has_output && time(NULL) - start < 10) {
@@ -255,9 +255,9 @@ static void test_kill_spares_task_finishing_within_timeout(void)
     free(args);
     EXPECT(strstr(out, "done-first") != NULL);
     EXPECT(strstr(out, "finished (exit 0)") != NULL);
-    /* Match the status phrase, not a bare "killed": the footer can also carry an orphan-sweep
-     * note containing the word. This command runs only builtins and so orphans nothing — that
-     * note appears when the drainer has yet to observe EOF as the shell's exit is seen. */
+    /* Match the status phrase, not a bare "killed": the footer can also carry an orphan-sweep note
+     * containing the word. This command runs only builtins and so orphans nothing — that note
+     * appears when the drainer has yet to observe EOF as the shell's exit is seen. */
     EXPECT(strstr(out, "killed (signal ") == NULL);
     free(out);
     free(id);
@@ -396,8 +396,8 @@ static void test_binary_markers_reach_display(void)
 static void test_binary_marker_shown_after_streamed_text_at_launch(void)
 {
     /* The NUL waits until the display has shown the text, so the text streams (and would have
-     * swallowed the marker) before binary hits; the held transition keeps both inside the
-     * launch window. */
+     * swallowed the marker) before binary hits; the held transition keeps both inside the launch
+     * window. */
     setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
     setenv("HAX_BASH_TRANSITION_MIN_BYTES", "11", 1); /* "visible\n" + 'A\0B' */
     char *gate = gate_create();
@@ -432,8 +432,8 @@ static void test_binary_marker_shown_after_streamed_text_in_wait(void)
 {
     setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
     char *gate = gate_create();
-    /* Text streams during the wait first, then the NUL turns the task binary before it ends;
-     * the NUL waits until the display has shown the text, keeping the two in separate chunks. */
+    /* Text streams during the wait first, then the NUL turns the task binary before it ends; the
+     * NUL waits until the display has shown the text, keeping the two in separate chunks. */
     char *shown_gate = gate_create();
     char *cmd = xasprintf("read -r _ <%s; echo streamed; read -r _ <%s; printf '\\\\000'", gate,
                           shown_gate);
@@ -470,11 +470,11 @@ static void test_runaway_output_killed_without_polling(void)
     EXPECT(fd >= 0);
     close(fd);
 
-    /* The producer is the shell's child, not the shell: once killed it is reaped by init
-     * (the shell itself would linger as a zombie until a registry poll reaps it). The gate
-     * holds the flood until after detach: an ungated producer races the yield window
-     * against the drainer reaching the output limit, and on a fast machine the limit can
-     * win, completing the call synchronously with no task to wait on. */
+    /* The producer is the shell's child, not the shell: once killed it is reaped by init (the shell
+     * itself would linger as a zombie until a registry poll reaps it). The gate holds the flood
+     * until after detach: an ungated producer races the yield window against the drainer reaching
+     * the output limit, and on a fast machine the limit can win, completing the call synchronously
+     * with no task to wait on. */
     char *gate = gate_create();
     char *cmd = xasprintf("{ read -r _ <%s; exec yes; } & echo $! > %s; wait", gate, path);
     char *args = xasprintf("{\"command\":\"%s\",\"background\":true}", cmd);
@@ -491,8 +491,8 @@ static void test_runaway_output_killed_without_polling(void)
 
     gate_release(gate);
     free(gate);
-    /* The drainer must stop the producer at the output limit on its own; nothing here calls
-     * into the registry until the process is already gone. */
+    /* The drainer must stop the producer at the output limit on its own; nothing here calls into
+     * the registry until the process is already gone. */
     EXPECT(process_is_gone(pid));
 
     out = wait_for_id(id, 30);
@@ -531,7 +531,7 @@ static void test_detached_log_holds_full_output(void)
     free(cmd);
     char *id = extract_task_id(out);
     EXPECT(id != NULL);
-    /* The compact launch footer no longer carries the path; /tasks (task_list) does. */
+    /* The compact launch footer leaves the log path to /tasks (task_list). */
     EXPECT(strstr(out, "log:") == NULL);
     free(out);
 
@@ -595,8 +595,8 @@ static void test_large_collection_keeps_head_and_tail(void)
 
 int main(void)
 {
-    /* Kill waits sit out the full SIGTERM grace, so the default 2s would dominate the
-     * suite; tests needing a real grace window override and restore this. */
+    /* Kill waits sit out the full SIGTERM grace, so the default 2s would dominate the suite; tests
+     * needing a real grace window override and restore this. */
     setenv("HAX_BASH_TIMEOUT_GRACE", TEST_KILL_GRACE, 1);
     test_wait_streams_output_live();
     test_wait_times_out_on_running_task();

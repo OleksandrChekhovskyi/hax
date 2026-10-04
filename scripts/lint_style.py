@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Final, NamedTuple
 
 ROOTS: Final = (Path("src"), Path("tests"))
-HARNESS: Final = Path("tests/harness.h")
+HARNESS: Final = Path("tests/harness.c")
 SPAWN: Final = Path("src/system/spawn.c")
 FORK_RE: Final = re.compile(r"\bfork\s*\(")
 COMMENT_RE: Final = re.compile(r"/\*.*?\*/|//[^\n]*", re.DOTALL)

@@ -1,6 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_TESTS_TOOLS_TASK_HELPERS_H
-#define HAX_TESTS_TOOLS_TASK_HELPERS_H
+#include "tools/bash_fixtures.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -17,15 +16,7 @@
 #include "tool.h"
 #include "xalloc.h"
 
-/* Producers must outlive the yield window to detach. Tests that also need initial output
- * captured before the transition hold it open with HAX_BASH_TRANSITION_MIN_BYTES instead of
- * betting a widened window against spawn latency. */
-#define TEST_YIELD "10ms"
-/* Kills sit out the whole SIGTERM grace; above zero so the SIGTERM path still runs. Tests that
- * need cleanup to finish inside the grace set their own. */
-#define TEST_KILL_GRACE "10ms"
-
-static char *call_bash_background(const char *escaped_command)
+char *call_bash_background(const char *escaped_command)
 {
     char *args = xasprintf("{\"command\":\"%s\",\"background\":true}", escaped_command);
     char *out = TOOL_BASH.run(args, NULL);
@@ -33,8 +24,7 @@ static char *call_bash_background(const char *escaped_command)
     return out;
 }
 
-/* Return the owned "tN" id from a detachment report, or NULL. */
-static char *extract_task_id(const char *result)
+char *extract_task_id(const char *result)
 {
     const char *needle = "task t";
     const char *start = strstr(result, needle);
@@ -52,7 +42,7 @@ static char *extract_task_id(const char *result)
     return id;
 }
 
-static char *wait_for_id(const char *id, int timeout_seconds)
+char *wait_for_id(const char *id, int timeout_seconds)
 {
     char *args;
     if (timeout_seconds > 0)
@@ -64,8 +54,7 @@ static char *wait_for_id(const char *id, int timeout_seconds)
     return out;
 }
 
-/* Immediate kill-and-collect: task_wait with `kill` and no timeout. */
-static char *kill_id(const char *id)
+char *kill_id(const char *id)
 {
     char *args = xasprintf("{\"id\":\"%s\",\"kill\":true}", id);
     char *out = TOOL_TASK_WAIT.run(args, NULL);
@@ -73,16 +62,14 @@ static char *kill_id(const char *id)
     return out;
 }
 
-/* ESRCH on Linux or EPERM on Darwin means the process is gone; allow time for the kill to be
- * delivered and the orphan to be reaped. */
-static int process_is_gone(int pid)
+int process_is_gone(int pid)
 {
-    /* kill(0, sig) and kill(-1, sig) target the caller's process group and every signalable
-     * process; a pid from a failed extraction must fail the check, not probe those. */
+    /* kill(0) and kill(-1) would probe the process group and every process. */
     if (pid <= 0)
         return 0;
     time_t start = time(NULL);
     while (time(NULL) - start < 10) {
+        /* ESRCH on Linux, EPERM on Darwin. */
         if (kill(pid, 0) < 0)
             return 1;
         struct timespec ts = {.tv_sec = 0, .tv_nsec = 5 * 1000000L};
@@ -92,9 +79,7 @@ static int process_is_gone(int pid)
     return 0;
 }
 
-/* Wait for a command to write its pid into `path` (bounded), so the test cannot act on the
- * process tree before it reached that point. Returns the pid, or -1. */
-static int await_pid_file(const char *path)
+int await_pid_file(const char *path)
 {
     time_t start = time(NULL);
     while (time(NULL) - start < 10) {
@@ -113,17 +98,14 @@ static int await_pid_file(const char *path)
     return -1;
 }
 
-/* A fifo the task blocks on with `read -r _ <gate`: it holds the task alive across the yield
- * window without timers, and releasing it lets the task finish instantly. */
-static char *gate_create(void)
+char *gate_create(void)
 {
     char *path = xasprintf("%s/gate", t_tempdir());
     EXPECT(mkfifo(path, 0600) == 0);
     return path;
 }
 
-/* Nonblocking open with a deadline, so a task that failed to start cannot hang the test. */
-static void gate_release(const char *path)
+void gate_release(const char *path)
 {
     int fd = -1;
     time_t start = time(NULL);
@@ -141,15 +123,7 @@ static void gate_release(const char *path)
     }
 }
 
-struct display_capture {
-    struct buf buf;
-    /* Optional: release `release_gate` once the display has shown `release_on`, so a task can
-     * hold later output until earlier output provably streamed. */
-    const char *release_on;
-    const char *release_gate;
-};
-
-static void append_display(const char *bytes, size_t len, void *data)
+void append_display(const char *bytes, size_t len, void *data)
 {
     struct display_capture *capture = data;
     buf_append(&capture->buf, bytes, len);
@@ -158,5 +132,3 @@ static void append_display(const char *bytes, size_t len, void *data)
         capture->release_gate = NULL;
     }
 }
-
-#endif /* HAX_TESTS_TOOLS_TASK_HELPERS_H */

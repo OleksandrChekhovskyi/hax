@@ -23,9 +23,8 @@ static char *g_root;
 
 /* ---------------- child-side helpers ---------------- */
 
-/* Point the module at a private cache dir and the scenario's server.
- * catalog.refresh=1ms makes any existing snapshot count as stale, so the
- * fetch always spawns. */
+/* Point the module at a private cache dir and the scenario's server. catalog.refresh=1ms makes any
+ * existing snapshot count as stale, so the fetch always spawns. */
 static void child_env(const char *name, int port)
 {
     char dir[512], url[64];
@@ -97,10 +96,9 @@ static void scenario_cold_start(void)
 
 static void scenario_refresh_invalidates_memo(void)
 {
-    /* A stale snapshot answers (and is memoized) first; the refresh must
-     * replace the file and the generation bump must invalidate the
-     * memoized old value — the "estimates self-heal when a refresh lands
-     * mid-session" contract. */
+    /* A stale snapshot answers (and is memoized) first; the refresh must replace the file and the
+     * generation bump must invalidate the memoized old value — the "estimates self-heal when a
+     * refresh lands mid-session" contract. */
     struct loopback server = {0};
     loopback_reply_ok(&server, 0,
                       "{\"openai\": {\"models\": {"
@@ -156,53 +154,49 @@ static void run_bad_payload_scenario(const char *name, const char *bad_body)
 
 static void scenario_garbage_keeps_snapshot(void)
 {
-    /* A 200 response that isn't JSON at all (an HTML error page behind a
-     * broken proxy) must never replace a working snapshot. */
+    /* A 200 response that isn't JSON at all (an HTML error page behind a broken proxy) must never
+     * replace a working snapshot. */
     run_bad_payload_scenario("garbage", "<html>bad gateway</html>");
 }
 
 static void scenario_json_error_keeps_snapshot(void)
 {
-    /* A JSON-shaped error payload parses fine but lacks the catalog shape
-     * (no provider entry carrying a models object) — it must be rejected
-     * too, or its fresh mtime would suppress a recovering re-fetch for a
-     * whole refresh interval. */
+    /* A JSON-shaped error payload parses fine but lacks the catalog shape (no provider entry
+     * carrying a models object) — it must be rejected too, or its fresh mtime would suppress a
+     * recovering re-fetch for a whole refresh interval. */
     run_bad_payload_scenario("json-error", "{\"error\": \"rate limited\"}");
 }
 
 static void scenario_truncated_tail_keeps_snapshot(void)
 {
-    /* A body whose prefix validates but which is cut mid-member (a proxy
-     * truncation with a happens-to-match Content-Length) must be rejected
-     * whole — accepting it would silently drop every provider after the
-     * cut until the next refresh. */
+    /* A body whose prefix validates but which is cut mid-member (a proxy truncation with a
+     * happens-to-match Content-Length) must be rejected whole — accepting it would silently drop
+     * every provider after the cut until the next refresh. */
     run_bad_payload_scenario("truncated-tail",
                              "{\"openai\": {\"models\": {\"m3\": {}}}, \"anthropic\":");
 }
 
 static void scenario_invalid_member_keeps_snapshot(void)
 {
-    /* Brace-balanced garbage after a valid member: the structural scan
-     * alone would wave it through, so every member slice must survive a
-     * real parse before the snapshot is replaced. */
+    /* Brace-balanced garbage after a valid member: the structural scan alone would wave it through,
+     * so every member slice must survive a real parse before the snapshot is replaced. */
     run_bad_payload_scenario("invalid-member",
                              "{\"openai\": {\"models\": {\"m3\": {}}}, \"tail\": wat}");
 }
 
 static void scenario_trailing_garbage_keeps_snapshot(void)
 {
-    /* Bytes after the root object's closing brace (a concatenated or
-     * corrupted response) mean the body isn't the artifact — reject. */
+    /* Bytes after the root object's closing brace (a concatenated or corrupted response) mean the
+     * body isn't the artifact — reject. */
     run_bad_payload_scenario("trailing-garbage",
                              "{\"openai\": {\"models\": {\"m3\": {}}}} garbage");
 }
 
 static void scenario_drain_completes_fetch(void)
 {
-    /* The one-shot exit path drains the in-flight fetch (bounded) instead
-     * of letting shutdown cancel it: with a server slower than the run, a
-     * post-drain lookup must already see the fetched values — no polling,
-     * and no cold cache left behind. The delay only has to outlast an
+    /* The one-shot exit path drains the in-flight fetch (bounded) instead of letting shutdown
+     * cancel it: with a server slower than the run, a post-drain lookup must already see the
+     * fetched values — no polling, and no cold cache left behind. The delay only has to outlast an
      * undrained lookup, which follows prefetch at once. */
     struct loopback server = {.delay_ms = 50};
     loopback_reply_ok(&server, 0,
@@ -225,10 +219,9 @@ static void scenario_drain_completes_fetch(void)
 
 static void scenario_stale_snapshot_warns(void)
 {
-    /* A snapshot that hasn't refreshed for over the alarm window (~30d)
-     * makes prefetch record its age for catalog_stale_days — the frontend's
-     * cue to warn that estimates may have drifted — while the refresh it
-     * spawns still recovers as usual. */
+    /* A snapshot that hasn't refreshed for over the alarm window (~30d) makes prefetch record its
+     * age for catalog_stale_days — the frontend's cue to warn that estimates may have drifted —
+     * while the refresh it spawns still recovers as usual. */
     /* The age is read while the fetch is held in flight. */
     struct loopback server = {.hold = 1};
     loopback_reply_ok(&server, 0,
@@ -256,8 +249,8 @@ static void scenario_stale_snapshot_warns(void)
 
 static void scenario_wait_catalog_starts_fetch(void)
 {
-    /* A picker or pre-request wait on a catalog-backed provider is itself the trigger: nothing
-     * has called catalog_prefetch before it, and the fetched values are visible when it returns,
+    /* A picker or pre-request wait on a catalog-backed provider is itself the trigger: nothing has
+     * called catalog_prefetch before it, and the fetched values are visible when it returns,
      * without polling. */
     struct loopback server = {0};
     loopback_reply_ok(&server, 0,
@@ -292,8 +285,8 @@ static void scenario_no_identity_never_fetches(void)
     model_meta_prefetch(&local);
     model_meta_wait_catalog(&local, 5000, NULL, NULL);
     model_meta_wait_ms(&local, 5000);
-    /* Draining returns at once when nothing was fetched and otherwise waits for the fetch, so
-     * any request it made has reached the listener by now. */
+    /* Draining returns at once when nothing was fetched and otherwise waits for the fetch, so any
+     * request it made has reached the listener by now. */
     catalog_drain(5000);
     struct pollfd poll_fd = {.fd = server.listener_fd, .events = POLLIN};
     EXPECT(poll(&poll_fd, 1, 0) == 0);
@@ -309,9 +302,9 @@ static int always_cancel(void *user)
 
 static void scenario_wait_honors_cancellation(void)
 {
-    /* A picker's Esc must dismiss the wait at once while the fetch keeps running to completion,
-     * so the cache still warms for later callers. The held reply leaves cancelling as the only
-     * way the wait can end before its timeout. */
+    /* A picker's Esc must dismiss the wait at once while the fetch keeps running to completion, so
+     * the cache still warms for later callers. The held reply leaves cancelling as the only way the
+     * wait can end before its timeout. */
     struct loopback server = {.hold = 1};
     loopback_reply_ok(&server, 0,
                       "{\"openai\": {\"models\": {"
@@ -338,8 +331,8 @@ static void scenario_wait_honors_cancellation(void)
 
 static void scenario_refresh_clears_stale_warning(void)
 {
-    /* When the refresh lands before the frontend reads the age — a picker waited for it — the
-     * stale snapshot is gone and warning about it would be false. */
+    /* When the refresh lands before the frontend reads the age — a picker waited for it — the stale
+     * snapshot is gone and warning about it would be false. */
     struct loopback server = {0};
     loopback_reply_ok(&server, 0,
                       "{\"openai\": {\"models\": {"
@@ -367,8 +360,8 @@ static void scenario_refresh_clears_stale_warning(void)
 
 static void run_scenario(const char *name, void (*scenario)(void))
 {
-    /* The include cleaner knows no direct glibc provider for pid_t here; its
-     * typedef hides behind the ignored bits/ headers. */
+    /* The include cleaner knows no direct glibc provider for pid_t here; its typedef hides behind
+     * the ignored bits/ headers. */
     // NOLINTNEXTLINE(misc-include-cleaner)
     pid_t pid = fork();
     if (pid == 0) {

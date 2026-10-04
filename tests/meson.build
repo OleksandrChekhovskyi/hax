@@ -1,14 +1,20 @@
-# Each entry is just the test's source path; everything else is derived. The
-# registered test name is the path with the `test_` prefix and `.c` suffix
-# stripped, keeping the subdirectory (so `tools/test_read.c` -> `tools/read`,
-# `transport/test_sse.c` -> `transport/sse`, top-level `test_buf.c` -> `buf`).
-# That makes this list a direct mirror of the `sources` list in the top-level
-# meson.build — keep it grouped by subdirectory and sorted within each group.
+# Fixtures shared across tests, each a header with its implementation beside it.
+test_support = static_library('test_support',
+    'harness.c',
+    'loopback.c',
+    'tools/bash_fixtures.c',
+    dependencies: [hax_dep],
+)
+test_support_dep = declare_dependency(link_with: test_support, dependencies: [hax_dep])
+
+# Each entry is just the test's source path; everything else is derived. The registered name is
+# the path without the `test_` prefix and `.c` suffix, keeping the subdirectory:
+# `tools/test_read.c` -> `tools/read`, top-level `test_buf.c` -> `buf`. The list mirrors the
+# production `sources` in the top-level meson.build: grouped by subdirectory, sorted within each.
 #
-# Every test is a single .c file linked against `hax_dep`: lazy static-archive
-# linking pulls in only the production objects it transitively references, and
-# the dependency carries the libcurl/jansson/threads include dirs and link
-# flags — so a test needs nothing here but its source path.
+# A test is a single .c file linked against `test_support_dep`, which carries the fixtures,
+# `hax_lib`, and the libcurl/jansson/threads flags; lazy archive linking pulls in only the objects
+# the test references.
 test_sources = [
     'test_agent.c',
     'test_agent_core.c',
@@ -150,15 +156,14 @@ foreach src : test_sources
     name = parent == '.' ? stem : parent / stem
     exe = executable('test_' + name.underscorify(),
         src,
-        dependencies: [hax_dep],
+        dependencies: [test_support_dep],
     )
     test(name, exe, env: test_env)
 endforeach
 
-# End-to-end scenarios: Python scripts under e2e/, one per user-facing area, that
-# drive the built binary through the mock provider (see e2e/harness.py). Naming
-# mirrors the C tests: e2e/test_oneshot.py registers as e2e/oneshot, so the name
-# prefix selects the group (`meson test 'e2e/*'`).
+# End-to-end scenarios: Python scripts under e2e/, one per user-facing area, driving the built
+# binary through the mock provider (see e2e/harness.py). Names mirror the C tests:
+# e2e/test_oneshot.py registers as e2e/oneshot, so `meson test 'e2e/*'` selects the group.
 e2e_scenarios = [
     'oneshot',
     'repl_interrupt',

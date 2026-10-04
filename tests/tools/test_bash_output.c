@@ -8,8 +8,8 @@
 
 static void test_oversized_memory_cap_spills_before_drain_limit(void)
 {
-    /* The drain stops reading at BASH_OUTPUT_DRAIN_LIMIT, so output must spill before that, or
-     * a configured cap above it would leave the truncated result nowhere to point. */
+    /* The drain stops reading at BASH_OUTPUT_DRAIN_LIMIT, so output must spill before that, or a
+     * configured cap above it would leave the truncated result nowhere to point. */
     struct bash_output *output = bash_output_create(32L * 1024 * 1024);
     static char chunk[64 * 1024];
     memset(chunk, 'x', sizeof(chunk));

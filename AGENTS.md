@@ -164,8 +164,10 @@ Where a test goes:
 - Do not assert the same behavior at two levels. Once a unit test pins it, an e2e scenario that
   repeats the check adds run time without adding signal.
 - Before writing a fixture (loopback server, fake command on `PATH`, scripted stream, scratch
-  tree), look for one in sibling test files or `tests/harness.h` and reuse or extract it rather
-  than copying it.
+  tree), look for one in sibling test files or the `test_support` library and reuse or extract it
+  rather than copying it. Shared fixtures are a header plus a `.c` beside it (`tests/harness.h`,
+  `tests/loopback.h`, `tests/tools/bash_fixtures.h`), built into `test_support` in
+  `tests/meson.build`.
 
 ## Code style and conventions
 

@@ -14,8 +14,8 @@
 #include "tool.h"
 #include "xalloc.h"
 #include "system/fs.h"
+#include "tools/bash_fixtures.h"
 #include "tools/bash_process.h"
-#include "tools/task_helpers.h"
 #include "tools/task_registry.h"
 
 static void test_background_fast_command_returns_sync(void)
@@ -24,8 +24,8 @@ static void test_background_fast_command_returns_sync(void)
     EXPECT_STR_EQ(out, "hi\n\n[finished during launch; no task created]");
     free(out);
 
-    /* The requested name is reported dead so the model does not wait on it, and stays free.
-     * The note is a model-only tail: the display ends with the command's own output. */
+    /* The requested name is reported dead so the model does not wait on it, and stays free. The
+     * note is a model-only tail: the display ends with the command's own output. */
     const char *footer = "\n[finished during launch; task quick not created]";
     for (int round = 0; round < 2; round++) {
         struct display_capture capture = {0};
@@ -167,8 +167,8 @@ static void test_background_orphans_killed_at_yield(void)
 {
     setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
     setenv("HAX_BASH_TRANSITION_MIN_BYTES", "2", 1); /* the pid line */
-    /* The shell exits at once while the orphan inherits the pipe and holds it open, so the
-     * yield deadline fires with nothing adoptable. */
+    /* The shell exits at once while the orphan inherits the pipe and holds it open, so the yield
+     * deadline fires with nothing adoptable. */
     char *out = call_bash_background("sleep 30 & echo $!");
     EXPECT(strstr(out, "detached") == NULL);
     EXPECT(strstr(out, "[timed out") == NULL);
@@ -183,8 +183,8 @@ static void test_background_orphans_killed_at_yield(void)
 
 static void test_background_orphans_killed_at_eof(void)
 {
-    /* With output redirected away the pipe hits EOF immediately and the shell exits, so the
-     * call returns a plain synchronous result — the orphan must still die with it. */
+    /* With output redirected away the pipe hits EOF immediately and the shell exits, so the call
+     * returns a plain synchronous result — the orphan must still die with it. */
     char *out = call_bash_background("sleep 30 >/dev/null 2>&1 & echo $!");
     EXPECT(strstr(out, "detached") == NULL);
     EXPECT(strstr(out, "orphaned") == NULL);
@@ -198,8 +198,8 @@ static void test_adopted_orphans_killed_at_shell_exit(void)
 {
     setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
     char *gate = gate_create();
-    /* The shell outlives the yield (adopted), then exits leaving the orphan holding the
-     * pipe; the registry must kill it at the shell-exit boundary, like the launch path. */
+    /* The shell outlives the yield (adopted), then exits leaving the orphan holding the pipe; the
+     * registry must kill it at the shell-exit boundary, like the launch path. */
     char *cmd = xasprintf("read -r _ <%s; sleep 30 & echo $!", gate);
     char *out = call_bash_background(cmd);
     free(cmd);
@@ -263,8 +263,8 @@ static void test_exit_note_covers_uncollected_tasks(void)
     }
     free(note);
 
-    /* A finished task with undelivered output gets its final status, with the output the
-     * exit destroys marked as discarded rather than advertised as collectable. */
+    /* A finished task with undelivered output gets its final status, with the output the exit
+     * destroys marked as discarded rather than advertised as collectable. */
     char *gate = gate_create();
     char *cmd = xasprintf("read -r _ <%s; echo leftover", gate);
     out = call_bash_background(cmd);
@@ -314,9 +314,9 @@ static void test_kill_escalates_past_term_exiting_shell(void)
 {
     setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
     setenv("HAX_BASH_TRANSITION_MIN_BYTES", "2", 1); /* the pid line */
-    /* SIGTERM ends the shell at once while the child ignores it (SIG_IGN survives the exec);
-     * only the SIGKILL escalation after the grace can end the child, and it must fire
-     * although the shell is gone. */
+    /* SIGTERM ends the shell at once while the child ignores it (SIG_IGN survives the exec); only
+     * the SIGKILL escalation after the grace can end the child, and it must fire although the shell
+     * is gone. */
     char *out = call_bash_background("sh -c 'trap \\\"\\\" TERM; exec sleep 30' & echo $!; wait");
     char *id = extract_task_id(out);
     EXPECT(id != NULL);
@@ -336,16 +336,16 @@ static void test_kill_escalates_past_term_exiting_shell(void)
 static void test_kill_grace_covers_redirected_cleanup(void)
 {
     setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
-    /* The cleanup takes a fifth of the grace: the TERM must have reached it, and the SIGKILL
-     * must wait for it. */
+    /* The cleanup takes a fifth of the grace: the TERM must have reached it, and the SIGKILL must
+     * wait for it. */
     setenv("HAX_BASH_TIMEOUT_GRACE", "500ms", 1);
     char path[] = "/tmp/hax-test-task-cleanup-XXXXXX";
     int fd = mkstemp(path);
     EXPECT(fd >= 0);
     close(fd);
 
-    /* The shell dies on SIGTERM at once (pipe EOF included: the child's output is
-     * redirected), yet the child's TERM cleanup must still get the grace window. */
+    /* The shell dies on SIGTERM at once (pipe EOF included: the child's output is redirected), yet
+     * the child's TERM cleanup must still get the grace window. */
     char *ready = xasprintf("%s/ready", t_tempdir());
     char *cmd = xasprintf("sh -c 'trap \\\"sleep 0.1; echo bye > %s\\\" TERM; "
                           "sh -c \\\"echo $$ > %s; exec sleep 30\\\"' >/dev/null 2>&1 & wait",
@@ -356,9 +356,9 @@ static void test_kill_grace_covers_redirected_cleanup(void)
     EXPECT(id != NULL);
     free(out);
 
-    /* The kill must not beat the trapping shell to installing its trap, nor land in its
-     * sleep's fork-to-exec window where the inherited trap disposition would consume the
-     * TERM; the ready write comes from the exec'd inner shell, past both. */
+    /* The kill must not beat the trapping shell to installing its trap, nor land in its sleep's
+     * fork-to-exec window where the inherited trap disposition would consume the TERM; the ready
+     * write comes from the exec'd inner shell, past both. */
     EXPECT(await_pid_file(ready) > 0);
     free(ready);
 
@@ -479,14 +479,14 @@ static void test_finalize_tasks_resolves_record(void)
     unsetenv("HAX_BASH_BACKGROUND_YIELD");
 }
 
-/* Fatal-signal handlers cannot run registry code, so the published pgid table alone must be
- * enough to take live task groups down. */
+/* Fatal-signal handlers cannot run registry code, so the published pgid table alone must be enough
+ * to take live task groups down. */
 static void test_fatal_hook_kills_task_groups(void)
 {
     setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
     setenv("HAX_BASH_TRANSITION_MIN_BYTES", "2", 1); /* the pid line */
-    /* Probe a group member rather than the shell: the killed shell stays an unreaped zombie
-     * (still answering kill(pid, 0)) until the registry polls it. */
+    /* Probe a group member rather than the shell: the killed shell stays an unreaped zombie (still
+     * answering kill(pid, 0)) until the registry polls it. */
     char *out = call_bash_background("sleep 30 & echo $!; wait");
     EXPECT(strstr(out, "detached as task t") != NULL);
     int pid = atoi(out);
@@ -653,8 +653,8 @@ static void test_task_name_validation(void)
 
 int main(void)
 {
-    /* Kill waits sit out the full SIGTERM grace, so the default 2s would dominate the
-     * suite; tests needing a real grace window override and restore this. */
+    /* Kill waits sit out the full SIGTERM grace, so the default 2s would dominate the suite; tests
+     * needing a real grace window override and restore this. */
     setenv("HAX_BASH_TIMEOUT_GRACE", TEST_KILL_GRACE, 1);
     test_background_fast_command_returns_sync();
     test_background_fast_failure_returns_sync();

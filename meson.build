@@ -8,13 +8,12 @@ project('hax', 'c',
     ],
 )
 
-# glibc hides POSIX 2008 interfaces until asked for them, while the BSD libcs
-# expose POSIX by default and read these macros as a request to *hide* their
-# own extensions — which takes flock(2)'s LOCK_* constants with them. Asking
-# only where the request is needed keeps both families happy.
+# glibc hides POSIX 2008 interfaces until asked for them, while the BSD libcs expose POSIX by
+# default and read these macros as a request to *hide* their own extensions, flock(2)'s LOCK_*
+# constants among them. So ask only where the request is needed.
 #
-# _XOPEN_SOURCE=700 is SUSv4 (POSIX 2008 + XSI), needed on glibc to expose
-# realpath() — _POSIX_C_SOURCE alone doesn't gate it through.
+# _XOPEN_SOURCE=700 (SUSv4: POSIX 2008 + XSI) is what exposes realpath() on glibc; _POSIX_C_SOURCE
+# alone doesn't.
 if host_machine.system() == 'linux'
     add_project_arguments(
         '-D_POSIX_C_SOURCE=200809L',
@@ -25,40 +24,35 @@ endif
 
 add_project_arguments(
     '-D_DARWIN_C_SOURCE',
-    # Project headers go through -iquote, not -I, so `#include <foo.h>`
-    # always reaches a system header rather than shadowing it with one
-    # of ours (e.g. a `src/util.h` would collide with macOS's `<util.h>`
-    # under -I). The `tests/` entry serves the same purpose for
-    # `harness.h` and friends.
+    # Project headers go through -iquote, not -I, so `#include <foo.h>` always reaches a system
+    # header rather than one of ours (under -I, a `src/util.h` would shadow macOS's <util.h>). The
+    # `tests/` entry does the same for the test fixtures.
     '-iquote', meson.project_source_root() / 'src',
     '-iquote', meson.project_source_root() / 'tests',
     language: 'c',
 )
 
-# include_type system turns the dependencies' -I flags into -isystem so
-# clang-tidy does not report findings inside third-party headers (Homebrew
-# installs them outside the default system include path).
+# include_type system turns the dependencies' -I flags into -isystem, so clang-tidy doesn't report
+# findings inside third-party headers (Homebrew installs them outside the default include path).
 libcurl = dependency('libcurl', include_type: 'system')
 # >=2.13 for json_object_update_recursive.
 jansson = dependency('jansson', version: '>=2.13', include_type: 'system')
 threads = dependency('threads')
 
-# FreeBSD resolves isfinite() to a libm symbol rather than a compiler builtin,
-# so the math library has to be linked explicitly there. Optional because
-# platforms that fold the math functions into libc ship no separate library.
+# FreeBSD resolves isfinite() to a libm symbol rather than a compiler builtin, so the math library
+# must be linked there. Optional because platforms that fold libm into libc ship none.
 libm = meson.get_compiler('c').find_library('m', required: false)
 
 fs = import('fs')
 
-# The version baked into the binary. `--always` keeps pre-tag checkouts
-# building (bare commit hash); the fallback covers builds without git, such as
-# dist tarballs, where it must match the tag scheme's leading "v".
+# The version baked into the binary. `--always` keeps pre-tag checkouts building (bare commit
+# hash); the fallback covers builds without git, such as dist tarballs, and must match the tag
+# scheme's leading "v".
 #
-# Describe only against our own repository: otherwise git walks up and describes
-# whatever encloses an extracted tarball. vcs_tag falls back when the command
-# fails, not when it succeeds against the wrong repository, so a missing
-# repository has to select the fallback by failing. Test existence rather than
-# is_dir(): `.git` is a file in a worktree or submodule.
+# Describe only our own repository: otherwise git walks up and describes whatever encloses an
+# extracted tarball. vcs_tag falls back when the command fails, not when it succeeds against the
+# wrong repository, so a missing repository must select the fallback by failing. Test existence
+# rather than is_dir(): `.git` is a file in a worktree or submodule.
 if fs.exists('.git')
     describe = ['git', 'describe', '--tags', '--always', '--dirty=+']
 else
@@ -72,11 +66,9 @@ version_h = vcs_tag(
     fallback: 'v' + meson.project_version(),
 )
 
-# Production sources, grouped by subdirectory and sorted within each group.
-# `main.c` is deliberately excluded: it lives only in the `hax` executable so
-# that test binaries (which bring their own `main`) can link the same objects
-# via `hax_lib` without colliding. Keep these lists sorted — additions should
-# slot into the right group alphabetically.
+# Production sources, grouped by subdirectory and sorted within each group. `main.c` is left out on
+# purpose: it lives only in the `hax` executable, so test binaries, which bring their own `main`,
+# can link the same objects through `hax_lib` without colliding.
 sources = files(
     'src/agent.c',
     'src/agent_core.c',
@@ -212,25 +204,20 @@ sources = files(
     'src/transport/sse.c',
 )
 
-# One archive shared by the executable and every test. Static-archive linking
-# is lazy: each consumer pulls only the objects it transitively references, so
-# tests get exactly the closure they need without hand-listing sources. The
-# target is named distinctly from the `hax` executable so `meson compile -C
-# build hax` stays unambiguous.
+# One archive shared by the executable and every test. Static-archive linking is lazy: each
+# consumer pulls only the objects it transitively references, so tests get exactly the closure
+# they need without hand-listing sources. Named apart from the `hax` executable so
+# `meson compile -C build hax` stays unambiguous.
 hax_lib = static_library('hax_lib',
     sources,
     version_h,
     dependencies: [libcurl, jansson, threads, libm],
 )
 
-# Wrap the library as a dependency so consumers inherit both the link against
-# `hax_lib` and the include dirs / compile flags of libcurl / jansson / threads
-# — their own translation units (`main.c`, each test) include <jansson.h> etc.
-# and need those paths at compile time, which `link_with` alone wouldn't carry.
-# Only the compile-side of each dependency is propagated here via
-# partial_dependency(): the link args already ride along through `link_with`
-# (static libraries propagate their link deps), so re-adding them would make
-# every link emit `ld: warning: ignoring duplicate libraries`.
+# Consumers need the link against `hax_lib` and, for their own translation units (`main.c`, each
+# test), the compile flags of libcurl, jansson, and threads, which `link_with` alone doesn't carry.
+# Only the compile side comes through partial_dependency(): the static library already propagates
+# its link dependencies, and adding them again makes every link warn about duplicate libraries.
 hax_dep = declare_dependency(
     link_with: hax_lib,
     dependencies: [
