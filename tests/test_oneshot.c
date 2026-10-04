@@ -691,6 +691,8 @@ static void test_missing_model_is_diagnostic(void)
 
 int main(void)
 {
+    /* Outside any repository, so recorded sessions neither run git nor depend on the checkout. */
+    EXPECT(chdir(t_tempdir()) == 0);
     test_final_messages_are_pipeable();
     test_json_streams_records_and_result();
     test_json_reports_provider_error();

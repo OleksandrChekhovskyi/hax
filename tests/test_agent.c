@@ -812,6 +812,8 @@ static void test_apply_settings_records_switch(void)
 
 int main(void)
 {
+    /* Outside any repository, so recorded sessions neither run git nor depend on the checkout. */
+    EXPECT(chdir(t_tempdir()) == 0);
     test_apply_settings_empty_reprints_banner();
     test_apply_settings_nonempty_prints_marker();
     test_apply_settings_quiet_prints_nothing();

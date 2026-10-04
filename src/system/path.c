@@ -114,6 +114,21 @@ char *path_relativize(const char *path, const char *cwd)
     return *relative ? xstrdup(relative) : NULL;
 }
 
+int path_climb_to_parent(char *dir)
+{
+    char *slash = strrchr(dir, '/');
+    if (!slash)
+        return 0;
+    if (slash == dir) {
+        if (dir[1] == '\0')
+            return 0;
+        dir[1] = '\0';
+        return 1;
+    }
+    *slash = '\0';
+    return 1;
+}
+
 static char *xdg_hax_path(const char *env_name, const char *home_relative,
                           const char *relative_path)
 {

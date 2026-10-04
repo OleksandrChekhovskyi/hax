@@ -21,6 +21,9 @@ char *path_collapse_home(const char *path);
  * unrelated paths, equality, and paths containing a `..` component. */
 char *path_relativize(const char *path, const char *cwd);
 
+/* Replace absolute `dir` with its parent in place. Returns 0 at the root, leaving it unchanged. */
+int path_climb_to_parent(char *dir);
+
 /* Return an allocated `<base>/hax/<relative_path>`, using the named non-empty XDG base or the HOME
  * fallback. Return NULL when neither base is available. */
 char *xdg_hax_config_path(const char *relative_path); /* XDG_CONFIG_HOME or HOME/.config */

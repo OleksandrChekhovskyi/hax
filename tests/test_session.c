@@ -1053,6 +1053,8 @@ static void test_load_budgets_images_from_compaction_seed(void)
 
 int main(void)
 {
+    /* Outside any repository, so recorded sessions neither run git nor depend on the checkout. */
+    EXPECT(chdir(t_tempdir()) == 0);
     test_item_codec_round_trip();
     test_recording_control();
     test_session_round_trip();

@@ -306,6 +306,17 @@ static void test_path_relativize_accepts_dots_within_component(void)
     free(relative);
 }
 
+static void test_path_climb_to_parent_stops_at_root(void)
+{
+    char dir[] = "/a/b";
+    EXPECT(path_climb_to_parent(dir) == 1);
+    EXPECT_STR_EQ(dir, "/a");
+    EXPECT(path_climb_to_parent(dir) == 1);
+    EXPECT_STR_EQ(dir, "/");
+    EXPECT(path_climb_to_parent(dir) == 0);
+    EXPECT_STR_EQ(dir, "/");
+}
+
 int main(void)
 {
     test_path_join_simple();
@@ -355,6 +366,8 @@ int main(void)
     test_path_relativize_rejects_non_escaping_parent_component();
     test_path_relativize_rejects_trailing_parent_component();
     test_path_relativize_accepts_dots_within_component();
+
+    test_path_climb_to_parent_stops_at_root();
 
     T_REPORT();
 }

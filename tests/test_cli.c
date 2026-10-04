@@ -435,6 +435,8 @@ static void test_subagent_depth_validation(void)
 
 int main(void)
 {
+    /* Outside any repository, so recorded sessions neither run git nor depend on the checkout. */
+    EXPECT(chdir(t_tempdir()) == 0);
     locale_init_utf8();
     test_parse_selection_and_prompt_arguments();
     test_parse_resume_modes();

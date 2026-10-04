@@ -15,6 +15,7 @@
 #include "xalloc.h"
 #include "providers/registry.h"
 #include "system/fs.h"
+#include "system/git.h"
 #include "system/os.h"
 #include "system/path.h"
 #include "text/frontmatter.h"
@@ -25,7 +26,7 @@
 /* Truncate oversized project instructions rather than letting one file dominate the prompt. */
 #define AGENTS_MD_MAX_BYTES (64u * 1024u)
 
-/* Bound upward discovery even on an unusually deep tree without a project marker. */
+/* Bound the upward walks toward the project root even on an unusually deep tree. */
 #define PROJECT_MAX_DEPTH 64
 
 /* Skill discovery needs only YAML metadata, never the full SKILL.md body. */
@@ -53,39 +54,6 @@ static int command_is_available(const char *name)
         return 0;
     free(path);
     return 1;
-}
-
-/* Replace absolute `dir` with its parent; return 0 at the root without changing it. */
-static int climb_to_parent(char *dir)
-{
-    char *slash = strrchr(dir, '/');
-    if (!slash)
-        return 0;
-    if (slash == dir) {
-        if (dir[1] == '\0')
-            return 0;
-        dir[1] = '\0';
-        return 1;
-    }
-    *slash = '\0';
-    return 1;
-}
-
-static char *find_project_root(const char *cwd)
-{
-    char dir[PATH_MAX];
-    snprintf(dir, sizeof(dir), "%s", cwd);
-    for (int depth = 0; depth < PROJECT_MAX_DEPTH; depth++) {
-        char marker[PATH_MAX + 16];
-        snprintf(marker, sizeof(marker), "%s/.git", dir);
-        struct stat marker_stat;
-        if (stat(marker, &marker_stat) == 0)
-            return xstrdup(dir);
-
-        if (!climb_to_parent(dir))
-            break;
-    }
-    return NULL;
 }
 
 static char *sanitize_display_path(const char *path)
@@ -146,7 +114,7 @@ static void append_environment(struct buf *prompt, const char *model)
     const char *home = getenv("HOME");
     char *shell = bash_resolve_shell();
     char *os = os_description();
-    char *project_root = find_project_root(cwd);
+    char *project_root = git_find_worktree_root(cwd);
 
     char *cwd_clean = sanitize_display_path(cwd);
     char *home_clean = (home && *home) ? utf8_sanitize(home, strlen(home)) : NULL;
@@ -224,7 +192,7 @@ static void append_project_agents_files(struct buf *prompt, int *has_project_con
     if (!getcwd(cwd, sizeof(cwd)))
         return;
 
-    char *project_root = find_project_root(cwd);
+    char *project_root = git_find_worktree_root(cwd);
     if (!project_root) {
         /* Outside a repository, parent instructions may belong to an unrelated project. */
         char *path = path_join(cwd, "AGENTS.md");
@@ -247,7 +215,7 @@ static void append_project_agents_files(struct buf *prompt, int *has_project_con
         display_paths[path_count] = path_collapse_home(paths[path_count]);
         path_count++;
 
-        if (strcmp(dir, project_root) == 0 || !climb_to_parent(dir))
+        if (strcmp(dir, project_root) == 0 || !path_climb_to_parent(dir))
             break;
     }
     free(project_root);
@@ -383,7 +351,7 @@ static void collect_project_skills(struct skill_list *skills, const char *exclud
     struct stat excluded_stat;
     int have_excluded_root = excluded_root && stat(excluded_root, &excluded_stat) == 0;
 
-    char *project_root = find_project_root(cwd);
+    char *project_root = git_find_worktree_root(cwd);
     char dir[PATH_MAX];
     snprintf(dir, sizeof(dir), "%s", cwd);
     for (int depth = 0; depth < PROJECT_MAX_DEPTH; depth++) {
@@ -396,7 +364,7 @@ static void collect_project_skills(struct skill_list *skills, const char *exclud
             collect_skills(skills, skills_dir);
         free(skills_dir);
 
-        if (!project_root || strcmp(dir, project_root) == 0 || !climb_to_parent(dir))
+        if (!project_root || strcmp(dir, project_root) == 0 || !path_climb_to_parent(dir))
             break;
     }
     free(project_root);

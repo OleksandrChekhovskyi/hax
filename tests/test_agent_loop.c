@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "agent_core.h"
 #include "agent_loop.h"
@@ -1392,6 +1393,8 @@ static void test_loop_injects_finished_task_note(void)
 
 int main(void)
 {
+    /* Outside any repository, so recorded sessions neither run git nor depend on the checkout. */
+    EXPECT(chdir(t_tempdir()) == 0);
     /* Loop tests exercise orchestration, not the platform inhibitor helper. */
     config_set_override("keep_awake", "0");
     test_loop_turn_collects_success();

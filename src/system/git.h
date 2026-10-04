@@ -11,8 +11,13 @@ struct git_state {
 };
 
 /* Fills out by running git in the current directory. Every field is independently optional: a
- * missing git, a non-repository, or a failing command leaves it NULL. */
+ * missing git, a directory outside a work tree, or a failing command leaves it NULL. */
 void git_state_probe(struct git_state *out);
 void git_state_free(struct git_state *state);
+
+/* Return the nearest directory at or above absolute `dir` holding a `.git` entry: a repository's
+ * directory, a linked worktree's file, or a symlink, which is not followed. Returns NULL when there
+ * is none; the result is allocated. */
+char *git_find_worktree_root(const char *dir);
 
 #endif /* HAX_SYSTEM_GIT_H */

@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "agent_core.h"
 #include "compact.h"
@@ -500,6 +501,8 @@ static void test_discards_cancelled_summary(void)
 
 int main(void)
 {
+    /* Outside any repository, so recorded sessions neither run git nor depend on the checkout. */
+    EXPECT(chdir(t_tempdir()) == 0);
     setenv("XDG_STATE_HOME", t_tempdir(), 1);
     unsetenv("HAX_NO_SESSION");
     test_over_threshold();
