@@ -18,9 +18,11 @@ static void test_wait_streams_output_live(void)
 {
     setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
     char *gate = gate_create();
-    /* The pause spaces the two lines apart so both arrive while the wait streams. */
-    char *cmd =
-        xasprintf("read -r _ <%s; echo streamed-line; sleep " TEST_PAUSE "; echo final-line", gate);
+    /* The final line waits until the display has shown the first, so only a live stream can
+     * deliver both. */
+    char *shown_gate = gate_create();
+    char *cmd = xasprintf("read -r _ <%s; echo streamed-line; read -r _ <%s; echo final-line", gate,
+                          shown_gate);
     char *out = call_bash_background(cmd);
     free(cmd);
     char *id = extract_task_id(out);
@@ -29,7 +31,7 @@ static void test_wait_streams_output_live(void)
 
     gate_release(gate);
     free(gate);
-    struct display_capture capture = {0};
+    struct display_capture capture = {.release_on = "streamed-line", .release_gate = shown_gate};
     buf_init(&capture.buf);
     char *args = xasprintf("{\"id\":\"%s\",\"timeout_seconds\":30}", id);
     struct tool_run_ctx ctx = {.display = append_display, .display_data = &capture};
@@ -47,6 +49,7 @@ static void test_wait_streams_output_live(void)
     }
     free(out);
     free(id);
+    free(shown_gate);
     buf_free(&capture.buf);
     unsetenv("HAX_BASH_BACKGROUND_YIELD");
 }
@@ -225,9 +228,8 @@ static void test_kill_fires_at_wait_deadline(void)
     EXPECT(id != NULL);
     free(out);
 
-    char *args = xasprintf("{\"id\":\"%s\",\"timeout_seconds\":1,\"kill\":true}", id);
-    out = TOOL_TASK_WAIT.run(args, NULL);
-    free(args);
+    /* Below the tool's whole-second timeout_seconds, so the deadline costs little. */
+    out = task_wait_stream(id ? id : "?", 50, 1, NULL, NULL);
     EXPECT(strstr(out, "killed (signal ") != NULL);
     EXPECT(strstr(out, "wait timed out") == NULL);
     free(out);
@@ -393,16 +395,17 @@ static void test_binary_markers_reach_display(void)
 
 static void test_binary_marker_shown_after_streamed_text_at_launch(void)
 {
-    /* The pause keeps the text and the NUL in separate chunks, so the text streams (and would
-     * have swallowed the marker) before binary hits; the held transition keeps both inside
-     * the launch window. */
+    /* The NUL waits until the display has shown the text, so the text streams (and would have
+     * swallowed the marker) before binary hits; the held transition keeps both inside the
+     * launch window. */
     setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
     setenv("HAX_BASH_TRANSITION_MIN_BYTES", "11", 1); /* "visible\n" + 'A\0B' */
     char *gate = gate_create();
-    char *cmd = xasprintf("{\"command\":\"echo visible; sleep " TEST_PAUSE
-                          "; printf 'A\\\\000B'; read -r _ <%s\",\"background\":true}",
-                          gate);
-    struct display_capture capture = {0};
+    char *shown_gate = gate_create();
+    char *cmd = xasprintf("{\"command\":\"echo visible; read -r _ <%s; printf 'A\\\\000B'; "
+                          "read -r _ <%s\",\"background\":true}",
+                          shown_gate, gate);
+    struct display_capture capture = {.release_on = "visible", .release_gate = shown_gate};
     buf_init(&capture.buf);
     struct tool_run_ctx ctx = {.display = append_display, .display_data = &capture};
     char *out = TOOL_BASH.run(cmd, &ctx);
@@ -418,6 +421,7 @@ static void test_binary_marker_shown_after_streamed_text_at_launch(void)
 
     gate_release(gate);
     free(gate);
+    free(shown_gate);
     free(wait_for_id(id, 5));
     free(id);
     unsetenv("HAX_BASH_TRANSITION_MIN_BYTES");
@@ -429,9 +433,10 @@ static void test_binary_marker_shown_after_streamed_text_in_wait(void)
     setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
     char *gate = gate_create();
     /* Text streams during the wait first, then the NUL turns the task binary before it ends;
-     * the pause keeps the two in separate chunks. */
-    char *cmd =
-        xasprintf("read -r _ <%s; echo streamed; sleep " TEST_PAUSE "; printf '\\\\000'", gate);
+     * the NUL waits until the display has shown the text, keeping the two in separate chunks. */
+    char *shown_gate = gate_create();
+    char *cmd = xasprintf("read -r _ <%s; echo streamed; read -r _ <%s; printf '\\\\000'", gate,
+                          shown_gate);
     char *out = call_bash_background(cmd);
     free(cmd);
     char *id = extract_task_id(out);
@@ -440,12 +445,13 @@ static void test_binary_marker_shown_after_streamed_text_in_wait(void)
 
     gate_release(gate);
     free(gate);
-    struct display_capture capture = {0};
+    struct display_capture capture = {.release_on = "streamed", .release_gate = shown_gate};
     buf_init(&capture.buf);
     char *args = xasprintf("{\"id\":\"%s\",\"timeout_seconds\":30}", id);
     struct tool_run_ctx ctx = {.display = append_display, .display_data = &capture};
     out = TOOL_TASK_WAIT.run(args, &ctx);
     free(args);
+    free(shown_gate);
     EXPECT(strstr(out, "[binary output suppressed") != NULL);
     free(out);
     EXPECT(capture.buf.data != NULL && strstr(capture.buf.data, "streamed") != NULL);
@@ -591,7 +597,7 @@ int main(void)
 {
     /* Kill waits sit out the full SIGTERM grace, so the default 2s would dominate the
      * suite; tests needing a real grace window override and restore this. */
-    setenv("HAX_BASH_TIMEOUT_GRACE", TEST_YIELD, 1);
+    setenv("HAX_BASH_TIMEOUT_GRACE", TEST_KILL_GRACE, 1);
     test_wait_streams_output_live();
     test_wait_times_out_on_running_task();
     test_wait_returns_early_when_other_task_finishes();

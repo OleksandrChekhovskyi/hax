@@ -20,9 +20,10 @@
 /* Producers must outlive the yield window to detach. Tests that also need initial output
  * captured before the transition hold it open with HAX_BASH_TRANSITION_MIN_BYTES instead of
  * betting a widened window against spawn latency. */
-#define TEST_YIELD "50ms"
-#define TEST_PAUSE "0.3"
-#define TEST_GRACE "1s"
+#define TEST_YIELD "10ms"
+/* Kills sit out the whole SIGTERM grace; above zero so the SIGTERM path still runs. Tests that
+ * need cleanup to finish inside the grace set their own. */
+#define TEST_KILL_GRACE "10ms"
 
 static char *call_bash_background(const char *escaped_command)
 {
@@ -142,12 +143,20 @@ static void gate_release(const char *path)
 
 struct display_capture {
     struct buf buf;
+    /* Optional: release `release_gate` once the display has shown `release_on`, so a task can
+     * hold later output until earlier output provably streamed. */
+    const char *release_on;
+    const char *release_gate;
 };
 
 static void append_display(const char *bytes, size_t len, void *data)
 {
     struct display_capture *capture = data;
     buf_append(&capture->buf, bytes, len);
+    if (capture->release_gate && strstr(capture->buf.data, capture->release_on)) {
+        gate_release(capture->release_gate);
+        capture->release_gate = NULL;
+    }
 }
 
 #endif /* HAX_TESTS_TOOLS_TASK_HELPERS_H */

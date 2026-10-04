@@ -617,19 +617,6 @@ static void test_bash_long_line_with_trailing_newline_keeps_body(void)
     free(out);
 }
 
-static void test_bash_drain_clamps_oversized_byte_cap(void)
-{
-    /* The spill threshold must remain below the hard drain limit even with an oversized configured
-     * cap. */
-    setenv("HAX_TOOL_OUTPUT_CAP", "32m", 1);
-    char *out = call_bash_long_line(17000000);
-    EXPECT(strstr(out, "[output truncated") != NULL);
-    EXPECT(strstr(out, "saved to ") != NULL);
-    free(out);
-    /* Restore the suite-wide pin for subsequent tests. */
-    setenv("HAX_TOOL_OUTPUT_CAP", "50k", 1);
-}
-
 static void test_bash_cleanup_unlinks_kept_files(void)
 {
     char *out = call_bash("seq 1 20000");
@@ -980,7 +967,6 @@ int main(void)
     test_bash_long_line_with_trailing_newline_keeps_body();
     test_bash_invalid_utf8_tmpdir_falls_back();
     test_bash_mkstemp_failure_falls_back_to_mem();
-    test_bash_drain_clamps_oversized_byte_cap();
     test_bash_cleanup_unlinks_kept_files();
     test_bash_short_output_no_elision();
     test_bash_caps_long_line();

@@ -336,7 +336,9 @@ static void test_kill_escalates_past_term_exiting_shell(void)
 static void test_kill_grace_covers_redirected_cleanup(void)
 {
     setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
-    setenv("HAX_BASH_TIMEOUT_GRACE", TEST_GRACE, 1);
+    /* The cleanup takes a fifth of the grace: the TERM must have reached it, and the SIGKILL
+     * must wait for it. */
+    setenv("HAX_BASH_TIMEOUT_GRACE", "500ms", 1);
     char path[] = "/tmp/hax-test-task-cleanup-XXXXXX";
     int fd = mkstemp(path);
     EXPECT(fd >= 0);
@@ -345,7 +347,7 @@ static void test_kill_grace_covers_redirected_cleanup(void)
     /* The shell dies on SIGTERM at once (pipe EOF included: the child's output is
      * redirected), yet the child's TERM cleanup must still get the grace window. */
     char *ready = xasprintf("%s/ready", t_tempdir());
-    char *cmd = xasprintf("sh -c 'trap \\\"sleep " TEST_PAUSE "; echo bye > %s\\\" TERM; "
+    char *cmd = xasprintf("sh -c 'trap \\\"sleep 0.1; echo bye > %s\\\" TERM; "
                           "sh -c \\\"echo $$ > %s; exec sleep 30\\\"' >/dev/null 2>&1 & wait",
                           path, ready);
     char *out = call_bash_background(cmd);
@@ -371,7 +373,7 @@ static void test_kill_grace_covers_redirected_cleanup(void)
         EXPECT_STR_EQ(content, "bye\n");
     free(content);
     unlink(path);
-    setenv("HAX_BASH_TIMEOUT_GRACE", TEST_YIELD, 1);
+    setenv("HAX_BASH_TIMEOUT_GRACE", TEST_KILL_GRACE, 1);
     unsetenv("HAX_BASH_BACKGROUND_YIELD");
 }
 
@@ -653,7 +655,7 @@ int main(void)
 {
     /* Kill waits sit out the full SIGTERM grace, so the default 2s would dominate the
      * suite; tests needing a real grace window override and restore this. */
-    setenv("HAX_BASH_TIMEOUT_GRACE", TEST_YIELD, 1);
+    setenv("HAX_BASH_TIMEOUT_GRACE", TEST_KILL_GRACE, 1);
     test_background_fast_command_returns_sync();
     test_background_fast_failure_returns_sync();
     test_background_detaches_and_wait_collects();
