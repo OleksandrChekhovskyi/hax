@@ -202,8 +202,9 @@ static void scenario_drain_completes_fetch(void)
     /* The one-shot exit path drains the in-flight fetch (bounded) instead
      * of letting shutdown cancel it: with a server slower than the run, a
      * post-drain lookup must already see the fetched values — no polling,
-     * and no cold cache left behind. */
-    struct loopback server = {.delay_ms = 400};
+     * and no cold cache left behind. The delay only has to outlast an
+     * undrained lookup, which follows prefetch at once. */
+    struct loopback server = {.delay_ms = 50};
     loopback_reply_ok(&server, 0,
                       "{\"openai\": {\"models\": {"
                       "\"m5\": {\"cost\": {\"input\": 7, \"output\": 1}}}}}");
@@ -228,8 +229,8 @@ static void scenario_stale_snapshot_warns(void)
      * makes prefetch record its age for catalog_stale_days — the frontend's
      * cue to warn that estimates may have drifted — while the refresh it
      * spawns still recovers as usual. */
-    /* The age is read while the fetch is in flight. */
-    struct loopback server = {.delay_ms = 300};
+    /* The age is read while the fetch is held in flight. */
+    struct loopback server = {.hold = 1};
     loopback_reply_ok(&server, 0,
                       "{\"openai\": {\"models\": {"
                       "\"m4\": {\"cost\": {\"input\": 9, \"output\": 1}}}}}");
@@ -246,6 +247,7 @@ static void scenario_stale_snapshot_warns(void)
     EXPECT(stale_days >= 39 && stale_days <= 41);
     catalog_prefetch();                /* one fetch per run */
     EXPECT(catalog_stale_days() == 0); /* and one report */
+    loopback_release(&server);
     EXPECT(wait_for_rate("openai", "m4", 9));
 
     loopback_stop(&server);
@@ -290,9 +292,11 @@ static void scenario_no_identity_never_fetches(void)
     model_meta_prefetch(&local);
     model_meta_wait_catalog(&local, 5000, NULL, NULL);
     model_meta_wait_ms(&local, 5000);
-    /* No connection may arrive on the listener within a generous grace period. */
+    /* Draining returns at once when nothing was fetched and otherwise waits for the fetch, so
+     * any request it made has reached the listener by now. */
+    catalog_drain(5000);
     struct pollfd poll_fd = {.fd = server.listener_fd, .events = POLLIN};
-    EXPECT(poll(&poll_fd, 1, 300) == 0);
+    EXPECT(poll(&poll_fd, 1, 0) == 0);
     loopback_stop(&server);
     catalog_shutdown();
 }
@@ -306,8 +310,9 @@ static int always_cancel(void *user)
 static void scenario_wait_honors_cancellation(void)
 {
     /* A picker's Esc must dismiss the wait at once while the fetch keeps running to completion,
-     * so the cache still warms for later callers. */
-    struct loopback server = {.delay_ms = 1500};
+     * so the cache still warms for later callers. The held reply leaves cancelling as the only
+     * way the wait can end before its timeout. */
+    struct loopback server = {.hold = 1};
     loopback_reply_ok(&server, 0,
                       "{\"openai\": {\"models\": {"
                       "\"m7\": {\"cost\": {\"input\": 7, \"output\": 1}}}}}");
@@ -324,6 +329,7 @@ static void scenario_wait_honors_cancellation(void)
     long elapsed_ms =
         (after.tv_sec - before.tv_sec) * 1000 + (after.tv_nsec - before.tv_nsec) / 1000000;
     EXPECT(elapsed_ms < 1000);
+    loopback_release(&server);
     EXPECT(wait_for_rate("openai", "m7", 7)); /* the fetch itself was not cancelled */
 
     loopback_stop(&server);
@@ -366,6 +372,8 @@ static void run_scenario(const char *name, void (*scenario)(void))
     // NOLINTNEXTLINE(misc-include-cleaner)
     pid_t pid = fork();
     if (pid == 0) {
+        /* Count only this scenario's failures, not the ones inherited from earlier scenarios. */
+        t_failures = 0;
         scenario();
         _exit(t_failures ? 1 : 0);
     }

@@ -143,10 +143,32 @@ static void test_scripted_replies_per_connection(void)
     EXPECT(atomic_load(&server.served) == 3);
 }
 
+static void test_hold_replies_after_release(void)
+{
+    struct loopback server = {.response = REPLY_A, .hold = 1};
+    int port = loopback_start(&server);
+    EXPECT(port > 0);
+    if (port <= 0)
+        return;
+    int fd = connect_loopback(port);
+    EXPECT(fd >= 0);
+    send_text(fd, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
+    struct pollfd poll_fd = {.fd = fd, .events = POLLIN};
+    EXPECT(poll(&poll_fd, 1, 50) == 0);
+
+    loopback_release(&server);
+    char reply[256];
+    read_reply(fd, reply, sizeof(reply));
+    close(fd);
+    loopback_stop(&server);
+    EXPECT_STR_EQ(reply, REPLY_A);
+}
+
 int main(void)
 {
     test_body_split_across_writes();
     test_bodiless_request_answered_at_header_end();
     test_scripted_replies_per_connection();
+    test_hold_replies_after_release();
     T_REPORT();
 }

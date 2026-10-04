@@ -350,22 +350,29 @@ class Terminal:
         # Not nested in the developer's own tmux, even when the tests run inside it.
         env.pop("TMUX", None)
         env.pop("TMUX_PANE", None)
+        # A daemonized server starts panes up to 300ms late on macOS, while one kept in the
+        # foreground (-D) as our child starts them at once. Panes inherit the server's
+        # environment, so it starts with the scenario's.
+        self._server = subprocess.Popen(
+            [*self._tmux, "-D"],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         columns, rows = size
         command = shlex.join([str(hax_binary()), *(args or [])])
-        self._run(
-            "new-session",
-            "-d",
-            "-s",
-            "hax",
-            "-x",
-            str(columns),
-            "-y",
-            str(rows),
-            "-c",
-            str(workdir),
-            command,
-            env=env,
-        )
+        # -N: until the server listens, fail rather than start a daemonized one in its place.
+        new_session = [*self._tmux, "-N", "new-session", "-d", "-s", "hax"]
+        new_session += ["-x", str(columns), "-y", str(rows), "-c", str(workdir), command]
+        deadline = time.monotonic() + 10
+        while True:
+            proc = subprocess.run(new_session, env=env, capture_output=True, encoding="utf-8")
+            if proc.returncode == 0:
+                break
+            if self._server.poll() is not None or time.monotonic() > deadline:
+                raise RuntimeError(f"tmux new-session failed: {proc.stderr.strip()}")
+            time.sleep(0.005)
 
     def _run(self, *args: str, env: dict[str, str] | None = None) -> str:
         proc = subprocess.run(
@@ -377,6 +384,11 @@ class Terminal:
         """Stop the tmux server, unless HAX_E2E_KEEP kept it to inspect a failure."""
         if not self._keep:
             subprocess.run([*self._tmux, "kill-server"], capture_output=True)
+            try:
+                self._server.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._server.kill()
+                self._server.wait()
 
     def type(self, text: str) -> None:
         """Send `text` as literal keystrokes."""

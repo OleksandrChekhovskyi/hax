@@ -20,7 +20,8 @@
  * replies, then loopback_start (or loopback_listen and loopback_serve separately when the test
  * must act between binding and accepting). Every reply must carry "Connection: close" so the
  * client reconnects for the next one; the thread exits after the last reply, or after ten
- * seconds without a client so a scenario fails instead of hanging. */
+ * seconds without a client so a scenario fails instead of hanging. Set `hold` to keep each reply
+ * back until loopback_release, so a test can act while a request is provably in flight. */
 
 #define LOOPBACK_MAX_REQUESTS     9
 #define LOOPBACK_REQUEST_CAPACITY 8192
@@ -30,9 +31,11 @@ struct loopback {
     const char *responses[LOOPBACK_MAX_REQUESTS]; /* per-request replies, full HTTP text */
     int n_requests;                               /* connections to serve; 0 means one */
     int delay_ms;                                 /* pause between reading a request and replying */
+    int hold;                                     /* reply only after loopback_release */
     char requests[LOOPBACK_MAX_REQUESTS][LOOPBACK_REQUEST_CAPACITY]; /* headers and body */
     _Atomic int accepted;                                            /* connections accepted */
-    _Atomic int served; /* replies fully written and closed */
+    _Atomic int served;   /* replies fully written and closed */
+    _Atomic int released; /* set by loopback_release */
 
     int listener_fd;
     pthread_t thread;
@@ -75,6 +78,14 @@ static inline void loopback_write_all(int client_fd, const char *text)
     }
 }
 
+/* Bounded like accept, so a test that never releases fails instead of hanging. */
+static inline void loopback_await_release(struct loopback *server)
+{
+    struct timespec tick = {0, 1000000L};
+    for (int waited_ms = 0; waited_ms < 10000 && !atomic_load(&server->released); waited_ms++)
+        nanosleep(&tick, NULL);
+}
+
 static inline void *loopback_thread(void *user)
 {
     struct loopback *server = user;
@@ -93,6 +104,8 @@ static inline void *loopback_thread(void *user)
             struct timespec delay = {server->delay_ms / 1000, (server->delay_ms % 1000) * 1000000L};
             nanosleep(&delay, NULL);
         }
+        if (server->hold)
+            loopback_await_release(server);
         const char *response = server->responses[i] ? server->responses[i] : server->response;
         if (response)
             loopback_write_all(client_fd, response);
@@ -146,6 +159,12 @@ static inline int loopback_start(struct loopback *server)
     if (port < 0)
         return -1;
     return loopback_serve(server) == 0 ? port : -1;
+}
+
+/* Let a held server send its replies. */
+static inline void loopback_release(struct loopback *server)
+{
+    atomic_store(&server->released, 1);
 }
 
 /* Wait for the server thread to finish, close the listener, and release scripted replies. */

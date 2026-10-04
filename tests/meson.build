@@ -174,6 +174,8 @@ foreach name : e2e_scenarios
         args: [files('e2e/test_' + name + '.py')],
         env: e2e_env,
         depends: hax_exe,
+        # The slowest tests, scheduled first so they don't bound the run from its tail.
+        priority: 1,
         timeout: 60,
     )
 endforeach
