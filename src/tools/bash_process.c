@@ -72,7 +72,7 @@ static char *start_shell(const char *command, struct shell_process *process)
     }
 
     pid_t parent_pid = getpid();
-    pid_t pid = fork();
+    pid_t pid = spawn_fork();
     if (pid < 0) {
         char *error = xasprintf("fork: %s", strerror(errno));
         close(pipe_fds[0]);

@@ -112,10 +112,9 @@ def test_sigint_then_resume():
     """SIGINT interrupts a run gracefully: the in-flight stream is cancelled, partial output is kept
     and marked in the recorded session, the --json stream still closes with a result record, and
     the exit status is 130. A promptless --resume then speaks for the user and completes."""
-    # The resumed run replays the interrupted turn, so the stall must be short.
     script = """
         text Partial answer before the interrupt.
-        delay 2000
+        delay 30000
         text Never delivered
         end-turn
     """
@@ -157,7 +156,14 @@ def test_sigint_then_resume():
     harness.expect(bool(session_id), "the interrupted run is resumable", result)
 
     resume = harness.spawn_hax(
-        ["--json", f"--resume={session_id}"], script, home, workdir, extra_env=RECORD
+        ["--json", f"--resume={session_id}"],
+        """
+        text Resumed answer.
+        end-turn
+        """,
+        home,
+        workdir,
+        extra_env=RECORD,
     )
     out, err = resume.communicate(timeout=30)
     result = harness.spawned_result(resume, out, err, workdir)

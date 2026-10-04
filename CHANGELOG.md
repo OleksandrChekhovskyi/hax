@@ -48,6 +48,9 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Fixed
 
+- A turn that finishes almost at once, such as one that fails right away, no longer adds half a
+  second while hax waits for the keep-awake helper to stop. A bash command killed just after it
+  started now stops at its SIGTERM instead of running on until the SIGKILL after the grace period.
 - Theme colors are more readable and consistent, including quiet roles in the `light` theme and
   the `rose` tint in the `dark` theme.
 - `config.json` and `state.json` are now written with a trailing newline, matching `auth.json`

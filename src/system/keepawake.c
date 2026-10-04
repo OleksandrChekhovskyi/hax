@@ -88,7 +88,7 @@ static void spawn_helper(void)
     argv[argc] = NULL;
 #endif
 
-    pid_t pid = fork();
+    pid_t pid = spawn_fork();
     if (pid < 0)
         return;
     if (pid == 0) {

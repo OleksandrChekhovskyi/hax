@@ -18,6 +18,8 @@ Checked over src/ and tests/:
   the comment if that would overflow the column limit.
 - Tests use t_tempdir() from tests/harness.h instead of raw mkdtemp so
   scratch directories are removed on early exits.
+- Production code forks through spawn_fork() from src/system/spawn.h, so no
+  child runs hax's signal handlers before it execs.
 
 Prints findings as file:line: message and exits non-zero if any are found.
 """
@@ -33,6 +35,9 @@ from typing import Final, NamedTuple
 
 ROOTS: Final = (Path("src"), Path("tests"))
 HARNESS: Final = Path("tests/harness.h")
+SPAWN: Final = Path("src/system/spawn.c")
+FORK_RE: Final = re.compile(r"\bfork\s*\(")
+COMMENT_RE: Final = re.compile(r"/\*.*?\*/|//[^\n]*", re.DOTALL)
 
 INCLUDE_RE: Final = re.compile(r'^\s*#\s*include\s+"([^"]+)"')
 INCLUDE_DIRECTIVE_RE: Final = re.compile(r"^\s*#\s*include\b")
@@ -136,6 +141,16 @@ def check_mkdtemp(path: Path, text: str) -> Iterator[Finding]:
             yield Finding(path, lineno, "raw mkdtemp in tests; use t_tempdir() from tests/harness.h")
 
 
+def check_fork(path: Path, text: str) -> Iterator[Finding]:
+    if not path.is_relative_to("src") or path == SPAWN:
+        return
+    # Blank comments out line for line, so prose may mention fork() and line numbers still match.
+    code = COMMENT_RE.sub(lambda comment: re.sub(r"[^\n]", " ", comment.group()), text)
+    for lineno, line in enumerate(code.splitlines(), 1):
+        if FORK_RE.search(line):
+            yield Finding(path, lineno, "raw fork() in src; use spawn_fork() from system/spawn.h")
+
+
 def check_file(path: Path) -> Iterator[Finding]:
     text = path.read_text(encoding="utf-8")
     if path.suffix == ".h":
@@ -144,6 +159,7 @@ def check_file(path: Path) -> Iterator[Finding]:
     yield from check_include_comments(path, text)
     yield from check_comment_delimiters(path, text)
     yield from check_mkdtemp(path, text)
+    yield from check_fork(path, text)
 
 
 def source_files() -> Iterator[Path]:

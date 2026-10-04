@@ -377,6 +377,37 @@ static void test_die_with_parent_alive_does_not_exit(void)
     EXPECT(WIFEXITED(status) && WEXITSTATUS(status) == 7);
 }
 
+static void ignore_signal(int signal_number)
+{
+    (void)signal_number;
+}
+
+static void test_fork_child_starts_with_default_handlers(void)
+{
+    struct sigaction caught = {0}, ignored = {0}, saved_term, saved_hup;
+    caught.sa_handler = ignore_signal;
+    sigemptyset(&caught.sa_mask);
+    ignored.sa_handler = SIG_IGN;
+    sigemptyset(&ignored.sa_mask);
+    sigaction(SIGTERM, &caught, &saved_term);
+    sigaction(SIGHUP, &ignored, &saved_hup);
+
+    pid_t pid = spawn_fork();
+    if (pid == 0) {
+        raise(SIGHUP);
+        raise(SIGTERM);
+        _exit(0);
+    }
+    sigaction(SIGTERM, &saved_term, NULL);
+    sigaction(SIGHUP, &saved_hup, NULL);
+    if (pid < 0) {
+        EXPECT(0); /* fork failed: bail before spawn_wait_child(-1) */
+        return;
+    }
+    int status = spawn_wait_child(pid);
+    EXPECT(WIFSIGNALED(status) && WTERMSIG(status) == SIGTERM);
+}
+
 static void test_force_utf8_leaves_a_capable_environment_alone(void)
 {
     unsetenv("LC_ALL");
@@ -507,6 +538,7 @@ int main(void)
     test_redirect_null_stdin_is_eof();
 
     test_die_with_parent_alive_does_not_exit();
+    test_fork_child_starts_with_default_handlers();
 
     T_REPORT();
 }

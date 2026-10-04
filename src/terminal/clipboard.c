@@ -67,7 +67,7 @@ static int run_copy_helper(const char *const *argv, const char *text, size_t tex
     struct spawn_signal_state signals;
     spawn_parent_ignore_signals(&signals);
 
-    pid_t pid = fork();
+    pid_t pid = spawn_fork();
     if (pid < 0) {
         close(pipe_fds[0]);
         close(pipe_fds[1]);

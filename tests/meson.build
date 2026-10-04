@@ -137,6 +137,12 @@ test_sources = [
 ]
 
 fs = import('fs')
+# TSan sleeps at every process exit by default (atexit_sleep_ms, 1s) to catch races with exiting
+# threads; tests spawn and exit processes constantly, so that sleep would dominate the suite.
+# Prepended so a caller's own TSAN_OPTIONS wins.
+test_env = environment()
+test_env.prepend('TSAN_OPTIONS', 'atexit_sleep_ms=0', separator: ':')
+
 foreach src : test_sources
     stem = fs.stem(src).substring(5)  # drop the leading 'test_'
     parent = fs.parent(src)
@@ -145,7 +151,7 @@ foreach src : test_sources
         src,
         dependencies: [hax_dep],
     )
-    test(name, exe)
+    test(name, exe, env: test_env)
 endforeach
 
 # End-to-end scenarios: Python scripts under e2e/, one per user-facing area, that
@@ -159,11 +165,13 @@ e2e_scenarios = [
 ]
 
 python = find_program('python3')
+e2e_env = environment({'HAX_BIN': hax_exe.full_path()})
+e2e_env.prepend('TSAN_OPTIONS', 'atexit_sleep_ms=0', separator: ':')
 foreach name : e2e_scenarios
     test('e2e' / name,
         python,
         args: [files('e2e/test_' + name + '.py')],
-        env: {'HAX_BIN': hax_exe.full_path()},
+        env: e2e_env,
         depends: hax_exe,
         timeout: 60,
     )

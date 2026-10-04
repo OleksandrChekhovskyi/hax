@@ -80,6 +80,36 @@ void spawn_parent_restore_signals(const struct spawn_signal_state *state)
     sigaction(SIGPIPE, &state->sigpipe, NULL);
 }
 
+pid_t spawn_fork(void)
+{
+    /* NSIG is not POSIX; strict glibc feature macros hide it but expose SIGRTMAX. */
+#ifdef NSIG
+    const int signal_limit = NSIG;
+#else
+    const int signal_limit = SIGRTMAX + 1;
+#endif
+    /* Blocked until the child has reset its handlers, so none can run there in between. */
+    sigset_t all, saved;
+    sigfillset(&all);
+    pthread_sigmask(SIG_SETMASK, &all, &saved);
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        for (int signal_number = 1; signal_number < signal_limit; signal_number++) {
+            struct sigaction action;
+            if (sigaction(signal_number, NULL, &action) == 0 && action.sa_handler != SIG_DFL &&
+                action.sa_handler != SIG_IGN)
+                signal(signal_number, SIG_DFL);
+        }
+        sigprocmask(SIG_SETMASK, &saved, NULL);
+        return 0;
+    }
+    int saved_errno = errno;
+    pthread_sigmask(SIG_SETMASK, &saved, NULL);
+    errno = saved_errno;
+    return pid;
+}
+
 void spawn_child_reset_signals(void)
 {
     /* signal() is async-signal-safe and avoids constructing sigaction state after fork. */
@@ -146,7 +176,7 @@ int spawn_shell_wait(const char *shell_cmd)
     struct spawn_signal_state signals;
     spawn_parent_ignore_signals(&signals);
 
-    pid_t pid = fork();
+    pid_t pid = spawn_fork();
     if (pid < 0) {
         int saved_errno = errno;
         spawn_parent_restore_signals(&signals);
@@ -168,11 +198,11 @@ int spawn_detached(const char *const *argv)
 {
     struct spawn_signal_state signals;
     spawn_parent_ignore_signals(&signals);
-    pid_t pid = fork();
+    pid_t pid = spawn_fork();
     if (pid == 0) {
         /* Double-fork: the grandchild is reparented to init, so a child that stays alive
          * indefinitely is never waited on, killed, or left as a zombie. */
-        pid_t grandchild = fork();
+        pid_t grandchild = spawn_fork();
         if (grandchild != 0)
             _exit(grandchild < 0 ? 127 : 0);
         spawn_child_redirect_stdio_to_null();
@@ -211,7 +241,7 @@ static int spawn_pipe_open_mode(struct spawn_pipe *result, const char *shell_cmd
 
     spawn_parent_ignore_signals(&result->parent_signals);
 
-    pid_t pid = fork();
+    pid_t pid = spawn_fork();
     if (pid < 0) {
         int saved_errno = errno;
         spawn_parent_restore_signals(&result->parent_signals);
@@ -317,7 +347,7 @@ char *spawn_capture_stdout(const char *const *argv, size_t max_bytes, int timeou
     struct spawn_signal_state signals;
     spawn_parent_ignore_signals(&signals);
 
-    pid_t pid = fork();
+    pid_t pid = spawn_fork();
     if (pid < 0) {
         int saved_errno = errno;
         close(pipe_fds[0]);

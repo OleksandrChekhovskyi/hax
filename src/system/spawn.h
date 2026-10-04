@@ -41,6 +41,13 @@ void spawn_parent_ignore_signals(struct spawn_signal_state *state);
 void spawn_parent_restore_signals(const struct spawn_signal_state *state);
 void spawn_child_reset_signals(void);
 
+/* fork() for every child process. Until it execs, a child would otherwise inherit the parent's
+ * handlers, so a signal arriving first (the parent's SIGTERM, a terminal Ctrl-C) would run one
+ * there and be lost to the program it then execs. The child instead starts with caught signals
+ * reset to their default actions, as exec would leave them; ignored signals stay ignored. Returns
+ * as fork(). */
+pid_t spawn_fork(void);
+
 /* Redirect all three standard descriptors to /dev/null on a best-effort basis. */
 void spawn_child_redirect_stdio_to_null(void);
 

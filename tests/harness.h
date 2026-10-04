@@ -2,11 +2,14 @@
 #ifndef HAX_TESTS_HARNESS_H
 #define HAX_TESTS_HARNESS_H
 
+#include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 /* Sanitizer detection, for tests that must widen or skip timing-sensitive
  * checks that sanitizer interceptors (notably fork) slow by orders of
@@ -76,28 +79,57 @@ static size_t t_n_tmpdirs;
 static size_t t_tmpdir_first; /* first entry owned by this process */
 static pid_t t_tmpdir_owner;
 
+/* Remove `name` under `dir_fd` recursively without following symlinks. Directories get u+rwx
+ * before descending so fixtures locked down to provoke EACCES don't defeat removal; file modes
+ * stay untouched (unlink ignores them), so a hard link in a fixture can't rewrite an outside
+ * inode's mode. In-process because spawning rm costs more than most tests do. */
+static inline int t_remove_tree(int dir_fd, const char *name)
+{
+    struct stat st;
+    if (fstatat(dir_fd, name, &st, AT_SYMLINK_NOFOLLOW) < 0)
+        return errno == ENOENT ? 0 : -1;
+    if (!S_ISDIR(st.st_mode))
+        return unlinkat(dir_fd, name, 0);
+    if ((st.st_mode & S_IRWXU) != S_IRWXU && fchmodat(dir_fd, name, st.st_mode | S_IRWXU, 0) < 0)
+        return -1;
+    int fd = openat(dir_fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    DIR *dir = fdopendir(fd);
+    if (!dir) {
+        close(fd);
+        return -1;
+    }
+    int failed = 0;
+    size_t removed;
+    /* Unlinking while reading may make readdir skip entries on some filesystems, so rescan until
+     * a pass finds nothing left to remove. */
+    do {
+        removed = 0;
+        rewinddir(dir);
+        struct dirent *entry;
+        while ((entry = readdir(dir))) {
+            if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+                continue;
+            if (t_remove_tree(dirfd(dir), entry->d_name) < 0)
+                failed = 1;
+            else
+                removed++;
+        }
+    } while (!failed && removed > 0);
+    closedir(dir);
+    if (failed)
+        return -1;
+    return unlinkat(dir_fd, name, AT_REMOVEDIR);
+}
+
 static inline void t_tempdir_cleanup(void)
 {
     if (getpid() != t_tmpdir_owner)
         return;
     for (size_t i = 0; i < t_n_tmpdirs; i++) {
-        if (i >= t_tmpdir_first) {
-            /* Absolute paths: cleanup must not depend on whatever PATH
-             * the test exited with. Restore permissions so fixtures
-             * locked down to provoke EACCES don't defeat removal — but
-             * on directories only (rm needs search/write there; file
-             * modes are irrelevant to unlink), so a hard link inside
-             * the fixture can't rewrite an external inode's mode.
-             * `-exec \;` (not `+`) chmods each dir at visit time,
-             * before find descends into it. */
-            char cmd[192];
-            snprintf(cmd, sizeof(cmd),
-                     "/usr/bin/find '%s' -type d -exec /bin/chmod u+rwx {} \\; 2>/dev/null; "
-                     "/bin/rm -rf '%s'",
-                     t_tmpdirs[i], t_tmpdirs[i]);
-            if (system(cmd) != 0)
-                fprintf(stderr, "t_tempdir: failed to remove %s\n", t_tmpdirs[i]);
-        }
+        if (i >= t_tmpdir_first && t_remove_tree(AT_FDCWD, t_tmpdirs[i]) < 0)
+            fprintf(stderr, "t_tempdir: failed to remove %s: %s\n", t_tmpdirs[i], strerror(errno));
         /* Inherited copies are freed only here, at exit — mid-run they
          * must stay intact, tests hold pointers into them. */
         free(t_tmpdirs[i]);

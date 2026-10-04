@@ -76,7 +76,7 @@ static void test_child_cleans_unsearchable_tree(void)
 {
     /* Tests may lock fixture dirs down to mode 0000 to provoke EACCES;
      * cleanup must restore permissions first or it silently reverts to
-     * leaking — rm -rf alone cannot traverse the locked dir. Nested
+     * leaking, since nothing can traverse the locked dir. Nested
      * locked dirs pin the traversal order too: each dir must be
      * chmod'ed before cleanup descends into it. */
     int fds[2];
@@ -133,6 +133,28 @@ static void test_cleanup_leaves_hard_linked_file_modes(void)
     struct stat sb;
     EXPECT(stat(file, &sb) == 0);
     EXPECT((sb.st_mode & 0777) == 0400); /* untouched by child cleanup */
+}
+
+static void test_cleanup_does_not_follow_symlinks(void)
+{
+    char *outside = t_tempdir(); /* parent-owned; survives the child */
+    char file[256];
+    snprintf(file, sizeof(file), "%s/keep", outside);
+    int fd = open(file, O_CREAT | O_WRONLY, 0600);
+    EXPECT(fd >= 0 && close(fd) == 0);
+
+    pid_t pid = fork_flushed();
+    if (pid == 0) {
+        char *dir = t_tempdir();
+        char lnk[256];
+        snprintf(lnk, sizeof(lnk), "%s/lnk", dir);
+        exit(symlink(outside, lnk) != 0);
+    }
+    int st = 0;
+    EXPECT(waitpid(pid, &st, 0) == pid);
+    EXPECT(WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    struct stat sb;
+    EXPECT(stat(file, &sb) == 0); /* the link went, not its target's contents */
 }
 
 static int path_is(const char *want)
@@ -199,6 +221,7 @@ int main(void)
     test_child_tempdir_cleaned_on_child_exit();
     test_child_cleans_unsearchable_tree();
     test_cleanup_leaves_hard_linked_file_modes();
+    test_cleanup_does_not_follow_symlinks();
     test_path_replace_round_trips_unset();
     test_path_prepend_shadows_without_trailing_colon();
     T_REPORT();
