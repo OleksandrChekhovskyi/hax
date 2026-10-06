@@ -177,8 +177,7 @@ routing and prompt caching, and `x-opencode-client: hax`. Both can be overridden
 
 ## llama.cpp
 
-`llama.cpp` selects the convenience provider for a local `llama-server` at
-`http://127.0.0.1:8080/v1`:
+`llama.cpp` connects to a local `llama-server`, by default at `http://127.0.0.1:8080/v1`:
 
 ```sh
 llama-server -m /path/to/model.gguf -c 32768
@@ -203,7 +202,7 @@ project context, tool results, and the desired output are combined.
 
 ## Ollama
 
-Ollama is a shipped custom provider preconfigured for `http://127.0.0.1:11434/v1`:
+`ollama` connects to a local Ollama server, by default at `http://127.0.0.1:11434/v1`:
 
 ```sh
 ollama serve
@@ -213,10 +212,9 @@ hax --provider=ollama --model=qwen3:8b
 Choose a pulled model explicitly. hax does not guess which model you intend from Ollama's list, and
 one-shot mode requires a model.
 
-Ollama's runtime context defaults can be small for coding-agent prompts. Set a larger
-`OLLAMA_CONTEXT_LENGTH` before starting `ollama serve` (or raise `num_ctx` on the model), and set
-`context_limit` to the same value if you want hax's percentage display. A too-small context commonly
-appears as a response ending with `length`.
+Ollama's default context depends on GPU memory and can be too small for an agent session on smaller
+machines. Set a larger `OLLAMA_CONTEXT_LENGTH` before starting `ollama serve` (or raise `num_ctx` on
+the model), and set `context_limit` to the same value so hax compacts before the context fills.
 
 Override the endpoint in `config.json` — `port` for another local port, or a full `base_url`:
 
@@ -230,14 +228,13 @@ Override the endpoint in `config.json` — `port` for another local port, or a f
 }
 ```
 
-## Compatible built-ins
+## Compatible endpoints
 
-`openai-compatible` and `anthropic-compatible` are shipped providers for a generic endpoint you
-name at run time. They are ordinary [custom providers](#custom-providers) — configured through
-their own `providers.openai-compatible` / `providers.anthropic-compatible` blocks — whose keys
-additionally bind environment variables, so a one-off endpoint needs no config file. The variables
-affect only these two providers; the full key list is in
-[configuration.md](./configuration.md#provider-settings).
+`openai-compatible` and `anthropic-compatible` connect to a generic endpoint you name at run time.
+Their `providers.openai-compatible` / `providers.anthropic-compatible` blocks take the same fields
+as a [custom provider](#custom-providers), and the common keys also have environment variables, so
+a one-off endpoint needs no config file. The variables affect only these two providers; the full key
+list is in [configuration.md](./configuration.md#provider-settings).
 
 ### OpenAI-compatible
 

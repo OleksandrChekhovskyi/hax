@@ -48,6 +48,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Fixed
 
+- Ollama models now get their own earlier reasoning back in later requests. Thinking models could
+  otherwise degrade over a long session, especially across tool calls.
 - A turn that finishes almost at once, such as one that fails right away, no longer adds half a
   second while hax waits for the keep-awake helper to stop. A bash command killed just after it
   started now stops at its SIGTERM instead of running on until the SIGKILL after the grace period.

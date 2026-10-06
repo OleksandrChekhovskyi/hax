@@ -104,7 +104,12 @@ static size_t append_assistant_message(json_t *messages, const struct item *item
 
     json_t *message = json_object();
     json_object_set_new(message, "role", json_string("assistant"));
-    json_object_set_new(message, "content", text.len > 0 ? json_string(text.data) : json_null());
+    /* Content may be null only beside tool calls; ollama rejects a null-content message without
+     * them, as a reasoning-only turn would be. */
+    json_t *content = text.len > 0 ? json_string(text.data)
+                      : tool_calls ? json_null()
+                                   : json_string("");
+    json_object_set_new(message, "content", content);
     if (tool_calls)
         json_object_set_new(message, "tool_calls", tool_calls);
     if (details)
@@ -246,7 +251,8 @@ static json_t *build_cache_control(const char *ttl)
 static int attach_cache_control(json_t *message, const char *ttl)
 {
     json_t *content = json_object_get(message, "content");
-    if (json_is_string(content)) {
+    /* An empty text part cannot carry a breakpoint: Anthropic-backed routes reject it. */
+    if (json_is_string(content) && json_string_length(content) > 0) {
         json_t *part = json_pack("{s:s, s:O}", "type", "text", "text", content);
         json_object_set_new(part, "cache_control", build_cache_control(ttl));
         json_t *parts = json_array();

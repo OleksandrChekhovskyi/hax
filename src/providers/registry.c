@@ -142,13 +142,14 @@ static const struct provider_def DEFS[] = {
         .id = "ollama",
         .base_url = "http://127.0.0.1:{port}/v1",
         .port = 11434,
-        /* ollama caps the runtime context at OLLAMA_CONTEXT_LENGTH (4096 by default) and
-         * ignores a per-request num_ctx on its OpenAI endpoint, so hax can't widen it — a
-         * prompt near that size truncates the reply to "length". Point the user at the only
-         * real fix. */
+        /* Each model's template decides which prior reasoning the model sees again, so always
+         * replay it; the OpenAI endpoint reads only `reasoning`. */
+        .reasoning_roundtrip = "reasoning",
+        /* The OpenAI endpoint ignores a per-request num_ctx, so hax can't widen the context;
+         * point the user at the server-side settings. */
         .length_hint = "ollama's context window may be too small for the prompt — "
                        "restart `ollama serve` with a larger OLLAMA_CONTEXT_LENGTH "
-                       "(e.g. 16384), or raise num_ctx on the model",
+                       "(e.g. 65536), or raise num_ctx on the model",
         /* ollama's thinking is a per-model toggle/budget, not a categorical effort, and its
          * local models aren't the hosted ones the catalog describes: no effort ladder, no
          * catalog_id. */

@@ -168,7 +168,8 @@ static void test_reasoning_details_supersede_text(void)
 }
 
 /* A reasoning-only turn (the leak case) still emits an assistant message so
- * the CoT round-trips; content is null and there are no tool_calls. */
+ * the CoT round-trips; content is an empty string, since ollama rejects null
+ * content without tool_calls. */
 static void test_reasoning_only_turn(void)
 {
     struct item items[] = {
@@ -183,7 +184,7 @@ static void test_reasoning_only_turn(void)
     EXPECT(a != NULL);
     EXPECT_STR_EQ(json_string_value(json_object_get(a, "reasoning_content")),
                   "everything leaked here");
-    EXPECT(json_is_null(json_object_get(a, "content")));
+    EXPECT_STR_EQ(json_string_value(json_object_get(a, "content")), "");
     EXPECT(json_object_get(a, "tool_calls") == NULL);
 
     json_decref(msgs);
@@ -391,6 +392,24 @@ static void test_cache_breakpoint_skips_contentless_assistant(void)
     json_decref(msgs);
 }
 
+static void test_cache_breakpoint_skips_reasoning_only_assistant(void)
+{
+    struct item items[] = {
+        {.kind = ITEM_USER_MESSAGE, .text = (char *)"go"},
+        {.kind = ITEM_REASONING,
+         .reasoning_text = (char *)"thinking only",
+         .provider = (char *)"ollama",
+         .model = (char *)"m"},
+    };
+    json_t *msgs = chat_build_messages(NULL, items, 2, "reasoning", "ollama", "m", -1);
+    json_t *last = json_array_get(msgs, json_array_size(msgs) - 1);
+    chat_apply_cache_breakpoints(msgs, "1h");
+    EXPECT_STR_EQ(json_string_value(json_object_get(last, "content")), "");
+    EXPECT(breakpoint_of(json_array_get(msgs, 0)) != NULL); /* the user message */
+    EXPECT(count_breakpoints(msgs) == 1);
+    json_decref(msgs);
+}
+
 static void test_cache_breakpoint_system_only(void)
 {
     /* Nothing but a system prompt: it takes the breakpoint once, and the
@@ -588,6 +607,7 @@ int main(void)
     test_cache_breakpoints_system_and_tail();
     test_cache_breakpoint_lands_on_tool_result();
     test_cache_breakpoint_skips_contentless_assistant();
+    test_cache_breakpoint_skips_reasoning_only_assistant();
     test_cache_breakpoint_system_only();
     test_reasoning_attached_when_field_set();
     test_reasoning_omitted_when_field_null();
