@@ -359,6 +359,8 @@ static int buffered_request(const char *url, const char *const *headers, const c
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, HTTP_USER_AGENT);
+    /* The empty string offers every encoding this libcurl can decode. */
+    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
     if (header_list)
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
     if (body) {

@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <curl/curl.h>
 
 #include "harness.h"
 #include "loopback.h"
@@ -37,6 +38,33 @@ static void test_get_response(void)
     EXPECT_STR_EQ(body, "hello");
     EXPECT(strstr(server.requests[0], "GET /test HTTP/") != NULL);
     EXPECT(strstr(server.requests[0], "X-Test: transport\r\n") != NULL);
+    free(body);
+}
+
+static void test_get_offers_compression(void)
+{
+    if (!(curl_version_info(CURLVERSION_NOW)->features & CURL_VERSION_LIBZ))
+        T_SKIP("libcurl lacks zlib");
+    struct loopback server = {
+        .response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+    };
+    int port = loopback_start(&server);
+    EXPECT(port > 0);
+    if (port <= 0)
+        return;
+
+    char url[64];
+    make_url(url, sizeof(url), port);
+    char *body = NULL;
+    int result = http_get(url, NULL, 2, 0, NULL, NULL, &body, NULL);
+    loopback_stop(&server);
+
+    EXPECT(result == 0);
+    char accepted[128] = "";
+    const char *header = strstr(server.requests[0], "Accept-Encoding: ");
+    if (header)
+        sscanf(header, "Accept-Encoding: %127[^\r]", accepted);
+    EXPECT(strstr(accepted, "gzip") != NULL);
     free(body);
 }
 
@@ -259,6 +287,7 @@ int main(void)
 {
     signal(SIGPIPE, SIG_IGN);
     test_get_response();
+    test_get_offers_compression();
     test_json_post();
     test_post_exposes_error_status();
     test_post_empty_body_is_null();

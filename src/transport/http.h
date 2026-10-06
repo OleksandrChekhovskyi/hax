@@ -25,8 +25,9 @@ int http_sse_post(const char *url, const char *const *headers, const char *body,
 
 /* Synchronous GET into a heap-owned NUL-terminated buffer. `headers` is a NULL-terminated array and
  * may be NULL. Returns 0 on a non-empty 2xx response; otherwise returns -1 and sets `*out` to NULL.
- * `timeout_s == 0` and `max_bytes == 0` disable their respective limits. `status_out`, when
- * non-NULL, receives 0 if no HTTP response was received. */
+ * `timeout_s == 0` and `max_bytes == 0` disable their respective limits; `max_bytes` bounds the
+ * body after content decoding. `status_out`, when non-NULL, receives 0 if no HTTP response was
+ * received. */
 int http_get(const char *url, const char *const *headers, long timeout_s, long max_bytes,
              http_tick_cb tick, void *tick_user, char **out, long *status_out);
 

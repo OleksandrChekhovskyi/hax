@@ -52,6 +52,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   `on` now means `auto` rather than always `reasoning_content`.
 - `/model` and `/effort` wait briefly for the model catalog refresh, so pricing and context
   columns appear even on a cold cache.
+- Model listings and the models.dev catalog download compressed, about a tenth of their former
+  size.
 - The collapsed preview for read-only bash commands now tolerates `echo`, `printf`, `true`, and
   `false` between exploration commands, such as the `echo ---` separators some models place
   between searches, and covers read-only git subcommands like `log`, `show`, `diff`, `status`,
