@@ -72,7 +72,7 @@ Conversation records, in order. `kind` is one of:
 | `assistant` | Assistant message text. |
 | `tool_call` | A requested tool invocation: `call_id`, `tool_name`, and `arguments` (raw JSON as a string). |
 | `tool_result` | The paired result: `call_id`, `output`, and optionally `images`. |
-| `reasoning` | Provider reasoning state (`reasoning_json`/`reasoning_text`) with its `provider`/`model`. |
+| `reasoning` | Provider reasoning state (`reasoning_json`/`reasoning_text`) with its `provider`/`model`; `reasoning_field` names the Chat Completions field the text streamed in. |
 | `turn_boundary` | Separates provider round-trips ("turns"). The first one precedes the user prompt. |
 | `turn_usage` | Usage footer for one round-trip; see below. |
 

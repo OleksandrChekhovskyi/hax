@@ -12,6 +12,7 @@
 #include "provider.h"
 #include "tool_schema.h"
 #include "xalloc.h"
+#include "providers/chat_events.h"
 #include "providers/wire.h"
 
 /* AUTO sends explicit cache markers only when writes replace ordinary input processing. */
@@ -55,15 +56,31 @@ static void collect_reasoning_details(json_t **details, const char *reasoning_js
     json_decref(parsed);
 }
 
+static const char *replay_member(struct chat_reasoning_replay replay, const char *recorded)
+{
+    switch (replay.mode) {
+    case CHAT_REPLAY_OFF:
+        return NULL;
+    case CHAT_REPLAY_RECORDED:
+        /* The member becomes a message key; any name the parser does not read could replace
+         * role or content. */
+        return chat_reasoning_member(recorded);
+    case CHAT_REPLAY_FIELD:
+        return replay.field;
+    }
+    return NULL;
+}
+
 /* Chat Completions cannot preserve text/tool-call interleaving within an assistant message. */
 static size_t append_assistant_message(json_t *messages, const struct item *items, size_t index,
-                                       size_t n_items, const char *reasoning_field,
+                                       size_t n_items, struct chat_reasoning_replay replay,
                                        const char *current_provider, const char *current_model)
 {
     struct buf text;
     struct buf reasoning;
     buf_init(&text);
     buf_init(&reasoning);
+    const char *recorded_field = NULL;
     json_t *tool_calls = NULL;
     json_t *details = NULL;
 
@@ -83,6 +100,8 @@ static size_t append_assistant_message(json_t *messages, const struct item *item
                 if (reasoning.len > 0)
                     buf_append_str(&reasoning, "\n");
                 buf_append_str(&reasoning, item->reasoning_text);
+                if (!recorded_field)
+                    recorded_field = item->reasoning_field;
             }
             collect_reasoning_details(&details, item->reasoning_json);
             break;
@@ -96,6 +115,7 @@ static size_t append_assistant_message(json_t *messages, const struct item *item
         }
     }
 
+    const char *reasoning_field = replay_member(replay, recorded_field);
     /* The typed sequence is the richer encoding of the same reasoning: sending the plain member
      * alongside it would duplicate the content. */
     int include_reasoning = reasoning_field && reasoning.len > 0 && !details;
@@ -104,8 +124,8 @@ static size_t append_assistant_message(json_t *messages, const struct item *item
 
     json_t *message = json_object();
     json_object_set_new(message, "role", json_string("assistant"));
-    /* Content may be null only beside tool calls; ollama rejects a null-content message without
-     * them, as a reasoning-only turn would be. */
+    /* Content may be null only beside tool calls: ollama rejects a reasoning-only message with
+     * null content. */
     json_t *content = text.len > 0 ? json_string(text.data)
                       : tool_calls ? json_null()
                                    : json_string("");
@@ -198,7 +218,7 @@ static size_t append_tool_results(json_t *messages, const struct item *items, si
 }
 
 json_t *chat_build_messages(const char *system_prompt, const struct item *items, size_t n_items,
-                            const char *reasoning_field, const char *current_provider,
+                            struct chat_reasoning_replay replay, const char *current_provider,
                             const char *current_model, int image_input)
 {
     json_t *messages = json_array();
@@ -217,7 +237,7 @@ json_t *chat_build_messages(const char *system_prompt, const struct item *items,
             break;
         case ITEM_ASSISTANT_MESSAGE:
         case ITEM_TOOL_CALL:
-            index = append_assistant_message(messages, items, index, n_items, reasoning_field,
+            index = append_assistant_message(messages, items, index, n_items, replay,
                                              current_provider, current_model);
             break;
         case ITEM_TOOL_RESULT:
@@ -225,7 +245,7 @@ json_t *chat_build_messages(const char *system_prompt, const struct item *items,
             break;
         case ITEM_REASONING:
             if (items[index].reasoning_text || items[index].reasoning_json) {
-                index = append_assistant_message(messages, items, index, n_items, reasoning_field,
+                index = append_assistant_message(messages, items, index, n_items, replay,
                                                  current_provider, current_model);
             } else {
                 index++;
@@ -338,7 +358,7 @@ json_t *chat_build_body(const struct context *context, const char *provider_id, 
 {
     json_t *messages =
         chat_build_messages(context->system_prompt, context->items, context->n_items,
-                            opts->reasoning_field, provider_id, model, context->image_input);
+                            opts->reasoning_replay, provider_id, model, context->image_input);
     if (opts->cache_markers)
         chat_apply_cache_breakpoints(messages, opts->cache_ttl);
 

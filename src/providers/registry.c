@@ -121,8 +121,7 @@ static const struct provider_def DEFS[] = {
         .id = "llamacpp",
         .display_name = "llama.cpp",
         .base_url = "http://127.0.0.1:{port}/v1",
-        /* Interleaved-thinking models can leak tool calls into reasoning unless prior
-         * reasoning returns through llama-server's reasoning_content field. */
+        /* llama-server reads prior reasoning only from `reasoning_content`. */
         .reasoning_roundtrip = "reasoning_content",
         /* Prompt-prefill progress for big local prompts; the parser always understands the
          * reply, so only the request member needs declaring. */
@@ -142,8 +141,7 @@ static const struct provider_def DEFS[] = {
         .id = "ollama",
         .base_url = "http://127.0.0.1:{port}/v1",
         .port = 11434,
-        /* Each model's template decides which prior reasoning the model sees again, so always
-         * replay it; the OpenAI endpoint reads only `reasoning`. */
+        /* The OpenAI endpoint reads prior reasoning only from `reasoning`. */
         .reasoning_roundtrip = "reasoning",
         /* The OpenAI endpoint ignores a per-request num_ctx, so hax can't widen the context;
          * point the user at the server-side settings. */

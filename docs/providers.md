@@ -319,26 +319,31 @@ example `groq`) to get pricing and context metadata for a hosted provider, or to
 provider's id for a proxy in front of one. Do not map local models to a hosted provider merely
 because names look similar: prices and context limits may differ.
 
-`api: "catalog"` declares a mixed-protocol gateway the model catalog already describes: each model
-routes by the catalog's per-model API — how the shipped OpenCode providers work — and models the
-catalog leaves unmapped use Chat Completions. `model_apis` rules also switch a provider into this
-mode and take precedence over catalog hints; either form makes every dialect's config fields apply,
-each to the models speaking it.
+`api: "catalog"` is for a gateway that serves models over different protocols, like the shipped
+OpenCode providers: each model uses the protocol the catalog lists for it. `model_apis` rules route
+the same way and take precedence over the catalog. Models neither covers use the provider's `api`,
+or Chat Completions under `catalog`. Each protocol's advanced fields apply to the models using it.
 
-`metadata_api` selects the `/models` shape and its auth scheme independently of the request
-protocol, since a proxy or gateway can pair either metadata side with either wire — an
-`anthropic-messages` endpoint behind an OpenAI-style `/v1/models`, say. It defaults to the family
-of the `api` protocol, so most providers never set it.
+`metadata_api` is for an endpoint whose model listing does not match its request protocol, such as
+an `anthropic-messages` endpoint with an OpenAI-style `/v1/models`; it also selects how the listing
+authenticates. Most providers never need it.
 
-For `openai-completions`, advanced fields are `reasoning_format`, `reasoning_roundtrip`,
-`send_cache_key`, `request_cost`, `cache`, and `cache_ttl`; reasoning replay is automatic per
-model, so `reasoning_roundtrip` is only for an endpoint the catalog describes wrongly.
-`openai-responses` accepts `send_cache_key`; its reasoning format and encrypted round-trip are
-fixed by the protocol.
+Advanced fields depend on the protocol:
 
-Anthropic-style blocks accept `max_tokens`, `thinking_mode`, `thinking_budget`, `cache`, `cache_ttl`,
-and `version`. Leave advanced fields unset unless the endpoint documents them. Selecting a provider
-warns about block members hax does not recognize or that its `api` dialect does not use.
+| `api` | Advanced fields |
+| --- | --- |
+| `openai-completions` | `reasoning_format`, `reasoning_roundtrip`, `send_cache_key`, `request_cost`, `cache`, `cache_ttl` |
+| `openai-responses` | `send_cache_key` |
+| `anthropic-messages` | `max_tokens`, `thinking_mode`, `thinking_budget`, `cache`, `cache_ttl`, `version` |
+
+Their values and defaults are listed under
+[Provider settings](./configuration.md#provider-settings). Leave them unset unless the endpoint
+documents a need; selecting a provider warns about block members hax does not recognize or that its
+`api` does not use.
+
+Reasoning replay needs no setup: hax returns a model's reasoning in the field the server streamed it
+in. Set `reasoning_roundtrip` to a field name only for a server that reads reasoning from a
+different field, or to `off` for one that rejects it.
 
 Every provider reads only its own block. The `HAX_OPENAI_*` and `HAX_ANTHROPIC_*` variables belong
 to the shipped `openai-compatible` / `anthropic-compatible` blocks and do not bleed into others;

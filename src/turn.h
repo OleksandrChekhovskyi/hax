@@ -27,6 +27,7 @@ struct turn {
 
     struct buf reasoning;
     int has_reasoning;
+    const char *reasoning_field; /* static storage; NULL until a delta names one */
 
     struct pending_tool_call *pending_calls;
     size_t n_pending_calls;

@@ -76,9 +76,10 @@ static int items_equal(const struct item *a, const struct item *b)
            nullable_strings_equal(a->output, b->output) &&
            a->output_hidden_tail == b->output_hidden_tail &&
            nullable_strings_equal(a->reasoning_json, b->reasoning_json) &&
-           nullable_strings_equal(a->reasoning_text, b->reasoning_text) && a->origin == b->origin &&
-           a->inherited == b->inherited && turn_usage_equal(a->usage, b->usage) &&
-           item_images_equal(a, b);
+           nullable_strings_equal(a->reasoning_text, b->reasoning_text) &&
+           nullable_strings_equal(a->reasoning_field, b->reasoning_field) &&
+           a->origin == b->origin && a->inherited == b->inherited &&
+           turn_usage_equal(a->usage, b->usage) && item_images_equal(a, b);
 }
 
 static void expect_item_codec_round_trip(const struct item *source)
@@ -150,6 +151,7 @@ static struct item CONVERSATION[] = {
     {.kind = ITEM_USER_MESSAGE, .text = (char *)"hello world", .inherited = 1},
     {.kind = ITEM_REASONING,
      .reasoning_text = (char *)"thinking...",
+     .reasoning_field = (char *)"reasoning",
      .reasoning_json = (char *)"{\"id\":\"r1\"}"},
     {.kind = ITEM_ASSISTANT_MESSAGE, .text = (char *)"hi there"},
     {.kind = ITEM_TOOL_CALL,

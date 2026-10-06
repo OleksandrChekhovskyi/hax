@@ -49,6 +49,10 @@ struct chat_events {
     int cache_write_1h;
 };
 
+/* The static-storage copy of `name` if deltas carry reasoning text under it, else NULL.
+ * NULL-safe. */
+const char *chat_reasoning_member(const char *name);
+
 void chat_events_init(struct chat_events *parser, stream_cb callback, void *callback_user);
 void chat_events_free(struct chat_events *parser);
 

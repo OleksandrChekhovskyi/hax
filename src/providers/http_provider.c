@@ -68,8 +68,10 @@ struct http_provider {
     int request_cost;
     enum chat_cache_mode cache_mode; /* chat only */
     char *cache_ttl;
-    char *reasoning_field;
-    int reasoning_field_pinned; /* configured explicitly; no catalog hint may override it */
+    /* The replay before per-model catalog hints, which yield only to a pinned (configured) one. */
+    struct chat_reasoning_replay reasoning_replay;
+    int reasoning_replay_pinned;
+    char *reasoning_field; /* owns reasoning_replay.field */
     enum chat_reasoning_format reasoning_format;
     struct thinking_setting thinking; /* the def's; providers.<id>.thinking_mode overrides */
     int strict_signatures;
@@ -313,18 +315,22 @@ static const struct wire *resolve_model_wire(struct http_provider *provider, con
     return provider->wire;
 }
 
-/* The member `model`'s reasoning replays under: an explicit reasoning_roundtrip pins one for
- * every model, else the catalog's per-model hint, else the def default. The result is
- * borrowed from static storage or from the provider, so it outlives the request. */
-static const char *resolve_model_reasoning_field(const struct http_provider *provider,
-                                                 const char *model)
+/* Precedence: a pinned setting, the catalog's per-model hint, the def default, then each item's
+ * recorded member. The field is borrowed from static storage or the provider. */
+static struct chat_reasoning_replay
+resolve_model_reasoning_replay(const struct http_provider *provider, const char *model)
 {
-    if (provider->reasoning_field_pinned)
-        return provider->reasoning_field;
+    if (provider->reasoning_replay_pinned)
+        return provider->reasoning_replay;
 
     struct catalog_entry entry;
     catalog_lookup(provider_stable_id(&provider->base), provider->catalog_id, model, &entry);
-    return entry.interleaved_field ? entry.interleaved_field : provider->reasoning_field;
+    if (entry.interleaved_field)
+        return (struct chat_reasoning_replay){.mode = CHAT_REPLAY_FIELD,
+                                              .field = entry.interleaved_field};
+    if (entry.interleaved_declared)
+        return (struct chat_reasoning_replay){.mode = CHAT_REPLAY_OFF};
+    return provider->reasoning_replay;
 }
 
 /* Whether a request consults metadata before it is sent: wire routing on a catalog-routed
@@ -398,7 +404,7 @@ static int http_provider_stream(struct provider *base, const struct context *con
         stream.cache = chat_plan_cache(&rates, provider->cache_mode, provider->cache_ttl);
         opts.cache_markers = stream.cache.send_breakpoints;
         opts.session_cache_key = provider->send_cache_key ? stream.session_id : NULL;
-        opts.reasoning_field = resolve_model_reasoning_field(provider, model);
+        opts.reasoning_replay = resolve_model_reasoning_replay(provider, model);
         opts.reasoning_format = provider->reasoning_format;
         opts.request_cost = provider->request_cost;
     }
@@ -504,27 +510,32 @@ static enum chat_cache_mode resolve_cache_mode(const char *prefix, const char *d
     return CHAT_CACHE_OFF;
 }
 
-/* `*pinned` reports an explicit setting, including an "off" that must survive a catalog hint.
- * "auto" asks for the default resolution, like the other tri-state settings, rather than naming
- * a member; anything else is a member name. */
-static char *resolve_configured_reasoning_field(const char *prefix, const char *def_default,
-                                                int *pinned)
+/* An explicit setting pins the replay, so even "off" survives a catalog hint. "auto" and "on"
+ * (the default always replays) ask for default resolution; anything else names a member. */
+static void resolve_configured_reasoning_replay(struct http_provider *provider, const char *prefix,
+                                                const char *def_default)
 {
     const char *configured = config_scoped_str(prefix, "reasoning_roundtrip");
-    if (configured && strcmp(configured, "auto") == 0)
+    if (configured && (strcmp(configured, "auto") == 0 || strcmp(configured, "on") == 0 ||
+                       strcmp(configured, "1") == 0))
         configured = NULL;
 
-    const char *field = def_default;
-    *pinned = configured != NULL;
-    if (configured) {
-        if (!*configured || strcmp(configured, "off") == 0 || strcmp(configured, "0") == 0)
-            field = NULL;
-        else if (strcmp(configured, "on") == 0 || strcmp(configured, "1") == 0)
-            field = "reasoning_content";
-        else
-            field = configured;
+    provider->reasoning_replay_pinned = configured != NULL;
+    if (configured &&
+        (!*configured || strcmp(configured, "off") == 0 || strcmp(configured, "0") == 0)) {
+        provider->reasoning_replay = (struct chat_reasoning_replay){.mode = CHAT_REPLAY_OFF};
+        return;
     }
-    return field ? xstrdup(field) : NULL;
+    const char *field = configured ? configured : def_default;
+    if (!field) {
+        provider->reasoning_replay = (struct chat_reasoning_replay){.mode = CHAT_REPLAY_RECORDED};
+        return;
+    }
+    provider->reasoning_field = xstrdup(field);
+    provider->reasoning_replay = (struct chat_reasoning_replay){
+        .mode = CHAT_REPLAY_FIELD,
+        .field = provider->reasoning_field,
+    };
 }
 
 static size_t http_provider_list_efforts(struct provider *base, const char *const **efforts)
@@ -923,8 +934,7 @@ struct provider *http_provider_new(const struct provider_def *def)
     provider->request_cost = config_scoped_bool_or(prefix, "request_cost", def->request_cost);
     provider->cache_mode = resolve_cache_mode(prefix, def->cache);
     provider->cache_ttl = xstrdup(provider_cache_ttl(prefix));
-    provider->reasoning_field = resolve_configured_reasoning_field(
-        prefix, def->reasoning_roundtrip, &provider->reasoning_field_pinned);
+    resolve_configured_reasoning_replay(provider, prefix, def->reasoning_roundtrip);
     provider->reasoning_format = chat_reasoning_format_parse(
         config_scoped_str(prefix, "reasoning_format"),
         chat_reasoning_format_parse(def->reasoning_format, CHAT_REASONING_FLAT));

@@ -39,6 +39,10 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   `catalog_id` explicitly (for example `"catalog_id": "groq"`) to keep pricing and context
   metadata. Local servers and proxies without one never contact models.dev. See
   [docs/providers.md](docs/providers.md#custom-providers).
+- Chat Completions providers now send a model's reasoning back by default, in the same field the
+  server streamed it in, so thinking models on custom and local servers keep their earlier
+  reasoning without configuration. `reasoning_roundtrip` accepts `auto`, `off`, or a field name;
+  `on` now means `auto` rather than always `reasoning_content`.
 - `/model` and `/effort` wait briefly for the model catalog refresh, so pricing and context
   columns appear even on a cold cache.
 - The collapsed preview for read-only bash commands now tolerates `echo`, `printf`, `true`, and

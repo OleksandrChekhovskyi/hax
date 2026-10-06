@@ -69,6 +69,8 @@ struct item {
     char *reasoning_json;
     /* REASONING: human-readable reasoning; an item may carry either form or both. */
     char *reasoning_text;
+    /* REASONING: Chat Completions member reasoning_text streamed in; NULL when unknown. */
+    char *reasoning_field;
     /* REASONING / TURN_USAGE: source identity. Opaque reasoning may be bound to this exact pair. */
     char *provider;
     char *model;
@@ -234,6 +236,9 @@ struct stream_event {
         struct {
             const char *text; /* NULL or "" allowed — signals reasoning
                                  activity even when no plaintext is exposed */
+            /* Static storage: the Chat Completions member `text` arrived in; NULL for other
+             * wires. */
+            const char *field;
         } reasoning_delta;
         struct {
             int attempt;      /* 1-based attempt that just failed */

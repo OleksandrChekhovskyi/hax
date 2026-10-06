@@ -13,6 +13,7 @@
 struct captured_event {
     enum stream_event_kind kind;
     char *text;
+    const char *field; /* static storage, per the event contract */
     char *id;
     char *name;
     char *args_delta;
@@ -67,6 +68,7 @@ static int capture_event(const struct stream_event *event, void *user)
         break;
     case EV_REASONING_DELTA:
         captured->text = strdup(event->u.reasoning_delta.text ? event->u.reasoning_delta.text : "");
+        captured->field = event->u.reasoning_delta.field;
         break;
     case EV_RETRY:
         break;
@@ -186,6 +188,7 @@ static void test_reasoning_delta_openrouter(void)
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_REASONING_DELTA);
     EXPECT_STR_EQ(capture.events[0].text, "Hmm");
+    EXPECT_STR_EQ(capture.events[0].field, "reasoning");
     EVENTS_FIXTURE_FREE(capture, parser);
 }
 
@@ -196,6 +199,7 @@ static void test_reasoning_delta_llamacpp(void)
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_REASONING_DELTA);
     EXPECT_STR_EQ(capture.events[0].text, "Let");
+    EXPECT_STR_EQ(capture.events[0].field, "reasoning_content");
     EVENTS_FIXTURE_FREE(capture, parser);
 }
 

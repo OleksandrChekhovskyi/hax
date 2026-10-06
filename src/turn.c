@@ -75,6 +75,13 @@ static void flush_text(struct turn *turn)
     turn->has_text = 0;
 }
 
+static char *take_reasoning_field(struct turn *turn)
+{
+    char *field = turn->reasoning_field ? xstrdup(turn->reasoning_field) : NULL;
+    turn->reasoning_field = NULL;
+    return field;
+}
+
 static void flush_reasoning(struct turn *turn)
 {
     if (!turn->has_reasoning)
@@ -83,6 +90,7 @@ static void flush_reasoning(struct turn *turn)
     append_item(turn, (struct item){
                           .kind = ITEM_REASONING,
                           .reasoning_text = buf_steal(&turn->reasoning),
+                          .reasoning_field = take_reasoning_field(turn),
                       });
     turn->has_reasoning = 0;
 }
@@ -100,6 +108,7 @@ void turn_discard_reasoning(struct turn *turn)
 {
     buf_free(&turn->reasoning);
     turn->has_reasoning = 0;
+    turn->reasoning_field = NULL;
 }
 
 void turn_keep_text(struct turn *turn)
@@ -195,6 +204,8 @@ void turn_consume(struct turn *turn, const struct stream_event *event)
             /* Some providers require prior reasoning text on the next request. */
             buf_append_str(&turn->reasoning, text);
             turn->has_reasoning = 1;
+            if (event->u.reasoning_delta.field)
+                turn->reasoning_field = event->u.reasoning_delta.field;
         }
         break;
     }
@@ -206,6 +217,7 @@ void turn_consume(struct turn *turn, const struct stream_event *event)
                         .kind = ITEM_REASONING,
                         .reasoning_json = xstrdup(event->u.reasoning_item.json),
                         .reasoning_text = turn->has_reasoning ? buf_steal(&turn->reasoning) : NULL,
+                        .reasoning_field = take_reasoning_field(turn),
                     });
         turn->has_reasoning = 0;
         break;

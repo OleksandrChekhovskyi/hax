@@ -47,8 +47,8 @@ struct provider_def {
     const char *cache;
     int request_cost;             /* chat: request provider-reported per-response cost */
     const char *reasoning_format; /* "flat"/"nested"; NULL → flat */
-    /* Chat default for the member prior reasoning replays under; NULL disables replay.
-     * providers.<id>.reasoning_roundtrip overrides either way. */
+    /* Chat message member that carries prior reasoning back, whichever member it streamed in;
+     * NULL reuses the streamed one. providers.<id>.reasoning_roundtrip overrides either way. */
     const char *reasoning_roundtrip;
     /* Messages: "auto"/"prefer-adaptive" follow model metadata and differ only for a model the
      * catalog lacks; "adaptive"/"budget"/"off" pin. NULL → auto. */

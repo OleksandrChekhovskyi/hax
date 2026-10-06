@@ -89,6 +89,7 @@ void item_free(struct item *item)
     free(item->images);
     free(item->reasoning_json);
     free(item->reasoning_text);
+    free(item->reasoning_field);
     free(item->provider);
     free(item->model);
     turn_usage_free(item->usage);

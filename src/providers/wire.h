@@ -38,7 +38,7 @@ struct wire_body_opts {
     /* chat + responses: prompt_cache_key; NULL omits it */
     const char *session_cache_key;
     /* chat */
-    const char *reasoning_field; /* replay reasoning under this member; NULL disables */
+    struct chat_reasoning_replay reasoning_replay;
     enum chat_reasoning_format reasoning_format;
     int request_cost; /* request OpenRouter usage cost */
     /* anthropic */

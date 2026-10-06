@@ -14,6 +14,18 @@ enum chat_reasoning_format {
     CHAT_REASONING_NESTED,   /* reasoning: {enabled: bool, effort?: <effort>} */
 };
 
+enum chat_replay_mode {
+    CHAT_REPLAY_OFF = 0,
+    CHAT_REPLAY_RECORDED, /* under the member each item's reasoning streamed in */
+    CHAT_REPLAY_FIELD,    /* under `field`, whatever the items recorded */
+};
+
+/* How an assistant turn's own reasoning text returns to the model. */
+struct chat_reasoning_replay {
+    enum chat_replay_mode mode;
+    const char *field; /* FIELD: borrowed member name */
+};
+
 enum chat_cache_mode {
     CHAT_CACHE_OFF,
     CHAT_CACHE_AUTO,
@@ -39,12 +51,13 @@ enum chat_reasoning_format chat_reasoning_format_parse(const char *value,
 void chat_apply_reasoning(json_t *body, enum chat_reasoning_format format, const char *effort);
 
 /* Translate transcript items into a newly allocated Chat Completions messages array.
- * Reasoning is replayed only when `reasoning_field` is set and the item's provider/model stamp
- * matches `current_provider` and `current_model`. Tool-result images become a following user
- * message when `image_input` is nonzero, or text placeholders when it is zero. The caller owns the
- * returned array and must json_decref it. */
+ * Reasoning is replayed as `replay` directs, and only when the item's provider/model stamp
+ * matches `current_provider` and `current_model`; a recorded member chat_reasoning_member()
+ * rejects is never replayed. Tool-result images become a following user message when `image_input`
+ * is nonzero, or text placeholders when it is zero. The caller owns the returned array and must
+ * json_decref it. */
 json_t *chat_build_messages(const char *system_prompt, const struct item *items, size_t n_items,
-                            const char *reasoning_field, const char *current_provider,
+                            struct chat_reasoning_replay replay, const char *current_provider,
                             const char *current_model, int image_input);
 
 /* Mark the system prompt and conversation tail with cache_control breakpoints. A "1h" ttl is

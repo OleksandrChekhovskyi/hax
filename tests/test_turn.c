@@ -216,6 +216,29 @@ static void test_reasoning_before_text(void)
     turn_reset(&t);
 }
 
+/* Each reasoning item records the member its own deltas named, never an earlier item's. */
+static void test_reasoning_records_streamed_member(void)
+{
+    struct turn t;
+    turn_init(&t);
+    struct stream_event ev = {
+        .kind = EV_REASONING_DELTA,
+        .u.reasoning_delta = {.text = "first", .field = "reasoning"},
+    };
+    turn_consume(&t, &ev);
+    struct stream_event sealed = {.kind = EV_REASONING_ITEM, .u.reasoning_item = {.json = "[]"}};
+    turn_consume(&t, &sealed);
+    feed_reasoning(&t, "second");
+    feed_done(&t);
+
+    EXPECT(t.n_items == 2);
+    EXPECT_STR_EQ(t.items[0].reasoning_text, "first");
+    EXPECT_STR_EQ(t.items[0].reasoning_field, "reasoning");
+    EXPECT_STR_EQ(t.items[1].reasoning_text, "second");
+    EXPECT(t.items[1].reasoning_field == NULL);
+    turn_reset(&t);
+}
+
 static void test_reasoning_only_turn(void)
 {
     /* Reasoning-only responses must still be available for the next request. */
@@ -505,6 +528,7 @@ int main(void)
     test_tool_call_delta_unknown_id_ignored();
     test_reasoning_before_tool_call();
     test_reasoning_before_text();
+    test_reasoning_records_streamed_member();
     test_reasoning_only_turn();
     test_reasoning_state_only_deltas_ignored();
     test_reasoning_item_carries_delta_text();

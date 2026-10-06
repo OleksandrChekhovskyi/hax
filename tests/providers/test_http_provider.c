@@ -241,7 +241,8 @@ static void write_catalog_fixture(void)
           "\"claude-budget\": {\"provider\": {\"npm\": \"@ai-sdk/anthropic\"},"
           " \"reasoning_options\": [{\"type\": \"budget_tokens\"}]},"
           "\"gemini-hint\": {\"provider\": {\"npm\": \"@ai-sdk/google\"}},"
-          "\"think-hint\": {\"interleaved\": {\"field\": \"reasoning_content\"}}}}}",
+          "\"think-hint\": {\"interleaved\": {\"field\": \"reasoning_content\"}},"
+          "\"no-replay\": {\"interleaved\": false}}}}",
           f);
     fclose(f);
 }
@@ -689,22 +690,26 @@ static void stream_one_reasoned_turn(struct provider *provider, char *model, str
 {
     struct item items[] = {
         {.kind = ITEM_USER_MESSAGE, .text = "hello"},
-        {.kind = ITEM_REASONING, .reasoning_text = "thought", .provider = "zen", .model = model},
+        {.kind = ITEM_REASONING,
+         .reasoning_text = "thought",
+         .reasoning_field = "reasoning",
+         .provider = "zen",
+         .model = model},
         {.kind = ITEM_ASSISTANT_MESSAGE, .text = "hi"},
     };
     struct context context = {.items = items, .n_items = 3};
     provider->stream(provider, &context, model, log_error, log, NULL, NULL);
 }
 
-/* The catalog names the member per model; reasoning_roundtrip pins one for every model instead,
- * including an "off" the hint must not resurrect and an "auto" that asks for the hint back. */
+/* Replay precedence: a configured setting (even "off"), a catalog hint (a member or off), the def
+ * default, then the recorded member. "auto" and "on" ask for the default order. */
 static void test_interleaved_reasoning_replay(void)
 {
     write_catalog_fixture();
     catalog_shutdown(); /* drop lookups memoized against an earlier fixture */
     struct loopback server = {
         .response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
-        .n_requests = 5,
+        .n_requests = 9,
     };
     int port = loopback_start(&server);
     EXPECT(port > 0);
@@ -725,6 +730,7 @@ static void test_interleaved_reasoning_replay(void)
     if (provider) {
         stream_one_reasoned_turn(provider, "think-hint", &log);
         stream_one_reasoned_turn(provider, "plain", &log);
+        stream_one_reasoned_turn(provider, "no-replay", &log);
         provider->destroy(provider);
     }
 
@@ -753,16 +759,38 @@ static void test_interleaved_reasoning_replay(void)
         provider->destroy(provider);
     }
 
+    EXPECT(config_load("{\"providers\": {\"zen\": {\"reasoning_roundtrip\": \"on\"}}}") == 0);
+    provider = http_provider_new(&def);
+    EXPECT(provider != NULL);
+    if (provider) {
+        stream_one_reasoned_turn(provider, "plain", &log);
+        stream_one_reasoned_turn(provider, "no-replay", &log);
+        provider->destroy(provider);
+    }
+
+    EXPECT(config_load(NULL) == 0);
+    def.reasoning_roundtrip = "reasoning_content";
+    provider = http_provider_new(&def);
+    EXPECT(provider != NULL);
+    if (provider) {
+        stream_one_reasoned_turn(provider, "plain", &log);
+        provider->destroy(provider);
+    }
+
     loopback_stop(&server);
-    EXPECT(atomic_load(&server.served) == 5);
+    EXPECT(atomic_load(&server.served) == 9);
 
     EXPECT(strstr(server.requests[0], "\"reasoning_content\":\"thought\"") != NULL);
-    EXPECT(strstr(server.requests[1], "thought") == NULL);
-    EXPECT(strstr(server.requests[2], "\"reasoning\":\"thought\"") != NULL);
-    EXPECT(strstr(server.requests[3], "thought") == NULL);
+    EXPECT(strstr(server.requests[1], "\"reasoning\":\"thought\"") != NULL);
+    EXPECT(strstr(server.requests[2], "thought") == NULL);
+    EXPECT(strstr(server.requests[3], "\"reasoning\":\"thought\"") != NULL);
+    EXPECT(strstr(server.requests[4], "thought") == NULL);
     /* "auto" names the default resolution, not a member called "auto". */
-    EXPECT(strstr(server.requests[4], "\"reasoning_content\":\"thought\"") != NULL);
-    EXPECT(strstr(server.requests[4], "\"auto\"") == NULL);
+    EXPECT(strstr(server.requests[5], "\"reasoning_content\":\"thought\"") != NULL);
+    EXPECT(strstr(server.requests[5], "\"auto\"") == NULL);
+    EXPECT(strstr(server.requests[6], "\"reasoning\":\"thought\"") != NULL);
+    EXPECT(strstr(server.requests[7], "thought") == NULL);
+    EXPECT(strstr(server.requests[8], "\"reasoning_content\":\"thought\"") != NULL);
 
     EXPECT(config_load(NULL) == 0);
 }
