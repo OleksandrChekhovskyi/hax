@@ -124,7 +124,7 @@ static void probe_worker(struct bg_job *job, void *arg)
         struct model_info report;
         model_info_init(&report);
         report.id = xstrdup(task->model_id);
-        task->request.parse(body, task->model_id, &report);
+        model_probe_parse(&task->request, body, task->model_id, &report);
 
         pthread_mutex_lock(&report_lock);
         /* A cancelled probe must not overwrite a newer selection after parsing. A retained
@@ -190,7 +190,8 @@ void model_meta_refresh(struct provider *provider, const char *model)
         return;
 
     struct model_probe request = {0};
-    if (provider->probe_model(provider, model, &request) != 0 || !request.url || !request.parse) {
+    if (provider->probe_model(provider, model, &request) != 0 || !request.url ||
+        (!request.parse && !request.parse_entry)) {
         model_probe_clear(&request);
         return;
     }

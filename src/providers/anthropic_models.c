@@ -66,27 +66,6 @@ void anthropic_parse_model(const json_t *entry, struct model_info *out)
     parse_model_efforts(json_object_get(capabilities, "effort"), &out->efforts);
 }
 
-static void parse_model_probe_response(const char *response_body, const char *model,
-                                       struct model_info *out)
-{
-    json_t *root = json_loads(response_body, 0, NULL);
-    if (!root)
-        return;
-
-    json_t *data = json_object_get(root, "data");
-    size_t index;
-    json_t *entry;
-    json_array_foreach(data, index, entry)
-    {
-        const char *model_id = json_string_value(json_object_get(entry, "id"));
-        if (model_id && strcmp(model_id, model) == 0) {
-            anthropic_parse_model(entry, out);
-            break;
-        }
-    }
-    json_decref(root);
-}
-
 int anthropic_probe_model(struct provider *provider, const char *model, struct model_probe *probe)
 {
     if (!model || !*model)
@@ -96,7 +75,7 @@ int anthropic_probe_model(struct provider *provider, const char *model, struct m
                            ANTHROPIC_MODEL_PAGE_SIZE);
     probe->headers = http_provider_metadata_headers(provider);
     probe->timeout_s = MODEL_PROBE_TIMEOUT_S;
-    probe->parse = parse_model_probe_response;
+    probe->parse_entry = anthropic_parse_model;
     return 0;
 }
 

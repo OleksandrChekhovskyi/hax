@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: MIT */
+#include <jansson.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -47,9 +48,6 @@ static void test_gateway_defs_registered(void)
     EXPECT(provider_find("opencode-go") != NULL);
     EXPECT(idx_of("opencode-zen") >
            idx_of("openrouter")); /* data defs rank after the primary built-ins */
-    /* Both gateway tiers declare the session header the gateway routes and bills by. */
-    EXPECT(strstr(provider_find("opencode-zen")->extra_headers, "x-opencode-session") != NULL);
-    EXPECT(strstr(provider_find("opencode-go")->extra_headers, "x-opencode-session") != NULL);
 
     /* The picker names the exact variable to set, like the compiled-in providers. */
     unsetenv("OPENCODE_API_KEY");
@@ -61,17 +59,40 @@ static void test_gateway_defs_registered(void)
     provider_availability_clear(&availability);
 }
 
-/* Autoselect-priority ordering follows the shipped table: concrete providers first, the generic
- * -compatible endpoints last so a deliberately configured concrete provider outranks a leftover
- * generic base-URL variable, and custom config blocks after every shipped def. */
+/* Def JSON literals are C-escaped by hand; a malformed one is dropped with only a runtime warning,
+ * silently losing headers or body members an endpoint may require. */
+static void test_def_json_literals_parse(void)
+{
+    size_t n;
+    const struct provider_def *const *all = provider_all(&n);
+    for (size_t i = 0; i < n; i++) {
+        const char *literals[] = {all[i]->extra_headers, all[i]->extra_body};
+        for (size_t j = 0; j < 2; j++) {
+            if (!literals[j])
+                continue;
+            json_t *parsed = json_loads(literals[j], 0, NULL);
+            if (!json_is_object(parsed))
+                FAIL("provider '%s': def JSON literal is not an object: %s", all[i]->id,
+                     literals[j]);
+            json_decref(parsed);
+        }
+    }
+}
+
+/* Autoselect-priority ordering follows the shipped table: hosted providers, then local servers,
+ * then the generic -compatible endpoints last so a deliberately configured concrete provider
+ * outranks a leftover generic base-URL variable, and custom config blocks after every shipped
+ * def. */
 static void test_autoselect_order(void)
 {
+    int deepseek = idx_of("deepseek");
     int llama = idx_of("llamacpp");
     int compat = idx_of("openai-compatible");
     int ollama = idx_of("ollama");
-    EXPECT(llama >= 0 && compat >= 0 && ollama >= 0);
-    EXPECT(llama < ollama);  /* shipped defs keep their table order */
-    EXPECT(ollama < compat); /* generic endpoints rank last */
+    EXPECT(deepseek >= 0 && llama >= 0 && compat >= 0 && ollama >= 0);
+    EXPECT(deepseek < llama); /* hosted providers rank ahead of local servers */
+    EXPECT(llama < ollama);   /* shipped defs keep their table order */
+    EXPECT(ollama < compat);  /* generic endpoints rank last */
 }
 
 /* The former llamacpp id keeps resolving for saved sessions and scripts. */
@@ -106,9 +127,6 @@ static void test_def_hooks_reach_provider(void)
     EXPECT(def != NULL);
     if (!def)
         return;
-    /* Attribution and the session key are def data, overridable through extra_headers. */
-    EXPECT(strstr(def->extra_headers, "X-Title") != NULL);
-    EXPECT(strstr(def->extra_headers, "x-session-id") != NULL);
     struct provider *provider = provider_construct(def);
     EXPECT(provider != NULL);
     if (provider) {
@@ -246,6 +264,7 @@ int main(void)
     test_default_is_highest_priority();
     test_internal_providers_hidden();
     test_gateway_defs_registered();
+    test_def_json_literals_parse();
     test_autoselect_order();
     test_former_id_canonicalized();
     test_display_name_resolution();

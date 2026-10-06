@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "providers/usage_render.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
@@ -28,6 +29,29 @@ static void format_reset_time(char *output, size_t output_size, time_t reset_at)
     else
         /* Zero-padded %d is preferable to the non-portable %-d. */
         strftime(output, output_size, "%a %b %d, %H:%M", &reset_tm);
+}
+
+void usage_heading_print(const char *name, const char *const *details, size_t n_details)
+{
+    printf(ANSI_DIM "%s", name);
+    for (size_t i = 0; i < n_details; i++) {
+        if (!details[i] || !*details[i])
+            continue;
+        char *detail = ctrl_strip_line_dup(details[i]);
+        printf(" · %s", detail);
+        free(detail);
+    }
+    printf(ANSI_RESET "\n");
+}
+
+void usage_value_print(const char *label, const char *fmt, ...)
+{
+    printf("  " ANSI_DIM "%-*s ", USAGE_LABEL_WIDTH, label);
+    va_list args;
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
+    printf(ANSI_RESET "\n");
 }
 
 void usage_window_print(const struct usage_window *window)

@@ -116,6 +116,7 @@ sources = files(
     'src/providers/codex_auth.c',
     'src/providers/codex_login.c',
     'src/providers/codex_settings.c',
+    'src/providers/deepseek.c',
     'src/providers/provider_config.c',
     'src/providers/http_provider.c',
     'src/providers/llamacpp.c',
@@ -127,6 +128,7 @@ sources = files(
     'src/providers/responses_body.c',
     'src/providers/responses_events.c',
     'src/providers/stream_retry.c',
+    'src/providers/usage_fetch.c',
     'src/providers/usage_render.c',
     'src/providers/wire.c',
 

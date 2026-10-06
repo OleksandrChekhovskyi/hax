@@ -71,6 +71,7 @@ struct http_provider {
     /* The replay before per-model catalog hints, which yield only to a pinned (configured) one. */
     struct chat_reasoning_replay reasoning_replay;
     int reasoning_replay_pinned;
+    int reasoning_required;
     char *reasoning_field; /* owns reasoning_replay.field */
     enum chat_reasoning_format reasoning_format;
     struct thinking_setting thinking; /* the def's; providers.<id>.thinking_mode overrides */
@@ -320,17 +321,19 @@ static const struct wire *resolve_model_wire(struct http_provider *provider, con
 static struct chat_reasoning_replay
 resolve_model_reasoning_replay(const struct http_provider *provider, const char *model)
 {
-    if (provider->reasoning_replay_pinned)
-        return provider->reasoning_replay;
-
-    struct catalog_entry entry;
-    catalog_lookup(provider_stable_id(&provider->base), provider->catalog_id, model, &entry);
-    if (entry.interleaved_field)
-        return (struct chat_reasoning_replay){.mode = CHAT_REPLAY_FIELD,
-                                              .field = entry.interleaved_field};
-    if (entry.interleaved_declared)
-        return (struct chat_reasoning_replay){.mode = CHAT_REPLAY_OFF};
-    return provider->reasoning_replay;
+    struct chat_reasoning_replay replay = provider->reasoning_replay;
+    if (!provider->reasoning_replay_pinned) {
+        struct catalog_entry entry;
+        catalog_lookup(provider_stable_id(&provider->base), provider->catalog_id, model, &entry);
+        /* A per-model hint against replay cannot waive what the endpoint requires. */
+        if (entry.interleaved_field)
+            replay = (struct chat_reasoning_replay){.mode = CHAT_REPLAY_FIELD,
+                                                    .field = entry.interleaved_field};
+        else if (entry.interleaved_declared && !provider->reasoning_required)
+            replay = (struct chat_reasoning_replay){.mode = CHAT_REPLAY_OFF};
+    }
+    replay.required = provider->reasoning_required;
+    return replay;
 }
 
 /* Whether a request consults metadata before it is sent: wire routing on a catalog-routed
@@ -536,6 +539,22 @@ static void resolve_configured_reasoning_replay(struct http_provider *provider, 
         .mode = CHAT_REPLAY_FIELD,
         .field = provider->reasoning_field,
     };
+}
+
+/* The required member can be sent only under a known name. A message without reasoning records
+ * none, so a recorded replay leaves the requirement unmet unless a catalog hint names it. */
+static void warn_unmet_reasoning_requirement(const struct http_provider *provider, const char *name)
+{
+    if (!provider->reasoning_required)
+        return;
+    if (provider->reasoning_replay_pinned && provider->reasoning_replay.mode == CHAT_REPLAY_OFF)
+        hax_warn("provider '%s': reasoning_roundtrip is off, so the reasoning the endpoint "
+                 "requires is not sent",
+                 name);
+    else if (provider->reasoning_replay.mode == CHAT_REPLAY_RECORDED && !provider->catalog_id)
+        hax_warn("provider '%s': reasoning_required needs the reasoning field's name — set "
+                 "reasoning_roundtrip (e.g. reasoning_content) or catalog_id",
+                 name);
 }
 
 static size_t http_provider_list_efforts(struct provider *base, const char *const **efforts)
@@ -935,6 +954,9 @@ struct provider *http_provider_new(const struct provider_def *def)
     provider->cache_mode = resolve_cache_mode(prefix, def->cache);
     provider->cache_ttl = xstrdup(provider_cache_ttl(prefix));
     resolve_configured_reasoning_replay(provider, prefix, def->reasoning_roundtrip);
+    provider->reasoning_required =
+        config_scoped_bool_or(prefix, "reasoning_required", def->reasoning_required);
+    warn_unmet_reasoning_requirement(provider, name);
     provider->reasoning_format = chat_reasoning_format_parse(
         config_scoped_str(prefix, "reasoning_format"),
         chat_reasoning_format_parse(def->reasoning_format, CHAT_REASONING_FLAT));
@@ -983,6 +1005,8 @@ struct provider *http_provider_new(const struct provider_def *def)
         provider->base.probe_model = anthropic_probe_model;
     } else {
         provider->base.list_models = openai_list_models;
+        if (def->parse_model)
+            provider->base.probe_model = openai_probe_model;
     }
     /* Like parse_model (which only the def's own listing consults), the probe and listing hooks
      * refine the def's metadata dialect: a configured metadata_api that moves the provider to

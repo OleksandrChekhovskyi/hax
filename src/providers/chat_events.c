@@ -340,6 +340,10 @@ static void capture_usage(struct chat_events *parser, json_t *root)
                 parser->usage.cache_write_1h_tokens = parser->usage.cache_write_tokens;
         }
     }
+    /* DeepSeek documents only its own hit count, though it mirrors it into the details. */
+    value = json_object_get(usage, "prompt_cache_hit_tokens");
+    if (parser->usage.cached_tokens < 0 && json_is_integer(value))
+        parser->usage.cached_tokens = (long)json_integer_value(value);
 
     value = json_object_get(usage, "cost");
     if (json_is_number(value) && json_number_value(value) >= 0)

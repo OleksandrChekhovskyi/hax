@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include <errno.h>
+#include <jansson.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -203,6 +204,38 @@ static void test_metadata_api_override(void)
         string_array_free(headers);
         provider->destroy(provider);
     }
+    EXPECT(config_load(NULL) == 0);
+}
+
+static void refine_nothing(const json_t *entry, struct model_info *out)
+{
+    (void)entry;
+    (void)out;
+}
+
+/* On the OpenAI side a parse_model hook alone probes through the full listing, authenticated
+ * like the listing itself. */
+static void test_parse_model_probes_listing(void)
+{
+    EXPECT(config_load("{\"providers\": {\"x\": {\"api_key\": \"sk-test\"}}}") == 0);
+    struct provider_def def = {
+        .id = "x",
+        .base_url = "http://example.invalid/v1",
+        .parse_model = refine_nothing,
+    };
+    struct provider *provider = http_provider_new(&def);
+    EXPECT(provider != NULL && provider->probe_model != NULL);
+    if (provider && provider->probe_model) {
+        struct model_probe probe = {0};
+        EXPECT(provider->probe_model(provider, "m", &probe) == 0);
+        EXPECT_STR_EQ(probe.url, "http://example.invalid/v1/models");
+        EXPECT(probe.headers && strcmp(probe.headers[0], "Authorization: Bearer sk-test") == 0);
+        EXPECT(probe.parse_entry == refine_nothing);
+        model_probe_clear(&probe);
+        EXPECT(provider->probe_model(provider, "", &probe) == -1);
+    }
+    if (provider)
+        provider->destroy(provider);
     EXPECT(config_load(NULL) == 0);
 }
 
@@ -795,6 +828,106 @@ static void test_interleaved_reasoning_replay(void)
     EXPECT(config_load(NULL) == 0);
 }
 
+/* A def that requires the member keeps it on a reasoning-less tool call, whether the member
+ * comes from a catalog hint or the def, and even when the catalog hints against replay.
+ * providers.<id>.reasoning_required overrides the def either way. */
+static void test_required_reasoning_replay(void)
+{
+    write_catalog_fixture();
+    catalog_shutdown();
+    struct loopback server = {
+        .response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
+        .n_requests = 5,
+    };
+    int port = loopback_start(&server);
+    EXPECT(port > 0);
+    if (port <= 0)
+        return;
+
+    char base_url[64];
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", port);
+    struct provider_def def = {
+        .id = "zen",
+        .base_url = base_url,
+        .catalog_id = "zen-test",
+        .reasoning_roundtrip = "reasoning_content",
+        .reasoning_required = 1,
+    };
+    struct provider_def plain_def = {
+        .id = "zen",
+        .base_url = base_url,
+        .catalog_id = "zen-test",
+    };
+    struct item items[] = {
+        {.kind = ITEM_USER_MESSAGE, .text = "hello"},
+        {.kind = ITEM_TOOL_CALL, .call_id = "c1", .tool_name = "read", .tool_arguments_json = "{}"},
+        {.kind = ITEM_TOOL_RESULT, .call_id = "c1", .output = "x"},
+    };
+    struct context context = {.items = items, .n_items = 3};
+    struct error_log log = {0};
+    struct provider *provider = http_provider_new(&def);
+    EXPECT(provider != NULL);
+    if (provider) {
+        provider->stream(provider, &context, "think-hint", log_error, &log, NULL, NULL);
+        provider->stream(provider, &context, "plain", log_error, &log, NULL, NULL);
+        provider->stream(provider, &context, "no-replay", log_error, &log, NULL, NULL);
+        provider->destroy(provider);
+    }
+
+    EXPECT(config_load("{\"providers\": {\"zen\": {\"reasoning_required\": \"off\"}}}") == 0);
+    provider = http_provider_new(&def);
+    EXPECT(provider != NULL);
+    if (provider) {
+        provider->stream(provider, &context, "think-hint", log_error, &log, NULL, NULL);
+        provider->destroy(provider);
+    }
+
+    EXPECT(config_load("{\"providers\": {\"zen\": {\"reasoning_required\": \"on\"}}}") == 0);
+    provider = http_provider_new(&plain_def);
+    EXPECT(provider != NULL);
+    if (provider) {
+        provider->stream(provider, &context, "think-hint", log_error, &log, NULL, NULL);
+        provider->destroy(provider);
+    }
+
+    EXPECT(config_load(NULL) == 0);
+
+    loopback_stop(&server);
+    EXPECT(atomic_load(&server.served) == 5);
+    EXPECT(strstr(server.requests[0], "\"reasoning_content\":\"\"") != NULL);
+    EXPECT(strstr(server.requests[1], "\"reasoning_content\":\"\"") != NULL);
+    EXPECT(strstr(server.requests[2], "\"reasoning_content\":\"\"") != NULL);
+    EXPECT(strstr(server.requests[3], "reasoning_content") == NULL);
+    EXPECT(strstr(server.requests[4], "\"reasoning_content\":\"\"") != NULL);
+}
+
+static int construction_warns(const struct provider_def *def, const char *config)
+{
+    EXPECT(config_load(config) == 0);
+    unsigned long diagnostics_before = hax_diag_sequence();
+    struct provider *provider = http_provider_new(def);
+    EXPECT(provider != NULL);
+    if (provider)
+        provider->destroy(provider);
+    EXPECT(config_load(NULL) == 0);
+    return hax_diag_sequence() != diagnostics_before;
+}
+
+/* The requirement goes unmet without a field to send, so construction says so: when replay is
+ * off, and when nothing names the field a reasoning-less message would need. */
+static void test_unmet_reasoning_requirement_warns(void)
+{
+    struct provider_def def = {.id = "x", .base_url = "http://example.invalid/v1"};
+    EXPECT(construction_warns(&def, "{\"providers\": {\"x\": {\"reasoning_required\": true}}}"));
+    EXPECT(construction_warns(&def, "{\"providers\": {\"x\": {\"reasoning_required\": true,"
+                                    " \"reasoning_roundtrip\": \"off\"}}}"));
+    EXPECT(!construction_warns(&def, "{\"providers\": {\"x\": {\"reasoning_required\": true,"
+                                     " \"reasoning_roundtrip\": \"reasoning_content\"}}}"));
+    EXPECT(!construction_warns(&def, "{\"providers\": {\"x\": {\"reasoning_required\": true,"
+                                     " \"catalog_id\": \"deepseek\"}}}"));
+    EXPECT(!construction_warns(&def, NULL));
+}
+
 /* Runtime-id catalog.models configuration routes wires and reasoning replay even when the
  * provider has no catalog identity to resolve the snapshot under. */
 static void test_config_only_routing_without_catalog_id(void)
@@ -902,6 +1035,7 @@ int main(void)
     test_messages_efforts_follow_thinking_mode();
     test_api_override_moves_wire();
     test_metadata_api_override();
+    test_parse_model_probes_listing();
     test_model_wire_routing();
     test_messages_defaults_follow_def();
     test_auth_source_stream();
@@ -909,6 +1043,8 @@ int main(void)
     test_def_extra_body_and_defaults();
     test_def_extra_headers_follow_conversation();
     test_interleaved_reasoning_replay();
+    test_required_reasoning_replay();
+    test_unmet_reasoning_requirement_warns();
     test_config_only_routing_without_catalog_id();
     test_catalog_routing_warning();
     test_unsupported_protocol_reported();

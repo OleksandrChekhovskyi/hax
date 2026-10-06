@@ -15,6 +15,7 @@
 #include "providers/codex.h"
 #include "providers/codex_auth.h"
 #include "providers/codex_settings.h"
+#include "providers/deepseek.h"
 #include "providers/http_provider.h"
 #include "providers/llamacpp.h"
 #include "providers/mock.h"
@@ -113,6 +114,19 @@ static const struct provider_def DEFS[] = {
         .metadata_api = "openai",
         .extra_headers = OPENCODE_HEADERS,
         .query_usage = opencode_go_query_usage,
+    },
+    {
+        .id = "deepseek",
+        .base_url = "https://api.deepseek.com",
+        .pinned = 1,
+        .api_key_env = "DEEPSEEK_API_KEY",
+        .catalog_id = "deepseek",
+        /* Thinking mode answers 400 when a tool loop's assistant messages come back without
+         * reasoning_content, even when the model produced none. */
+        .reasoning_roundtrip = "reasoning_content",
+        .reasoning_required = 1,
+        .parse_model = deepseek_parse_model,
+        .query_usage = deepseek_query_usage,
     },
     /* Local servers. */
     {

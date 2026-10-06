@@ -14,7 +14,6 @@
 #include "providers/codex_auth.h"
 #include "providers/http_provider.h"
 #include "providers/usage_render.h"
-#include "render/ctrl_strip.h"
 #include "terminal/ansi.h"
 #include "terminal/ui.h"
 #include "transport/http.h"
@@ -64,32 +63,6 @@ static char *build_models_url(const struct provider *provider)
                      CODEX_MODEL_CLIENT_VERSION);
 }
 
-static void parse_model_probe_response(const char *body, const char *model,
-                                       struct model_info *model_info)
-{
-    json_t *root = json_loads(body, 0, NULL);
-    if (!root)
-        return;
-
-    json_t *models = json_object_get(root, "models");
-    if (!json_is_array(models)) {
-        json_decref(root);
-        return;
-    }
-
-    size_t i;
-    json_t *entry;
-    json_array_foreach(models, i, entry)
-    {
-        const char *slug = json_string_value(json_object_get(entry, "slug"));
-        if (slug && strcmp(slug, model) == 0) {
-            codex_parse_model(entry, model_info);
-            break;
-        }
-    }
-    json_decref(root);
-}
-
 int codex_probe_model(struct provider *provider, const char *model, struct model_probe *probe)
 {
     if (!model || !*model)
@@ -107,7 +80,9 @@ int codex_probe_model(struct provider *provider, const char *model, struct model
     probe->url = build_models_url(provider);
     probe->headers = http_provider_metadata_headers(provider);
     probe->timeout_s = CODEX_MODEL_TIMEOUT_SECONDS;
-    probe->parse = parse_model_probe_response;
+    probe->list_member = "models";
+    probe->id_member = "slug";
+    probe->parse_entry = codex_parse_model;
     return 0;
 }
 
@@ -138,8 +113,7 @@ static void print_usage_window(const char *fallback_label, json_t *window)
     json_t *reset_timestamp = json_object_get(window, "reset_at");
     json_t *duration = json_object_get(window, "limit_window_seconds");
     if (!json_is_number(used_percent) || !json_is_number(reset_timestamp)) {
-        printf("  " ANSI_DIM "%-*s (unrecognized window shape)" ANSI_RESET "\n", USAGE_LABEL_WIDTH,
-               fallback_label);
+        usage_value_print(fallback_label, "(unrecognized window shape)");
         return;
     }
 
@@ -203,21 +177,8 @@ int codex_query_usage(struct provider *provider)
     const char *plan = json_string_value(json_object_get(root, "plan_type"));
     json_t *rate_limit = json_object_get(root, "rate_limit");
 
-    printf(ANSI_DIM "codex");
-    /* Email and plan arrive from the server (token claims and usage response); keep terminal
-     * controls out of them. */
-    const char *account_email = codex_auth_session_email(auth->state);
-    if (account_email) {
-        char *email = ctrl_strip_line_dup(account_email);
-        printf(" · %s", email);
-        free(email);
-    }
-    if (plan && *plan) {
-        char *safe_plan = ctrl_strip_line_dup(plan);
-        printf(" · %s", safe_plan);
-        free(safe_plan);
-    }
-    printf(ANSI_RESET "\n");
+    const char *details[] = {codex_auth_session_email(auth->state), plan};
+    usage_heading_print("codex", details, 2);
 
     if (rate_limit && !json_is_null(rate_limit)) {
         print_usage_window("primary", json_object_get(rate_limit, "primary_window"));
@@ -258,15 +219,7 @@ void codex_parse_model(const json_t *entry, struct model_info *model)
     if (json_is_integer(context_window) && json_integer_value(context_window) > 0)
         model->context = (long)json_integer_value(context_window);
 
-    json_t *modalities = json_object_get(entry, "input_modalities");
-    if (json_is_array(modalities)) {
-        model->image_input = PROVIDER_CAP_NO;
-        for (size_t i = 0; i < json_array_size(modalities); i++) {
-            const char *modality = json_string_value(json_array_get(modalities, i));
-            if (modality && strcmp(modality, "image") == 0)
-                model->image_input = PROVIDER_CAP_YES;
-        }
-    }
+    model->image_input = provider_cap_listed(json_object_get(entry, "input_modalities"), "image");
 
     const char *description = json_string_value(json_object_get(entry, "description"));
     if (description && *description)

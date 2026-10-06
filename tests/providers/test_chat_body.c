@@ -223,6 +223,16 @@ static void test_reasoning_details_supersede_text(void)
     EXPECT(json_object_get(a, "reasoning_details") == NULL);
     EXPECT(json_object_get(a, "reasoning") == NULL);
     json_decref(msgs);
+
+    /* A required member rides along empty, so the text is still sent only once. */
+    struct chat_reasoning_replay required = replay_field("reasoning");
+    required.required = 1;
+    msgs = chat_build_messages(NULL, items, 2, required, "openrouter", "m1", -1);
+    a = find_role(msgs, "assistant");
+    EXPECT(a != NULL);
+    EXPECT(json_array_size(json_object_get(a, "reasoning_details")) == 1);
+    EXPECT_STR_EQ(json_string_value(json_object_get(a, "reasoning")), "");
+    json_decref(msgs);
 }
 
 /* A reasoning-only turn (the leak case) still emits an assistant message so
@@ -315,6 +325,38 @@ static void test_reasoning_skipped_on_provenance_mismatch(void)
     EXPECT(a != NULL);
     EXPECT(json_object_get(a, "reasoning_content") == NULL);
     EXPECT_STR_EQ(json_string_value(json_object_get(a, "content")), "Unstamped.");
+    json_decref(msgs);
+}
+
+/* A required member reaches every assistant message, empty where nothing replays, but never
+ * conjures a message out of reasoning that does not replay. */
+static void test_required_reasoning_fills_empty(void)
+{
+    struct item items[] = {
+        {.kind = ITEM_USER_MESSAGE, .text = "q"},
+        {.kind = ITEM_REASONING, .reasoning_text = "stale", .provider = "other", .model = "m1"},
+        {.kind = ITEM_TOOL_CALL, .call_id = "c1", .tool_name = "read", .tool_arguments_json = "{}"},
+        {.kind = ITEM_TOOL_RESULT, .call_id = "c1", .output = "x"},
+        {.kind = ITEM_REASONING, .reasoning_text = "", .provider = "deepseek", .model = "m1"},
+        {.kind = ITEM_ASSISTANT_MESSAGE, .text = "done"},
+        {.kind = ITEM_REASONING, .reasoning_text = "orphan", .provider = "other", .model = "m1"},
+    };
+    struct chat_reasoning_replay replay = replay_field("reasoning_content");
+    replay.required = 1;
+    json_t *msgs = chat_build_messages(NULL, items, 7, replay, "deepseek", "m1", -1);
+    EXPECT(json_array_size(msgs) == 4);
+    json_t *call = json_array_get(msgs, 1);
+    json_t *answer = json_array_get(msgs, 3);
+    EXPECT(json_object_get(call, "tool_calls") != NULL);
+    EXPECT_STR_EQ(json_string_value(json_object_get(call, "reasoning_content")), "");
+    EXPECT_STR_EQ(json_string_value(json_object_get(answer, "reasoning_content")), "");
+    json_decref(msgs);
+
+    /* Without a known member there is nothing to fill. */
+    struct chat_reasoning_replay recorded = REPLAY_RECORDED;
+    recorded.required = 1;
+    msgs = chat_build_messages(NULL, items, 6, recorded, "deepseek", "m1", -1);
+    EXPECT(json_object_get(json_array_get(msgs, 1), "reasoning_content") == NULL);
     json_decref(msgs);
 }
 
@@ -682,6 +724,7 @@ int main(void)
     test_reasoning_only_turn();
     test_reasoning_only_field_null_emits_nothing();
     test_reasoning_skipped_on_provenance_mismatch();
+    test_required_reasoning_fills_empty();
     test_tool_result_image_followup();
     test_cache_plan_follows_model_rates();
     test_build_body_composition();

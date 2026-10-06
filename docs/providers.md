@@ -2,7 +2,8 @@
 
 Start hax interactively and use `/provider` for the easiest setup: unavailable entries include a
 reason, and choosing a provider continues into model and reasoning-effort pickers when supported.
-Selections are remembered in `state.json`.
+Selections are remembered in `state.json`. Unless a section below says otherwise, a provider has no
+default model: pick one with `/model`, `--model`, or `model` in config.
 
 For one run, use CLI flags or environment variables:
 
@@ -24,16 +25,15 @@ keys in environment variables rather than command arguments or `config.json`.
 | `openrouter` | Many vendors through one API | `OPENROUTER_API_KEY`; choose a model. |
 | `opencode-zen` | Curated pay-as-you-go models | `OPENCODE_API_KEY`; choose a model. |
 | `opencode-go` | OpenCode's model subscription | `OPENCODE_API_KEY`; choose a model. |
+| `deepseek` | Direct DeepSeek API | `DEEPSEEK_API_KEY`; choose a model. |
 | `llama.cpp` | Local `llama-server` | Start the server; model is normally discovered. |
 | `ollama` | Local Ollama models | Start `ollama serve`; choose a pulled model. |
 | `openai-compatible` | OpenAI Chat Completions-compatible endpoint | Base URL; usually choose a model. |
 | `anthropic-compatible` | Anthropic Messages-compatible proxy/server | Base URL; usually choose a model. |
 
-When no provider is selected, hax picks the first available one: the hosted providers (Codex,
-OpenAI, Anthropic, OpenRouter, OpenCode), then the local servers (llama.cpp, Ollama), then the
-generic compatible endpoints and any user-defined providers. Auto-selection is convenient
-interactively; pass a provider explicitly in automation so a newly available backend cannot change
-a script's behavior.
+When no provider is selected, hax picks the first available one in table order, then any
+user-defined providers. Auto-selection is convenient interactively; pass a provider explicitly in
+automation so a newly available backend cannot change a script's behavior.
 
 If an explicitly selected provider cannot start, the REPL opens without one and directs you to
 `/provider`; one-shot mode exits with an error. A one-shot banner on stderr identifies the provider,
@@ -92,13 +92,7 @@ export OPENAI_API_KEY=...
 hax --provider=openai
 ```
 
-OpenAI has no fixed model default. Choose one with `/model`, set `model` in config, or pass
-`--model`. hax uses `https://api.openai.com/v1` with the Responses API — the best fit for current
-reasoning models and tool calls. Credentials come from `OPENAI_API_KEY`, and the endpoint is
-pinned: no setting can redirect the key elsewhere or change the protocol. A `providers.openai`
-config block accepts the same advanced fields as custom providers (minus the pinned `base_url`
-and `api`), though they are rarely needed; an OpenAI-shaped endpoint elsewhere belongs in a
-[custom provider](#custom-providers).
+For an OpenAI-shaped endpoint elsewhere, use a [custom provider](#custom-providers).
 
 ## Anthropic
 
@@ -107,14 +101,9 @@ export ANTHROPIC_API_KEY=...
 hax --provider=anthropic
 ```
 
-Choose a model with `/model`, config, or `--model`. hax uses `https://api.anthropic.com/v1` with
-credentials from `ANTHROPIC_API_KEY`; the endpoint is pinned.
-
-Thinking follows model metadata: adaptive, with `/effort` levels, on current models and budget
-thinking on older ones. Prompt caching is enabled with a 1h TTL, and the output-token limit follows
-model metadata when available (falling back to 32000); a `providers.anthropic` config block can
-override advanced fields such as `max_tokens` when an older model needs it. A different endpoint —
-a proxy, say — belongs in a [custom provider](#custom-providers).
+Prompts are cached with a 1h TTL. If an older model rejects the default output limit, set
+`providers.anthropic.max_tokens`. For a proxy or another endpoint, use a
+[custom provider](#custom-providers).
 
 ## OpenRouter
 
@@ -123,12 +112,8 @@ export OPENROUTER_API_KEY=...
 hax --provider=openrouter --model=anthropic/claude-sonnet-5
 ```
 
-OpenRouter has no fixed model default. `/model` lists its catalog, and `/effort` requests reasoning on
-models that expose it. Credentials come from `OPENROUTER_API_KEY`.
-
-OpenRouter reports per-response cost, which hax uses in turn stats and `/session`; `/usage` shows API
-key spend and available credits. Model metadata also supplies context limits and image/tool
-capabilities when available.
+Turn stats and `/session` show the cost OpenRouter reports; `/usage` shows API key spend and
+available credits.
 
 The [transcript](debugging.md#transcript-log) reports the upstream endpoint OpenRouter routed each
 response to, which is how to confirm that `extra_body` routing preferences took effect.
@@ -163,10 +148,8 @@ export OPENCODE_API_KEY=...
 hax --provider=opencode-zen --model=kimi-k2.7-code
 ```
 
-Use `/model` to choose a model; hax automatically uses the API required by each supported model.
-Gemini entries are not supported because their API is not implemented. If a newly added model is not
-yet described by the model catalog, see the `model_apis` override under
-[Custom providers](#custom-providers).
+Gemini models are not supported. If a newly added model fails because the model catalog does not
+describe it yet, see the `model_apis` override under [Custom providers](#custom-providers).
 
 On `opencode-go`, `/usage` shows the subscription's rolling, weekly, and monthly limits. Zen does
 not expose usage through its API, so check the OpenCode dashboard instead.
@@ -174,6 +157,20 @@ not expose usage through its API, so check the OpenCode dashboard instead.
 Requests carry the conversation id as `x-opencode-session`, which the gateway requires for
 routing and prompt caching, and `x-opencode-client: hax`. Both can be overridden in
 `extra_headers` ([below](#request-passthrough)).
+
+## DeepSeek
+
+```sh
+export DEEPSEEK_API_KEY=...
+hax --provider=deepseek --model=deepseek-flash
+```
+
+`/usage` shows the account balance. Cost estimates use off-peak prices; weekday peak hours
+(01:00–04:00 and 06:00–10:00 UTC) cost double.
+
+DeepSeek may train on what you send, code included, and stores it in China. Review its
+[privacy policy](https://cdn.deepseek.com/policies/en-US/deepseek-privacy-policy.html) and training
+opt-out before sending proprietary code.
 
 ## llama.cpp
 
@@ -196,9 +193,9 @@ server's catalog with load state, context size, and image capability. Selecting 
 loading it in the background, which can take a while; hax never loads a model you did not select.
 With `--no-models-autoload`, load models through llama.cpp's own tooling and pick a running one.
 
-hax probes llama.cpp for context and image capability when possible. Start the server with a context
-large enough for an agent session; the llama.cpp default is often too small once system instructions,
-project context, tool results, and the desired output are combined.
+Start the server with a context large enough for an agent session; the llama.cpp default is often
+too small once system instructions, project context, tool results, and the desired output are
+combined.
 
 ## Ollama
 
@@ -332,7 +329,7 @@ Advanced fields depend on the protocol:
 
 | `api` | Advanced fields |
 | --- | --- |
-| `openai-completions` | `reasoning_format`, `reasoning_roundtrip`, `send_cache_key`, `request_cost`, `cache`, `cache_ttl` |
+| `openai-completions` | `reasoning_format`, `reasoning_roundtrip`, `reasoning_required`, `send_cache_key`, `request_cost`, `cache`, `cache_ttl` |
 | `openai-responses` | `send_cache_key` |
 | `anthropic-messages` | `max_tokens`, `thinking_mode`, `thinking_budget`, `cache`, `cache_ttl`, `version` |
 
@@ -343,7 +340,9 @@ documents a need; selecting a provider warns about block members hax does not re
 
 Reasoning replay needs no setup: hax returns a model's reasoning in the field the server streamed it
 in. Set `reasoning_roundtrip` to a field name only for a server that reads reasoning from a
-different field, or to `off` for one that rejects it.
+different field, or to `off` for one that rejects it. Turn `reasoning_required` on for a server
+that rejects tool calls without their reasoning, such as a proxy to DeepSeek; it takes effect once
+the field is known from `catalog_id` or `reasoning_roundtrip`.
 
 Every provider reads only its own block. The `HAX_OPENAI_*` and `HAX_ANTHROPIC_*` variables belong
 to the shipped `openai-compatible` / `anthropic-compatible` blocks and do not bleed into others;

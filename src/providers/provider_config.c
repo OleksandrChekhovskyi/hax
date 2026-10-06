@@ -41,6 +41,7 @@ static const struct provider_field PROVIDER_FIELDS[] = {
     {.leaf = "request_cost",        .classes = PROVIDER_FIELD_OPENAI_CHAT},
     {.leaf = "reasoning_format",    .classes = PROVIDER_FIELD_OPENAI_CHAT},
     {.leaf = "reasoning_roundtrip", .classes = PROVIDER_FIELD_OPENAI_CHAT},
+    {.leaf = "reasoning_required",  .classes = PROVIDER_FIELD_OPENAI_CHAT},
     {.leaf = "max_tokens",          .classes = PROVIDER_FIELD_ANTHROPIC},
     {.leaf = "thinking_mode",       .classes = PROVIDER_FIELD_ANTHROPIC},
     {.leaf = "thinking_budget",     .classes = PROVIDER_FIELD_ANTHROPIC},

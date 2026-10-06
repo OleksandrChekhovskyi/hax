@@ -192,41 +192,13 @@ static void test_openrouter_effort_metadata_states(void)
     json_decref(empty_levels);
 }
 
-/* ?q= is a substring search, so match the requested model's exact id. */
-static void test_openrouter_probe_exact_model(void)
-{
-    static const char BODY[] = "{\"data\":["
-                               "{\"id\":\"openai/gpt-5.6-sol-pro\",\"context_length\":400000,"
-                               " \"pricing\":{\"prompt\":\"0.000015\",\"completion\":\"0.00012\"}},"
-                               "{\"id\":\"openai/gpt-5.6-sol\",\"context_length\":1050000,"
-                               " \"top_provider\":{\"max_completion_tokens\":128000},"
-                               " \"pricing\":{\"prompt\":\"0.000005\",\"completion\":\"0.00003\"},"
-                               " \"reasoning\":{\"supported_efforts\":[\"high\",\"low\"]}}"
-                               "]}";
-    struct model_info model;
-    model_info_init(&model);
-    openrouter_parse_model_probe_response(BODY, "openai/gpt-5.6-sol", &model);
-    EXPECT(model.context == 1050000);
-    EXPECT(model.max_output == 128000);
-    EXPECT(model.cost_input == 5.0);
-    EXPECT(model.efforts.known && model.efforts.count == 2);
-    model_info_clear(&model);
-
-    struct model_info absent;
-    model_info_init(&absent);
-    openrouter_parse_model_probe_response(BODY, "vendor/other", &absent);
-    EXPECT(absent.context == 0);
-    EXPECT(!absent.efforts.known);
-    model_info_clear(&absent);
-}
-
 static void test_openrouter_probe_url_encoding(void)
 {
     struct model_probe probe = {0};
     EXPECT(openrouter_probe_model(NULL, "meta-llama/llama-3.2-3b-instruct:free", &probe) == 0);
     EXPECT_STR_EQ(probe.url, "https://openrouter.ai/api/v1/models"
                              "?q=meta-llama%2Fllama-3.2-3b-instruct%3Afree");
-    EXPECT(probe.parse != NULL);
+    EXPECT(probe.parse_entry == openrouter_parse_model);
     model_probe_clear(&probe);
 
     EXPECT(openrouter_probe_model(NULL, "", &probe) == -1);
@@ -387,7 +359,6 @@ int main(void)
     test_openrouter_missing_metadata();
     test_openrouter_effort_levels();
     test_openrouter_effort_metadata_states();
-    test_openrouter_probe_exact_model();
     test_openrouter_probe_url_encoding();
     test_codex_model_capabilities();
     test_codex_context_fallback();

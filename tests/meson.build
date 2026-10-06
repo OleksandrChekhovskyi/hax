@@ -63,6 +63,7 @@ test_sources = [
     'providers/test_codex_auth.c',
     'providers/test_codex_login.c',
     'providers/test_codex_settings.c',
+    'providers/test_deepseek.c',
     'providers/test_provider_config.c',
     'providers/test_http_provider.c',
     'providers/test_llamacpp.c',

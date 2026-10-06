@@ -16,9 +16,14 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   `hax --preset review`, and `hax review -p "..."` works the same way in one-shot mode.
 - `/session` shows a token row per model when the conversation switched models, how many user
   turns `/undo` removed, and what a fork inherited from its source.
+- DeepSeek provider (`deepseek`): set `DEEPSEEK_API_KEY`; `/usage` shows the account balance.
+- `reasoning_required` provider setting for Chat Completions servers that reject tool calls
+  without their reasoning, such as a proxy to DeepSeek.
 
 ### Changed
 
+- `HAX_REASONING_ROUNDTRIP` is renamed `HAX_OPENAI_REASONING_ROUNDTRIP`, like the other variables
+  that configure `openai-compatible`; the old name is no longer read.
 - After a pause or interruption, "enter to continue" now appears as a placeholder in the prompt
   instead of a separate hint line, and continuing leaves no empty prompt behind.
 - Prompt history (Up, Ctrl-R) is scoped to the working directory like sessions: each directory

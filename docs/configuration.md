@@ -322,10 +322,9 @@ When `no_tasks` is on, reaching `bash.timeout` kills the command instead of deta
 ### Provider settings
 
 Every provider reads settings only from its own `providers.<id>` block; nothing bleeds between
-providers. For the first-party providers the endpoint, protocol, and credential variable
-(`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`) are pinned — `base_url` and `api`
-in their blocks warn and are ignored, so no setting can redirect a first-party key or change what
-it speaks. Their other advanced fields (the same ones
+providers. Most shipped hosted providers, such as `openai` and `deepseek`, pin their endpoint,
+protocol, and credential variable: `base_url` and `api` in their blocks warn and are ignored, so no
+setting can redirect their key or change what it speaks. Their other advanced fields (the same ones
 [custom providers](./providers.md#custom-providers) accept) are honored but rarely needed; a
 different endpoint is a custom provider, not a tweak. Codex is pinned the same way, and its
 credentials come from the ChatGPT login ([`/login`](./providers.md#codex)) rather than a key, so
@@ -344,7 +343,8 @@ Keys in the `providers.openai-compatible` block:
 | `display_name` | `HAX_OPENAI_DISPLAY_NAME` | — | Banner and picker name. |
 | `api` | `HAX_OPENAI_API` | `chat` | `chat` (Chat Completions) or `responses`. |
 | `reasoning_format` | `HAX_OPENAI_REASONING_FORMAT` | `flat` | Effort request shape: `flat` or `nested`. |
-| `reasoning_roundtrip` | `HAX_REASONING_ROUNDTRIP` | `auto` | Replay reasoning text: `auto`, `off`, or a field name. |
+| `reasoning_roundtrip` | `HAX_OPENAI_REASONING_ROUNDTRIP` | `auto` | Replay reasoning text: `auto`, `off`, or a field name. |
+| `reasoning_required` | `HAX_OPENAI_REASONING_REQUIRED` | `auto` | Send the reasoning field on every assistant message, even empty. |
 | `send_cache_key` | `HAX_OPENAI_SEND_CACHE_KEY` | `auto` | Send a stable prompt-cache key. |
 | `request_cost` | `HAX_OPENAI_REQUEST_COST` | `auto` | Request provider-specific per-response cost data. |
 | `cache` | `HAX_OPENAI_CACHE` | `auto` | Send explicit prompt-cache breakpoints. |

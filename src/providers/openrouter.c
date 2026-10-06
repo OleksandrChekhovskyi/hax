@@ -15,8 +15,7 @@
 #include "provider.h"
 #include "xalloc.h"
 #include "providers/provider_config.h"
-#include "render/ctrl_strip.h"
-#include "terminal/ansi.h"
+#include "providers/usage_render.h"
 #include "terminal/ui.h"
 #include "text/fmt.h"
 #include "transport/http.h"
@@ -32,19 +31,6 @@
 static const char *openrouter_api_key(void)
 {
     return provider_api_key("providers.openrouter", "OPENROUTER_API_KEY");
-}
-
-/* A missing or malformed capability list is unknown, not unsupported. */
-static enum provider_cap capability_from_array(const json_t *array, const char *value)
-{
-    if (!json_is_array(array))
-        return PROVIDER_CAP_UNKNOWN;
-    for (size_t i = 0; i < json_array_size(array); i++) {
-        const char *item = json_string_value(json_array_get(array, i));
-        if (item && strcmp(item, value) == 0)
-            return PROVIDER_CAP_YES;
-    }
-    return PROVIDER_CAP_NO;
 }
 
 /* OpenRouter reports USD per token; model_info stores USD per million tokens. */
@@ -128,8 +114,8 @@ void openrouter_parse_model(const json_t *entry, struct model_info *info)
     json_t *architecture = json_object_get(entry, "architecture");
     json_t *input_modalities =
         json_is_object(architecture) ? json_object_get(architecture, "input_modalities") : NULL;
-    info->image_input = capability_from_array(input_modalities, "image");
-    info->tools = capability_from_array(json_object_get(entry, "supported_parameters"), "tools");
+    info->image_input = provider_cap_listed(input_modalities, "image");
+    info->tools = provider_cap_listed(json_object_get(entry, "supported_parameters"), "tools");
 
     json_t *pricing = json_object_get(entry, "pricing");
     if (json_is_object(pricing)) {
@@ -174,29 +160,6 @@ void openrouter_parse_efforts(const json_t *entry, struct effort_set *efforts)
         effort_set_add(efforts, json_string_value(json_array_get(levels, i)));
 }
 
-void openrouter_parse_model_probe_response(const char *body, const char *model,
-                                           struct model_info *info)
-{
-    json_t *root = json_loads(body, 0, NULL);
-    if (!root)
-        return;
-
-    json_t *models = json_object_get(root, "data");
-    if (json_is_array(models)) {
-        size_t index;
-        json_t *entry;
-        json_array_foreach(models, index, entry)
-        {
-            const char *id = json_string_value(json_object_get(entry, "id"));
-            if (id && strcmp(id, model) == 0) {
-                openrouter_parse_model(entry, info);
-                break;
-            }
-        }
-    }
-    json_decref(root);
-}
-
 static char *encode_query_value(const char *value)
 {
     static const char HEX[] = "0123456789ABCDEF";
@@ -234,32 +197,25 @@ int openrouter_probe_model(struct provider *provider, const char *model, struct 
     string_array_free(extra_headers);
     free(authorization);
     probe->timeout_s = MODEL_PROBE_TIMEOUT_S;
-    probe->parse = openrouter_parse_model_probe_response;
+    probe->parse_entry = openrouter_parse_model;
     return 0;
 }
-
-#define USAGE_LABEL_WIDTH 11
 
 static void print_key_usage(const json_t *data)
 {
     const char *label = json_string_value(json_object_get(data, "label"));
-    printf(ANSI_DIM "openrouter");
-    /* Default labels contain a masked API key, which should not enter scrollback; a custom
-     * label is server text, so keep terminal controls out of it. */
-    if (label && *label && strncmp(label, "sk-", 3) != 0) {
-        char *safe_label = ctrl_strip_line_dup(label);
-        printf(" · %s", safe_label);
-        free(safe_label);
-    }
-    if (json_is_true(json_object_get(data, "is_free_tier")))
-        printf(" · free tier");
-    printf(ANSI_RESET "\n");
+    /* Default labels contain a masked API key, which should not enter scrollback. */
+    const char *details[] = {
+        label && strncmp(label, "sk-", 3) != 0 ? label : NULL,
+        json_is_true(json_object_get(data, "is_free_tier")) ? "free tier" : NULL,
+    };
+    usage_heading_print("openrouter", details, 2);
 
     char amount[32];
     json_t *spent = json_object_get(data, "usage");
     if (json_is_number(spent)) {
         format_cost(amount, sizeof(amount), json_number_value(spent));
-        printf("  " ANSI_DIM "%-*s%s" ANSI_RESET "\n", USAGE_LABEL_WIDTH, "spent", amount);
+        usage_value_print("spent", "%s", amount);
     }
 
     json_t *limit = json_object_get(data, "limit");
@@ -267,13 +223,14 @@ static void print_key_usage(const json_t *data)
         return;
 
     format_cost(amount, sizeof(amount), json_number_value(limit));
-    printf("  " ANSI_DIM "%-*s%s", USAGE_LABEL_WIDTH, "key limit", amount);
     json_t *remaining = json_object_get(data, "limit_remaining");
     if (json_is_number(remaining)) {
-        format_cost(amount, sizeof(amount), json_number_value(remaining));
-        printf(" · %s remaining", amount);
+        char remaining_text[32];
+        format_cost(remaining_text, sizeof(remaining_text), json_number_value(remaining));
+        usage_value_print("limit", "%s · %s remaining", amount, remaining_text);
+    } else {
+        usage_value_print("limit", "%s", amount);
     }
-    printf(ANSI_RESET "\n");
 }
 
 static void print_account_credits(const char *body)
@@ -296,8 +253,7 @@ static void print_account_credits(const char *body)
     char remaining_text[32], total_text[32];
     format_cost(remaining_text, sizeof(remaining_text), remaining);
     format_cost(total_text, sizeof(total_text), json_number_value(total));
-    printf("  " ANSI_DIM "%-*s%s of %s remaining" ANSI_RESET "\n", USAGE_LABEL_WIDTH, "credits",
-           remaining_text, total_text);
+    usage_value_print("credits", "%s of %s remaining", remaining_text, total_text);
 
 out:
     json_decref(root);

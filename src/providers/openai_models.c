@@ -11,7 +11,8 @@
 #include "transport/api_error.h"
 #include "transport/http.h"
 
-#define MODEL_LIST_TIMEOUT_S 10
+#define MODEL_LIST_TIMEOUT_S  10
+#define MODEL_PROBE_TIMEOUT_S 5
 
 int openai_list_models(struct provider *provider, struct model_info **models, size_t *n_models,
                        char **error, http_tick_cb tick, void *tick_user)
@@ -83,5 +84,18 @@ int openai_list_models(struct provider *provider, struct model_info **models, si
 
     *models = available;
     *n_models = n_available;
+    return 0;
+}
+
+int openai_probe_model(struct provider *provider, const char *model, struct model_probe *probe)
+{
+    http_parse_model_cb parse_model = http_provider_parse_model(provider);
+    if (!parse_model || !model || !*model)
+        return -1;
+
+    probe->url = xasprintf("%s/models", http_provider_base_url(provider));
+    probe->headers = http_provider_metadata_headers(provider);
+    probe->timeout_s = MODEL_PROBE_TIMEOUT_S;
+    probe->parse_entry = parse_model;
     return 0;
 }

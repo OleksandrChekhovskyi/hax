@@ -826,6 +826,18 @@ static void test_usage_captured_from_trailing_chunk(void)
     EVENTS_FIXTURE_FREE(capture, parser);
 }
 
+static void test_usage_deepseek_cache_hits(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish(&parser, "stop");
+    chat_events_feed(&parser, "{\"choices\":[],\"usage\":{\"prompt_tokens\":1000,"
+                              "\"completion_tokens\":5,\"prompt_cache_hit_tokens\":900,"
+                              "\"prompt_cache_miss_tokens\":100}}");
+    chat_events_feed(&parser, "[DONE]");
+    EXPECT(capture.events[0].usage.cached_tokens == 900);
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
 static void test_usage_without_cached_details(void)
 {
     EVENTS_FIXTURE(capture, parser);
@@ -1033,6 +1045,7 @@ int main(void)
     test_finalize_after_finish_without_sentinel_emits_done();
     test_usage_default_unknown();
     test_usage_captured_from_trailing_chunk();
+    test_usage_deepseek_cache_hits();
     test_usage_without_cached_details();
     test_usage_cost_captured();
     test_response_identity_captured_from_chunks();

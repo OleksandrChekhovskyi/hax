@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: MIT */
+#include <jansson.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -125,6 +126,48 @@ static void test_request_cleanup(void)
     provider_availability_clear(NULL);
 }
 
+static void record_context(const json_t *entry, struct model_info *out)
+{
+    out->context = (long)json_integer_value(json_object_get(entry, "n"));
+}
+
+/* Listings are often searched by substring, so only the exact id may refine the report. */
+static void test_probe_listing_locator(void)
+{
+    struct model_probe probe = {.parse_entry = record_context};
+    struct model_info info;
+    model_info_init(&info);
+    model_probe_parse(&probe, "{\"data\":[{\"id\":\"m-pro\",\"n\":1},{\"id\":\"m\",\"n\":2}]}", "m",
+                      &info);
+    EXPECT(info.context == 2);
+
+    probe.list_member = "models";
+    probe.id_member = "slug";
+    model_probe_parse(&probe, "{\"models\":[{\"slug\":\"m\",\"n\":3}]}", "m", &info);
+    EXPECT(info.context == 3);
+
+    /* Absent ids, other shapes, and non-JSON leave the report untouched. */
+    model_probe_parse(&probe, "{\"models\":[{\"slug\":\"other\",\"n\":4}]}", "m", &info);
+    model_probe_parse(&probe, "{\"data\":[{\"slug\":\"m\",\"n\":5}]}", "m", &info);
+    model_probe_parse(&probe, "{\"models\":{\"slug\":\"m\",\"n\":6}}", "m", &info);
+    model_probe_parse(&probe, "not json", "m", &info);
+    EXPECT(info.context == 3);
+    model_info_clear(&info);
+}
+
+static void test_capability_lists(void)
+{
+    json_t *list = json_loads("[\"text\", 7, \"image\"]", 0, NULL);
+    EXPECT(provider_cap_listed(list, "image") == PROVIDER_CAP_YES);
+    EXPECT(provider_cap_listed(list, "audio") == PROVIDER_CAP_NO);
+    json_decref(list);
+
+    json_t *not_list = json_string("image");
+    EXPECT(provider_cap_listed(not_list, "image") == PROVIDER_CAP_UNKNOWN);
+    EXPECT(provider_cap_listed(NULL, "image") == PROVIDER_CAP_UNKNOWN);
+    json_decref(not_list);
+}
+
 static void test_provenance_matching(void)
 {
     /* The former llamacpp id maps to the current one; everything else passes through. */
@@ -156,6 +199,8 @@ int main(void)
     test_item_free();
     test_model_info_lifecycle();
     test_request_cleanup();
+    test_probe_listing_locator();
+    test_capability_lists();
     test_provenance_matching();
     T_REPORT();
 }

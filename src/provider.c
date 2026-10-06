@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "provider.h"
 
+#include <jansson.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -109,6 +110,21 @@ void turn_usage_free(struct turn_usage *usage)
     free(usage);
 }
 
+enum provider_cap provider_cap_listed(const json_t *list, const char *value)
+{
+    if (!json_is_array(list))
+        return PROVIDER_CAP_UNKNOWN;
+    size_t index;
+    json_t *member;
+    json_array_foreach(list, index, member)
+    {
+        const char *text = json_string_value(member);
+        if (text && strcmp(text, value) == 0)
+            return PROVIDER_CAP_YES;
+    }
+    return PROVIDER_CAP_NO;
+}
+
 void model_info_init(struct model_info *info)
 {
     memset(info, 0, sizeof(*info));
@@ -140,6 +156,32 @@ void model_info_free(struct model_info *models, size_t n_models)
     for (size_t i = 0; i < n_models; i++)
         model_info_clear(&models[i]);
     free(models);
+}
+
+void model_probe_parse(const struct model_probe *probe, const char *body, const char *model,
+                       struct model_info *out)
+{
+    if (probe->parse) {
+        probe->parse(body, model, out);
+        return;
+    }
+    if (!probe->parse_entry)
+        return;
+
+    json_t *root = json_loads(body, 0, NULL);
+    json_t *entries = json_object_get(root, probe->list_member ? probe->list_member : "data");
+    const char *id_member = probe->id_member ? probe->id_member : "id";
+    size_t index;
+    json_t *entry;
+    json_array_foreach(entries, index, entry)
+    {
+        const char *id = json_string_value(json_object_get(entry, id_member));
+        if (id && strcmp(id, model) == 0) {
+            probe->parse_entry(entry, out);
+            break;
+        }
+    }
+    json_decref(root);
 }
 
 void model_probe_clear(struct model_probe *probe)

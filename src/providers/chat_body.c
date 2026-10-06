@@ -116,11 +116,14 @@ static size_t append_assistant_message(json_t *messages, const struct item *item
     }
 
     const char *reasoning_field = replay_member(replay, recorded_field);
-    /* The typed sequence is the richer encoding of the same reasoning: sending the plain member
-     * alongside it would duplicate the content. */
-    int include_reasoning = reasoning_field && reasoning.len > 0 && !details;
-    if (text.len == 0 && !tool_calls && !include_reasoning && !details)
+    /* The typed sequence is the richer encoding of the same reasoning: the plain member carries
+     * the text only without it, or else stays empty where the endpoint requires it. */
+    const char *plain_reasoning =
+        reasoning_field && reasoning.len > 0 && !details ? reasoning.data : NULL;
+    if (text.len == 0 && !tool_calls && !plain_reasoning && !details)
         goto out;
+    if (!plain_reasoning && replay.required && reasoning_field)
+        plain_reasoning = "";
 
     json_t *message = json_object();
     json_object_set_new(message, "role", json_string("assistant"));
@@ -134,8 +137,8 @@ static size_t append_assistant_message(json_t *messages, const struct item *item
         json_object_set_new(message, "tool_calls", tool_calls);
     if (details)
         json_object_set_new(message, "reasoning_details", details);
-    else if (include_reasoning)
-        json_object_set_new(message, reasoning_field, json_string(reasoning.data));
+    if (plain_reasoning)
+        json_object_set_new(message, reasoning_field, json_string(plain_reasoning));
     json_array_append_new(messages, message);
 
 out:

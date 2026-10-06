@@ -2,6 +2,7 @@
 #ifndef HAX_PROVIDER_H
 #define HAX_PROVIDER_H
 
+#include <jansson.h>
 #include <stddef.h>
 
 #include "catalog.h"
@@ -284,6 +285,10 @@ enum provider_cap {
     PROVIDER_CAP_NO = 2,
 };
 
+/* Whether the JSON string array `list` contains `value`; a missing or malformed list is unknown,
+ * not unsupported. */
+enum provider_cap provider_cap_listed(const json_t *list, const char *value);
+
 /* Raw metadata reported by a provider for one model. Every field after `id` is optional;
  * model_info_init establishes the unknown sentinels. Resolved metadata belongs in model_meta.h. */
 struct model_info {
@@ -328,7 +333,18 @@ struct model_probe {
     /* Locate `model` in the response and fill initialized `out`. Runs off-thread without access to
      * the provider, so implementations must be pure and thread-safe. */
     void (*parse)(const char *body, const char *model, struct model_info *out);
+    /* Instead of `parse`, for a response listing models in an array of objects: the root member
+     * holding the array (NULL → "data"), each entry's id member (NULL → "id"), and the refinement
+     * applied to the entry whose id is `model`, under the same purity contract. Static strings. */
+    const char *list_member;
+    const char *id_member;
+    void (*parse_entry)(const json_t *entry, struct model_info *out);
 };
+
+/* Fill initialized `out` from a probe response through `probe`'s parse or listing locator. A
+ * response that is not JSON, or lists no entry for `model`, leaves `out` untouched. */
+void model_probe_parse(const struct model_probe *probe, const char *body, const char *model,
+                       struct model_info *out);
 
 /* Release all request fields owned by `probe` and leave it zeroed. NULL-safe. */
 void model_probe_clear(struct model_probe *probe);

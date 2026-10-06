@@ -7,16 +7,13 @@
 #include <string.h>
 #include <time.h>
 
-#include "busy.h"
 #include "provider.h"
 #include "xalloc.h"
 #include "providers/http_provider.h"
+#include "providers/usage_fetch.h"
 #include "providers/usage_render.h"
-#include "terminal/ansi.h"
 #include "terminal/ui.h"
-#include "transport/http.h"
 
-#define OPENCODE_USAGE_TIMEOUT_S   30
 #define OPENCODE_USAGE_WINDOWS_MAX 8
 
 /* "2026-08-21T21:14:51.969Z" → epoch seconds, or -1 on any other shape. Fractional seconds are
@@ -109,49 +106,23 @@ int opencode_go_query_usage(struct provider *provider)
 
     char *url = xasprintf("%s/usage", http_provider_base_url(provider));
     char **headers = opencode_usage_headers(provider);
-    char *body = NULL;
-    json_t *root = NULL;
-    long status = 0;
-    int result = -1;
-
-    struct busy *busy = busy_begin("fetching usage...");
-    int request_result = http_get(url, (const char *const *)headers, OPENCODE_USAGE_TIMEOUT_S, 0,
-                                  busy_tick, NULL, &body, &status);
-    int cancelled = busy_end(busy);
+    json_t *root = usage_fetch_json(url, (const char *const *)headers, "opencode");
     string_array_free(headers);
-
-    if (cancelled)
-        goto out;
-    if (request_result != 0 || !body) {
-        if (status == 401)
-            ui_error("opencode rejected the configured API key (401)");
-        else
-            ui_error("failed to fetch usage from %s", url);
-        goto out;
-    }
-
-    json_error_t error;
-    root = json_loads(body, 0, &error);
-    if (!root) {
-        ui_error("usage response is not valid JSON: %s", error.text);
-        goto out;
-    }
+    free(url);
+    if (!root)
+        return -1;
 
     struct usage_window windows[OPENCODE_USAGE_WINDOWS_MAX];
     size_t n_windows = opencode_usage_parse(root, windows, OPENCODE_USAGE_WINDOWS_MAX);
     if (n_windows == 0) {
         ui_error("unrecognized usage response shape (no usage windows)");
-        goto out;
+        json_decref(root);
+        return -1;
     }
 
-    printf(ANSI_DIM "%s" ANSI_RESET "\n", provider->name);
+    usage_heading_print(provider->name, NULL, 0);
     for (size_t i = 0; i < n_windows; i++)
         usage_window_print(&windows[i]);
-    result = 0;
-
-out:
     json_decref(root);
-    free(body);
-    free(url);
-    return result;
+    return 0;
 }

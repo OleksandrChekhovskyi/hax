@@ -24,6 +24,9 @@ enum chat_replay_mode {
 struct chat_reasoning_replay {
     enum chat_replay_mode mode;
     const char *field; /* FIELD: borrowed member name */
+    /* FIELD: every assistant message carries the member, empty unless it replays plain reasoning
+     * text, for endpoints that reject a thinking-mode tool loop without it. */
+    int required;
 };
 
 enum chat_cache_mode {

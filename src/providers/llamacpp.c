@@ -260,16 +260,8 @@ void llamacpp_parse_model(const json_t *entry, struct model_info *info)
         info->context = (long)json_integer_value(context);
 
     json_t *architecture = json_object_get(entry, "architecture");
-    json_t *modalities = architecture ? json_object_get(architecture, "input_modalities") : NULL;
-    if (json_is_array(modalities)) {
-        info->image_input = PROVIDER_CAP_NO;
-        size_t modality_count = json_array_size(modalities);
-        for (size_t i = 0; i < modality_count; i++) {
-            const char *modality = json_string_value(json_array_get(modalities, i));
-            if (modality && strcmp(modality, "image") == 0)
-                info->image_input = PROVIDER_CAP_YES;
-        }
-    }
+    info->image_input =
+        provider_cap_listed(json_object_get(architecture, "input_modalities"), "image");
 
     /* Most router models sit unloaded; flag only the exceptions. A failed load reports as
      * unloaded plus a failed marker and exit code. */
