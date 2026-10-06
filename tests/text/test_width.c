@@ -546,6 +546,108 @@ static void test_reflow_last_row_reserve(void)
     free(out);
 }
 
+static void test_reflow_last_row_breaks_after_mark_in_token(void)
+{
+    /* A collapsed header row on a 106-column terminal. */
+    const char *cmd = "rg -n 'hello\\.txt|interrupt_stall\\.txt|tool_roundtrip\\.txt|"
+                      "test_oneshot_(json|signal_interrupt|text|tool)' --glob '!build/**' .";
+    char *out = reflow_for_display(cmd, 98, 98, 1, 0);
+    EXPECT_STR_EQ(out, "rg -n 'hello\\.txt|interrupt_stall\\.txt|tool_roundtrip\\.txt|"
+                       "test_oneshot_(json|signal_interrupt|...");
+    free(out);
+}
+
+static void test_reflow_last_row_cuts_token_without_marks(void)
+{
+    char *out = reflow_for_display("rg -n abcdefghijklmnopqrstuvwxyz0123456789", 30, 30, 1, 0);
+    EXPECT_STR_EQ(out, "rg -n abcdefghijklmnopqrstu...");
+    free(out);
+}
+
+static void test_reflow_first_row_cuts_token_without_marks(void)
+{
+    /* Moving the token to the next row would leave it truncated there; splitting it fits. */
+    char *out = reflow_for_display("rg -n abcdefghijklmnopqrstuvwxyz0123", 20, 20, 2, 0);
+    EXPECT_STR_EQ(out, "rg -n abcdefghijklmn\nopqrstuvwxyz0123");
+    free(out);
+}
+
+static void test_reflow_space_break_up_to_slack_limit(void)
+{
+    /* 21 a's, a space, then a token that cannot fit: the word break leaves 16 of 37 cells
+     * unused, which is the most a wide row gives up. */
+    char input[53];
+    memset(input, 'a', 21);
+    input[21] = ' ';
+    memset(input + 22, 'b', 30);
+    input[52] = '\0';
+    char *out = reflow_for_display(input, 40, 40, 1, 0);
+    EXPECT_STR_EQ(out, "aaaaaaaaaaaaaaaaaaaaa...");
+    free(out);
+}
+
+static void test_reflow_cuts_token_past_slack_limit(void)
+{
+    /* One cell shorter than above: the word break would leave 17 cells unused. */
+    char input[52];
+    memset(input, 'a', 20);
+    input[20] = ' ';
+    memset(input + 21, 'b', 30);
+    input[51] = '\0';
+    char *out = reflow_for_display(input, 40, 40, 1, 0);
+    EXPECT_STR_EQ(out, "aaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbb...");
+    free(out);
+}
+
+static void test_reflow_breaks_after_mark(void)
+{
+    char *out = reflow_for_display("cat src/render/tool_render.c", 20, 20, 2, 0);
+    EXPECT_STR_EQ(out, "cat src/render/\ntool_render.c");
+    free(out);
+}
+
+static void test_reflow_prefers_space_over_later_mark(void)
+{
+    char *out = reflow_for_display("echo one/two three/four", 20, 20, 2, 0);
+    EXPECT_STR_EQ(out, "echo one/two\nthree/four");
+    free(out);
+}
+
+static void test_reflow_keeps_mark_runs_whole(void)
+{
+    char *out = reflow_for_display("cd build/out&&ls -la", 13, 13, 2, 0);
+    EXPECT_STR_EQ(out, "cd build/\nout&&ls -la");
+    free(out);
+}
+
+static void test_reflow_mark_break_keeps_combining_mark(void)
+{
+    /* U+0338 overlays the '=' and must stay on its row. */
+    char *out = reflow_for_display("abc=\xCC\xB8"
+                                   "defghijklmnop",
+                                   8, 8, 3, 0);
+    EXPECT_STR_EQ(out, "abc=\xCC\xB8\ndefghijk\nlmnop");
+    free(out);
+}
+
+static void test_reflow_last_row_mark_break_keeps_combining_mark(void)
+{
+    char *out = reflow_for_display("abc=\xCC\xB8"
+                                   "defghijklmnop",
+                                   11, 11, 1, 0);
+    EXPECT_STR_EQ(out, "abc=\xCC\xB8...");
+    free(out);
+}
+
+static void test_reflow_oversized_codepoint_takes_own_row(void)
+{
+    char *out = reflow_for_display("\xE7\x95\x8C"
+                                   "ab",
+                                   1, 1, 3, 0);
+    EXPECT_STR_EQ(out, "\xE7\x95\x8C\na\nb");
+    free(out);
+}
+
 static void test_reflow_null_input(void)
 {
     char *out = reflow_for_display(NULL, 80, 80, 3, 0);
@@ -684,6 +786,17 @@ int main(void)
     test_reflow_last_row_strict_for_wide_codepoint();
     test_reflow_reserve_applies_when_tail_fits_early();
     test_reflow_last_row_reserve();
+    test_reflow_last_row_breaks_after_mark_in_token();
+    test_reflow_last_row_cuts_token_without_marks();
+    test_reflow_first_row_cuts_token_without_marks();
+    test_reflow_space_break_up_to_slack_limit();
+    test_reflow_cuts_token_past_slack_limit();
+    test_reflow_breaks_after_mark();
+    test_reflow_prefers_space_over_later_mark();
+    test_reflow_keeps_mark_runs_whole();
+    test_reflow_mark_break_keeps_combining_mark();
+    test_reflow_last_row_mark_break_keeps_combining_mark();
+    test_reflow_oversized_codepoint_takes_own_row();
     test_reflow_null_input();
     test_reflow_empty_input();
     test_reflow_long_bash_command();

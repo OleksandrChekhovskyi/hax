@@ -24,9 +24,11 @@ size_t wrap_break_pos(const char *str, size_t length, size_t max_cells, size_t *
  * this row and the next; advance by the sum of both to continue. max_cells must be positive. */
 size_t wrap_row_bytes(const char *str, size_t max_cells, size_t *separator_bytes);
 
-/* Reflow a string to at most max_rows. first_row_cells and other_row_cells are row budgets;
- * last_row_reserve leaves room for a caller-owned suffix. Rows are joined by '\n', and overflow is
- * marked with "..." when space permits. Returns an allocated string; NULL input becomes empty. */
+/* Reflow a command-like string to at most max_rows. first_row_cells and other_row_cells are row
+ * budgets; last_row_reserve leaves room for a caller-owned suffix. Rows are joined by '\n', and
+ * overflow is marked with "..." when space permits. Rows end at a space when that leaves few cells
+ * unused, else after one of "|/,;&=", else mid-token, so a long token fills the row rather than
+ * moving past it. Returns an allocated string; NULL input becomes empty. */
 char *reflow_for_display(const char *str, int first_row_cells, int other_row_cells, int max_rows,
                          int last_row_reserve);
 

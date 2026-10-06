@@ -38,6 +38,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   session spent on, including undone user turns and retried requests.
 - Session files are append-only: `/undo` records the cut instead of truncating the file. Scripts
   reading session files should see [docs/sessions.md](docs/sessions.md) for the new records.
+- Tool-call headers split a long regex, path, or other long argument to fill the row, instead of
+  leaving it out of a truncated header.
 - Prompt and tool guidance favor native tools for ordinary file operations, and backgrounding when
   there is useful work to overlap rather than an immediate wait.
 - Custom providers no longer take their models.dev catalog identity from their own name; set
