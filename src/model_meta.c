@@ -16,9 +16,11 @@
 
 struct model_meta {
     struct bg_job *probe_job;
-    char *probe_model;     /* owned; model the active probe targets */
+    char *probe_model;     /* owned; model the active probe targets, NULL for a listing alone */
     long probe_started_ms; /* monotonic; anchors the shared model_meta_wait_ms budget */
     struct model_info reported;
+    char **listed_ids;            /* owned, NULL-terminated; NULL until a listing is seen */
+    unsigned long ids_generation; /* bumped by model_meta_store_ids */
 };
 
 /* Provider slots are foreground-owned; this lock protects reports shared with probe workers. */
@@ -57,6 +59,8 @@ void model_meta_release(struct provider *provider)
     cancel_probe(meta);
     pthread_mutex_lock(&report_lock);
     clear_report_locked(meta);
+    string_array_free(meta->listed_ids);
+    meta->listed_ids = NULL;
     pthread_mutex_unlock(&report_lock);
     free(meta);
     provider->meta = NULL;
@@ -64,7 +68,8 @@ void model_meta_release(struct provider *provider)
 
 struct probe_task {
     struct model_meta *target; /* valid until the owning provider joins the probe */
-    char *model_id;
+    char *model_id;            /* NULL when probing the listing alone */
+    unsigned long ids_generation;
     struct model_probe request;
 };
 
@@ -123,14 +128,23 @@ static void probe_worker(struct bg_job *job, void *arg)
     if (rc == 0 && body && !bg_job_cancel_requested(job)) {
         struct model_info report;
         model_info_init(&report);
-        report.id = xstrdup(task->model_id);
-        model_probe_parse(&task->request, body, task->model_id, &report);
+        report.id = task->model_id ? xstrdup(task->model_id) : NULL;
+        char **listed_ids = NULL;
+        model_probe_parse(&task->request, body, task->model_id, &report, &listed_ids);
 
         pthread_mutex_lock(&report_lock);
+        /* A listing stored since this probe started is newer than its response. */
+        if (listed_ids && task->ids_generation == task->target->ids_generation) {
+            string_array_free(task->target->listed_ids);
+            task->target->listed_ids = listed_ids;
+        } else {
+            string_array_free(listed_ids);
+        }
         /* A cancelled probe must not overwrite a newer selection after parsing. A retained
          * same-model report fills what the probe could not learn; an absent report is zeroed
          * state, not knowledge, and must not be merged from. */
-        if (!task->target->reported.id || strcmp(task->target->reported.id, task->model_id) == 0) {
+        if (task->model_id && (!task->target->reported.id ||
+                               strcmp(task->target->reported.id, task->model_id) == 0)) {
             if (task->target->reported.id)
                 report_fill_unknown(&report, &task->target->reported);
             clear_report_locked(task->target);
@@ -158,6 +172,8 @@ void model_meta_refresh(struct provider *provider, const char *model)
 {
     if (!provider || (!provider->probe_model && !provider->meta))
         return;
+    if (model && !*model)
+        model = NULL;
 
     struct model_meta *meta = get_or_create_meta(provider);
     /* Reap a finished probe so it cannot pass for a live one below. */
@@ -173,10 +189,21 @@ void model_meta_refresh(struct provider *provider, const char *model)
     if (already_reported)
         return;
 
-    /* A live probe for this model is already doing this refresh's work — and cancelling it would
-     * abort a router warm-up mid-load. */
-    if (meta->probe_job && meta->probe_model && model && strcmp(meta->probe_model, model) == 0)
+    /* A custom parser needs a model; a listing serves its ids regardless. */
+    struct model_probe request = {0};
+    int have_request = provider->probe_model &&
+                       provider->probe_model(provider, model, &request) == 0 && request.url &&
+                       !(request.parse && !model);
+    /* A probe that can learn nothing about the model only lists ids, which nothing waits for. */
+    const char *target = have_request && !request.parse && !request.parse_entry ? NULL : model;
+
+    /* A live probe for the same target is already doing this refresh's work — and cancelling it
+     * would abort a router warm-up mid-load. */
+    if (meta->probe_job && (target ? meta->probe_model && strcmp(meta->probe_model, target) == 0
+                                   : !meta->probe_model)) {
+        model_probe_clear(&request);
         return;
+    }
 
     cancel_probe(meta);
     pthread_mutex_lock(&report_lock);
@@ -184,28 +211,25 @@ void model_meta_refresh(struct provider *provider, const char *model)
     int same_model = meta->reported.id && model && strcmp(meta->reported.id, model) == 0;
     if (!same_model)
         clear_report_locked(meta);
+    /* Once ids are known, the model picker refreshes them instead of another listing probe. */
+    int redundant = !target && meta->listed_ids;
     pthread_mutex_unlock(&report_lock);
-
-    if (!provider->probe_model || !model || !*model)
-        return;
-
-    struct model_probe request = {0};
-    if (provider->probe_model(provider, model, &request) != 0 || !request.url ||
-        (!request.parse && !request.parse_entry)) {
+    if (!have_request || redundant) {
         model_probe_clear(&request);
         return;
     }
 
     struct probe_task *task = xcalloc(1, sizeof(*task));
     task->target = meta;
-    task->model_id = xstrdup(model);
+    task->model_id = target ? xstrdup(target) : NULL;
+    task->ids_generation = meta->ids_generation;
     task->request = request;
     meta->probe_started_ms = monotonic_ms();
     meta->probe_job = bg_job_spawn(probe_worker, task);
-    if (meta->probe_job)
-        meta->probe_model = xstrdup(model);
-    else
+    if (!meta->probe_job)
         probe_task_free(task);
+    else if (target)
+        meta->probe_model = xstrdup(target);
 }
 
 /* The snapshot is keyed by catalog_id; without one, only configuration and the probe apply, and
@@ -225,17 +249,24 @@ void model_meta_wait_catalog(const struct provider *provider, long timeout_ms, h
     catalog_wait(timeout_ms, tick, tick_user);
 }
 
+/* A probe for the listing alone carries no metadata to settle. */
+static int metadata_probe_running(const struct provider *provider)
+{
+    return provider && provider->meta && provider->meta->probe_job && provider->meta->probe_model;
+}
+
 void model_meta_wait(struct provider *provider)
 {
     model_meta_wait_catalog(provider, MODEL_META_WAIT_MS, NULL, NULL);
-    join_probe(provider);
+    if (metadata_probe_running(provider))
+        join_probe(provider);
 }
 
 void model_meta_wait_ms(struct provider *provider, long timeout_ms, http_tick_cb tick,
                         void *tick_user)
 {
     model_meta_wait_catalog(provider, timeout_ms, tick, tick_user);
-    if (!provider || !provider->meta || !provider->meta->probe_job)
+    if (!metadata_probe_running(provider))
         return;
     /* The budget is anchored at probe start so stacked callers on one request path do not each
      * wait the full amount for a slow probe. */
@@ -286,6 +317,29 @@ void model_meta_store(struct provider *provider, const struct model_info *info)
     clear_report_locked(meta);
     meta->reported = merged; /* ownership moves; merged must not be cleared */
     pthread_mutex_unlock(&report_lock);
+}
+
+void model_meta_store_ids(struct provider *provider, const char *const *ids)
+{
+    if (!provider)
+        return;
+    struct model_meta *meta = get_or_create_meta(provider);
+    char **copy = string_array_concat(ids, NULL);
+    pthread_mutex_lock(&report_lock);
+    string_array_free(meta->listed_ids);
+    meta->listed_ids = copy;
+    meta->ids_generation++;
+    pthread_mutex_unlock(&report_lock);
+}
+
+char **model_meta_listed_ids(const struct provider *provider)
+{
+    if (!provider || !provider->meta)
+        return NULL;
+    pthread_mutex_lock(&report_lock);
+    char **copy = string_array_concat((const char *const *)provider->meta->listed_ids, NULL);
+    pthread_mutex_unlock(&report_lock);
+    return copy;
 }
 
 int model_meta_snapshot(const struct provider *provider, struct model_info *out)

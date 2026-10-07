@@ -26,9 +26,11 @@ static int list_models_from_server(struct loopback *server, int n_responses, cha
     snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", port);
     setenv("HAX_ANTHROPIC_BASE_URL", base_url, 1);
 
+    /* Not provider_construct: its metadata warm-up would spend a scripted reply on a listing
+     * probe. */
     const struct provider_def *factory = provider_find("anthropic-compatible");
     EXPECT(factory != NULL);
-    struct provider *provider = factory ? provider_construct(factory) : NULL;
+    struct provider *provider = factory ? http_provider_new(factory) : NULL;
     EXPECT(provider != NULL);
 
     size_t n_models = 0;

@@ -68,8 +68,7 @@ void anthropic_parse_model(const json_t *entry, struct model_info *out)
 
 int anthropic_probe_model(struct provider *provider, const char *model, struct model_probe *probe)
 {
-    if (!model || !*model)
-        return -1;
+    (void)model;
 
     probe->url = xasprintf("%s/models?limit=%d", http_provider_base_url(provider),
                            ANTHROPIC_MODEL_PAGE_SIZE);

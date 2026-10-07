@@ -117,6 +117,13 @@ void select_provider_choices(struct completion *choices)
     completion_add(choices, "mock");
     completion_add(choices, "openai");
 }
+void select_model_choices(struct agent_state *state, struct completion *choices)
+{
+    (void)state;
+    completion_add(choices, "anthropic/claude-sonnet-4");
+    completion_add(choices, "openai/gpt-5");
+    completion_add(choices, "openai/gpt-5-mini");
+}
 void select_effort_choices(struct agent_state *state, struct completion *choices)
 {
     stub_choices_state = state;
@@ -871,7 +878,7 @@ static void test_complete_preset_arguments(void)
 
     expect_completion("preset c", NULL);
     expect_completion("preset review r", NULL);
-    expect_completion("model r", NULL);
+    expect_completion("compact r", NULL);
     expect_completion("zzz r", NULL);
 
     EXPECT(config_load(NULL) == 0);
@@ -887,6 +894,12 @@ static void test_complete_selection_arguments(void)
     EXPECT(stub_choices_state == &completion_state);
     expect_candidates("effort ", "  low high default");
     expect_completion("effort high h", NULL);
+    expect_completion("model op", "model openai/gpt-5");
+    expect_completion("model gpt", NULL);
+    expect_candidates("model ", "  anthropic/claude-sonnet-4 openai/gpt-5 openai/gpt-5-mini");
+    /* Past a slash, the listing drops the part every candidate shares. */
+    expect_candidates("model openai/", "  gpt-5 gpt-5-mini");
+    expect_candidates("model openai/gpt", "  gpt-5 gpt-5-mini");
 }
 
 static int match_word(const char *buffer, size_t cursor, size_t *start, size_t *end)

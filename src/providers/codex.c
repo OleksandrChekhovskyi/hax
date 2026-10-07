@@ -65,8 +65,7 @@ static char *build_models_url(const struct provider *provider)
 
 int codex_probe_model(struct provider *provider, const char *model, struct model_probe *probe)
 {
-    if (!model || !*model)
-        return -1;
+    (void)model;
 
     const struct http_auth_source *auth = http_provider_auth(provider);
     if (auth->ops->prepare(auth->state, 0, NULL, NULL) != 0)
@@ -83,6 +82,7 @@ int codex_probe_model(struct provider *provider, const char *model, struct model
     probe->list_member = "models";
     probe->id_member = "slug";
     probe->parse_entry = codex_parse_model;
+    probe->entry_hidden = codex_model_is_hidden;
     return 0;
 }
 

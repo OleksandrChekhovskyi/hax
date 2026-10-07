@@ -81,7 +81,7 @@ struct provider_def {
      * generic behavior. A def with a construct override wires its provider itself instead.
      * parse_model, probe_model, and list_models refine the def's own metadata dialect and stand
      * down when a configured metadata_api moves the provider to the other one. On the OpenAI side
-     * parse_model alone also probes the active model, through the full listing. */
+     * parse_model also refines the background listing probe's entry for the active model. */
     void (*parse_model)(const json_t *entry, struct model_info *out); /* refine one /models entry */
     int (*probe_model)(struct provider *provider, const char *model, struct model_probe *probe);
     int (*list_models)(struct provider *provider, struct model_info **models, size_t *n_models,

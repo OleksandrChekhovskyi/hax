@@ -17,10 +17,11 @@ void select_provider(struct agent_state *state, const char *provider);
 void select_model(struct agent_state *state, const char *model);
 void select_effort(struct agent_state *state, const char *level);
 
-/* Add the arguments select_provider and select_effort accept, for Tab completion: provider ids,
- * sorted, and the levels the live model offers followed by "default". Neither waits on the network
- * or background work. */
+/* Add the arguments the selectors accept, for Tab completion, without waiting on the network or
+ * background work: provider ids, sorted; the live provider's last-listed model ids, in model picker
+ * order; and the live model's effort levels followed by "default". */
 void select_provider_choices(struct completion *choices);
+void select_model_choices(struct agent_state *state, struct completion *choices);
 void select_effort_choices(struct agent_state *state, struct completion *choices);
 
 /* Apply `name`, or open the preset picker when name is NULL. A fresh provider is constructed and

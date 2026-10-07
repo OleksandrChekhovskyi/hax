@@ -1005,8 +1005,7 @@ struct provider *http_provider_new(const struct provider_def *def)
         provider->base.probe_model = anthropic_probe_model;
     } else {
         provider->base.list_models = openai_list_models;
-        if (def->parse_model)
-            provider->base.probe_model = openai_probe_model;
+        provider->base.probe_model = openai_probe_model;
     }
     /* Like parse_model (which only the def's own listing consults), the probe and listing hooks
      * refine the def's metadata dialect: a configured metadata_api that moves the provider to

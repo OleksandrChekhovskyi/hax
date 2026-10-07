@@ -192,16 +192,18 @@ static void test_openrouter_effort_metadata_states(void)
     json_decref(empty_levels);
 }
 
-static void test_openrouter_probe_url_encoding(void)
+static void test_openrouter_probe_lists_all_models(void)
 {
     struct model_probe probe = {0};
     EXPECT(openrouter_probe_model(NULL, "meta-llama/llama-3.2-3b-instruct:free", &probe) == 0);
-    EXPECT_STR_EQ(probe.url, "https://openrouter.ai/api/v1/models"
-                             "?q=meta-llama%2Fllama-3.2-3b-instruct%3Afree");
+    EXPECT_STR_EQ(probe.url, "https://openrouter.ai/api/v1/models");
     EXPECT(probe.parse_entry == openrouter_parse_model);
     model_probe_clear(&probe);
 
-    EXPECT(openrouter_probe_model(NULL, "", &probe) == -1);
+    /* Without a model the same request serves the listing alone. */
+    EXPECT(openrouter_probe_model(NULL, NULL, &probe) == 0);
+    EXPECT_STR_EQ(probe.url, "https://openrouter.ai/api/v1/models");
+    model_probe_clear(&probe);
 }
 
 /* ---------------- codex ---------------- */
@@ -359,7 +361,7 @@ int main(void)
     test_openrouter_missing_metadata();
     test_openrouter_effort_levels();
     test_openrouter_effort_metadata_states();
-    test_openrouter_probe_url_encoding();
+    test_openrouter_probe_lists_all_models();
     test_codex_model_capabilities();
     test_codex_context_fallback();
     test_codex_hidden_models();

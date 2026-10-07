@@ -99,11 +99,12 @@ Type `/help` for the authoritative live list.
 | `/login [provider]` | Log in to a provider account with a hax-managed token (ChatGPT/codex). |
 | `/logout [provider]` | Revoke and remove a hax-managed login. |
 
-Without an argument, `/provider`, `/model`, and `/effort` open pickers that walk through the rest of
-the selection: `/provider` continues to the model and effort, `/model` to the effort. With an
-argument, they switch without a picker: `/provider <id>` starts on the provider's default model and
-effort, or on no model until `/model` picks one; `/model <id>` keeps the current effort, or the
-nearest level the new model offers; `/effort <level>` takes a level the model offers, or `default`.
+Without an argument, `/provider`, `/model`, and `/effort` open pickers, and the provider and model
+pickers continue to the settings that depend on them. With an argument they switch directly:
+`/provider <id>` starts on the provider's default model, or none until `/model` picks one, and
+`/model <id>` keeps the current effort where the new model allows it. Model ids complete from the
+provider's model list, fetched in the background; where that isn't available, open the `/model`
+picker once.
 
 Prefer `/fork` when trying an alternative: the original session stays intact. `/undo` has no redo;
 the removed user turns still count toward the session's usage totals.

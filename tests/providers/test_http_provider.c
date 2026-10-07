@@ -17,6 +17,7 @@
 #include "provider.h"
 #include "xalloc.h"
 #include "providers/http_provider.h"
+#include "providers/openai_models.h"
 #include "providers/provider_config.h"
 #include "providers/registry.h"
 #include "transport/http.h"
@@ -171,7 +172,7 @@ static void test_api_override_moves_wire(void)
 
 /* The /models dialect and its auth scheme follow metadata_api, not the request wire: a Messages
  * endpoint can front an OpenAI-shaped catalog and vice versa. The version header marks the
- * Anthropic side; the probe hook exists only there. */
+ * Anthropic side. */
 static void test_metadata_api_override(void)
 {
     EXPECT(config_load("{\"providers\": {\"x\": {\"metadata_api\": \"openai\"}}}") == 0);
@@ -185,7 +186,7 @@ static void test_metadata_api_override(void)
     if (provider) {
         char **headers = http_provider_metadata_headers(provider);
         EXPECT(!headers_have_version(headers));
-        EXPECT(provider->probe_model == NULL);
+        EXPECT(provider->probe_model == openai_probe_model);
         string_array_free(headers);
         provider->destroy(provider);
     }
@@ -213,8 +214,8 @@ static void refine_nothing(const json_t *entry, struct model_info *out)
     (void)out;
 }
 
-/* On the OpenAI side a parse_model hook alone probes through the full listing, authenticated
- * like the listing itself. */
+/* On the OpenAI side the probe reads the full listing, authenticated like the listing itself, and
+ * a parse_model hook refines the model's entry. */
 static void test_parse_model_probes_listing(void)
 {
     EXPECT(config_load("{\"providers\": {\"x\": {\"api_key\": \"sk-test\"}}}") == 0);
@@ -232,7 +233,24 @@ static void test_parse_model_probes_listing(void)
         EXPECT(probe.headers && strcmp(probe.headers[0], "Authorization: Bearer sk-test") == 0);
         EXPECT(probe.parse_entry == refine_nothing);
         model_probe_clear(&probe);
-        EXPECT(provider->probe_model(provider, "", &probe) == -1);
+        /* Without a model the same request serves the listing alone. */
+        EXPECT(provider->probe_model(provider, NULL, &probe) == 0);
+        EXPECT_STR_EQ(probe.url, "http://example.invalid/v1/models");
+        model_probe_clear(&probe);
+    }
+    if (provider)
+        provider->destroy(provider);
+
+    /* Without parse_model the listing still serves its ids. */
+    def.parse_model = NULL;
+    provider = http_provider_new(&def);
+    EXPECT(provider != NULL && provider->probe_model != NULL);
+    if (provider && provider->probe_model) {
+        struct model_probe probe = {0};
+        EXPECT(provider->probe_model(provider, "m", &probe) == 0);
+        EXPECT_STR_EQ(probe.url, "http://example.invalid/v1/models");
+        EXPECT(probe.parse_entry == NULL);
+        model_probe_clear(&probe);
     }
     if (provider)
         provider->destroy(provider);

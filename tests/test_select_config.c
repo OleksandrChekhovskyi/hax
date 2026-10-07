@@ -426,6 +426,45 @@ static void test_effort_choices_follow_live_model(void)
     model_meta_release(&provider);
 }
 
+/* The model picker's listing is what /model completion offers, in the picker's order. */
+static void test_model_choices_come_from_listing(void)
+{
+    reset();
+    struct agent_state *state = fresh_state();
+    struct agent_session session = {.model = "old"};
+    struct provider provider = {.name = "test", .list_models = test_list_models};
+    state->session = &session;
+    struct completion choices = {0};
+
+    select_model_choices(state, &choices);
+    EXPECT(choices.count == 0);
+
+    state->provider = &provider;
+    select_model(state, NULL); /* the scripted picker cancels */
+    select_model_choices(state, &choices);
+    EXPECT(choices.count == 2);
+    if (choices.count == 2)
+        EXPECT(strcmp(choices.candidates[0], "new") == 0 &&
+               strcmp(choices.candidates[1], "old") == 0);
+    completion_free(&choices);
+
+    const char *const listed[] = {"gpt-5-mini", "gpt-5", "gpt-5.1", NULL};
+    const char *const sorted[] = {"gpt-5.1", "gpt-5", "gpt-5-mini", NULL};
+    model_meta_store_ids(&provider, listed);
+    select_model_choices(state, &choices);
+    EXPECT(choices.count == 3);
+    for (size_t i = 0; i < choices.count && sorted[i]; i++)
+        EXPECT_STR_EQ(choices.candidates[i], sorted[i]);
+    completion_free(&choices);
+
+    /* A provider that keeps its listing order keeps it here too. */
+    provider.keep_model_order = 1;
+    select_model_choices(state, &choices);
+    EXPECT(choices.count == 3 && strcmp(choices.candidates[0], "gpt-5-mini") == 0);
+    completion_free(&choices);
+    model_meta_release(&provider);
+}
+
 static void test_provider_choices_list_sorted_ids(void)
 {
     struct completion choices = {0};
@@ -716,6 +755,7 @@ int main(void)
     test_effort_argument_applies_without_picker();
     test_effort_default_clears_without_levels();
     test_effort_choices_follow_live_model();
+    test_model_choices_come_from_listing();
     test_provider_choices_list_sorted_ids();
     test_effort_argument_waits_for_model_probe();
     test_model_argument_carries_requested_effort();

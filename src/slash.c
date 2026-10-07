@@ -93,6 +93,8 @@ static void run_logout(const struct command_call *call);
 static void run_help(const struct command_call *call);
 static void provider_id_choices(struct agent_state *state, const char *preceding,
                                 struct completion *choices);
+static void model_id_choices(struct agent_state *state, const char *preceding,
+                             struct completion *choices);
 static void effort_level_choices(struct agent_state *state, const char *preceding,
                                  struct completion *choices);
 static void preset_name_choices(struct agent_state *state, const char *preceding,
@@ -142,6 +144,7 @@ static const struct slash_command COMMANDS[] = {
         .usage = "[id]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_model,
+        .argument_choices = model_id_choices,
     },
     {
         .name = "effort",
@@ -438,7 +441,8 @@ static char *complete_command(const char *text, void *user)
 }
 
 /* Two spaces set the list apart from the text it follows. A bare slash matches every command,
- * which /help already lists in full instead of a truncated row. */
+ * which /help already lists in full instead of a truncated row. Like a shell listing a directory,
+ * candidates show only what follows the typed word's last slash, which they all share. */
 static char *list_command_choices(const char *text, void *user)
 {
     if (*text == '\0')
@@ -451,12 +455,14 @@ static char *list_command_choices(const char *text, void *user)
     collect_choices(user, text, &choices, &word);
     if (choices.count > 1) {
         const char *marker = word == text ? "/" : "";
+        const char *last_slash = strrchr(word, '/');
+        size_t shared_len = last_slash ? (size_t)(last_slash + 1 - word) : 0;
         struct buf list;
         buf_init(&list);
         for (size_t i = 0; i < choices.count; i++) {
             buf_append_str(&list, i > 0 ? " " : "  ");
             buf_append_str(&list, marker);
-            buf_append_str(&list, choices.candidates[i]);
+            buf_append_str(&list, choices.candidates[i] + shared_len);
         }
         listing = buf_steal(&list);
     }
@@ -662,6 +668,13 @@ static void provider_id_choices(struct agent_state *state, const char *preceding
 static void run_model(const struct command_call *call)
 {
     select_model(call->state, call->argument);
+}
+
+static void model_id_choices(struct agent_state *state, const char *preceding,
+                             struct completion *choices)
+{
+    if (!*preceding)
+        select_model_choices(state, choices);
 }
 
 static void run_effort(const struct command_call *call)

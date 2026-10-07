@@ -131,27 +131,77 @@ static void record_context(const json_t *entry, struct model_info *out)
     out->context = (long)json_integer_value(json_object_get(entry, "n"));
 }
 
-/* Listings are often searched by substring, so only the exact id may refine the report. */
+/* Only the exact id refines the report. */
 static void test_probe_listing_locator(void)
 {
     struct model_probe probe = {.parse_entry = record_context};
     struct model_info info;
     model_info_init(&info);
     model_probe_parse(&probe, "{\"data\":[{\"id\":\"m-pro\",\"n\":1},{\"id\":\"m\",\"n\":2}]}", "m",
-                      &info);
+                      &info, NULL);
     EXPECT(info.context == 2);
 
     probe.list_member = "models";
     probe.id_member = "slug";
-    model_probe_parse(&probe, "{\"models\":[{\"slug\":\"m\",\"n\":3}]}", "m", &info);
+    model_probe_parse(&probe, "{\"models\":[{\"slug\":\"m\",\"n\":3}]}", "m", &info, NULL);
     EXPECT(info.context == 3);
 
     /* Absent ids, other shapes, and non-JSON leave the report untouched. */
-    model_probe_parse(&probe, "{\"models\":[{\"slug\":\"other\",\"n\":4}]}", "m", &info);
-    model_probe_parse(&probe, "{\"data\":[{\"slug\":\"m\",\"n\":5}]}", "m", &info);
-    model_probe_parse(&probe, "{\"models\":{\"slug\":\"m\",\"n\":6}}", "m", &info);
-    model_probe_parse(&probe, "not json", "m", &info);
+    model_probe_parse(&probe, "{\"models\":[{\"slug\":\"other\",\"n\":4}]}", "m", &info, NULL);
+    model_probe_parse(&probe, "{\"data\":[{\"slug\":\"m\",\"n\":5}]}", "m", &info, NULL);
+    model_probe_parse(&probe, "{\"models\":{\"slug\":\"m\",\"n\":6}}", "m", &info, NULL);
+    model_probe_parse(&probe, "not json", "m", &info, NULL);
     EXPECT(info.context == 3);
+    model_info_clear(&info);
+}
+
+static int hidden_when_flagged(const json_t *entry)
+{
+    return json_is_true(json_object_get(entry, "hidden"));
+}
+
+/* The listing's ids come back whether or not it lists the probed model, minus hidden entries. */
+static void test_probe_listing_ids(void)
+{
+    struct model_probe probe = {.parse_entry = record_context, .entry_hidden = hidden_when_flagged};
+    struct model_info info;
+    model_info_init(&info);
+    char **ids = NULL;
+
+    model_probe_parse(&probe,
+                      "{\"data\":[{\"id\":\"a\",\"n\":1},{\"id\":\"m\",\"n\":2},{\"n\":3},"
+                      "{\"id\":\"h\",\"hidden\":true},{\"id\":\"z\"}]}",
+                      "m", &info, &ids);
+    EXPECT(info.context == 2);
+    EXPECT(string_array_count((const char *const *)ids) == 3);
+    if (string_array_count((const char *const *)ids) == 3) {
+        EXPECT_STR_EQ(ids[0], "a");
+        EXPECT_STR_EQ(ids[1], "m");
+        EXPECT_STR_EQ(ids[2], "z");
+    }
+    string_array_free(ids);
+
+    model_probe_parse(&probe, "{\"data\":[{\"id\":\"a\"}]}", "m", &info, &ids);
+    EXPECT(string_array_count((const char *const *)ids) == 1);
+    string_array_free(ids);
+
+    /* A listing that breaks off partway or holds a malformed entry yields no ids rather than
+     * some. */
+    model_probe_parse(&probe, "{\"data\":[{\"id\":\"a\"},{\"id\"", "m", &info, &ids);
+    EXPECT(ids == NULL);
+    model_probe_parse(&probe,
+                      "{\"data\":[{\"id\":\"a\"},{\"id\":\"b\",\"x\":nope},{\"id\":\"c\"}]}", "m",
+                      &info, &ids);
+    EXPECT(ids == NULL);
+    model_probe_parse(&probe, "not json", "m", &info, &ids);
+    EXPECT(ids == NULL);
+
+    /* Without a refinement the listing yields its ids alone. */
+    struct model_probe ids_only = {0};
+    model_probe_parse(&ids_only, "{\"data\":[{\"id\":\"m\",\"n\":9}]}", "m", &info, &ids);
+    EXPECT(string_array_count((const char *const *)ids) == 1);
+    EXPECT(info.context == 2);
+    string_array_free(ids);
     model_info_clear(&info);
 }
 
@@ -200,6 +250,7 @@ int main(void)
     test_model_info_lifecycle();
     test_request_cleanup();
     test_probe_listing_locator();
+    test_probe_listing_ids();
     test_capability_lists();
     test_provenance_matching();
     T_REPORT();

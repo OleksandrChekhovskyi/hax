@@ -8,7 +8,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "buf.h"
 #include "busy.h"
 #include "catalog.h"
 #include "effort.h"
@@ -160,34 +159,13 @@ void openrouter_parse_efforts(const json_t *entry, struct effort_set *efforts)
         effort_set_add(efforts, json_string_value(json_array_get(levels, i)));
 }
 
-static char *encode_query_value(const char *value)
-{
-    static const char HEX[] = "0123456789ABCDEF";
-    struct buf encoded;
-    buf_init(&encoded);
-
-    for (const unsigned char *byte = (const unsigned char *)value; *byte; byte++) {
-        if ((*byte >= 'A' && *byte <= 'Z') || (*byte >= 'a' && *byte <= 'z') ||
-            (*byte >= '0' && *byte <= '9') || *byte == '-' || *byte == '_' || *byte == '.' ||
-            *byte == '~') {
-            buf_append(&encoded, (const char *)byte, 1);
-        } else {
-            char escape[3] = {'%', HEX[*byte >> 4], HEX[*byte & 0xf]};
-            buf_append(&encoded, escape, sizeof(escape));
-        }
-    }
-    return buf_steal(&encoded);
-}
-
 int openrouter_probe_model(struct provider *provider, const char *model, struct model_probe *probe)
 {
     (void)provider;
-    if (!model || !*model)
-        return -1;
+    (void)model;
 
-    char *encoded_model = encode_query_value(model);
-    probe->url = xasprintf(OPENROUTER_MODELS_ENDPOINT "?q=%s", encoded_model);
-    free(encoded_model);
+    /* The whole listing, so its ids can serve /model completion. */
+    probe->url = xstrdup(OPENROUTER_MODELS_ENDPOINT);
 
     const char *api_key = openrouter_api_key();
     char *authorization = api_key ? xasprintf("Authorization: Bearer %s", api_key) : NULL;

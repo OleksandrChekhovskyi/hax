@@ -1,4 +1,6 @@
 /* SPDX-License-Identifier: MIT */
+#include <jansson.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,10 +11,12 @@
 #include "config.h"
 #include "effort.h"
 #include "harness.h"
+#include "loopback.h"
 #include "model_meta.h"
 #include "provider.h"
 #include "xalloc.h"
 #include "providers/registry.h"
+#include "system/clock.h"
 
 static void write_catalog_fixture(void)
 {
@@ -580,6 +584,192 @@ static void test_provider_without_levels_stays_without_them(void)
     model_meta_release(&p);
 }
 
+static void mark_found(const json_t *entry, struct model_info *out)
+{
+    (void)entry;
+    out->context = 1;
+}
+
+static int listing_port;
+
+static int listing_probe(struct provider *p, const char *model, struct model_probe *probe)
+{
+    (void)p;
+    (void)model;
+    probe->url = xasprintf("http://127.0.0.1:%d/models", listing_port);
+    probe->timeout_s = 5;
+    probe->parse_entry = mark_found;
+    return 0;
+}
+
+/* Stored ids come back as copies, and a listing probe replaces them with every id it saw. */
+static void test_listed_ids(void)
+{
+    struct provider p = make_provider("test", list_no_efforts);
+    EXPECT(model_meta_listed_ids(&p) == NULL);
+
+    const char *const picked[] = {"b", "a", NULL};
+    model_meta_store_ids(&p, picked);
+    char **ids = model_meta_listed_ids(&p);
+    EXPECT(string_array_count((const char *const *)ids) == 2);
+    if (string_array_count((const char *const *)ids) == 2)
+        EXPECT(strcmp(ids[0], "b") == 0 && strcmp(ids[1], "a") == 0);
+    string_array_free(ids);
+
+    struct loopback server = {0};
+    loopback_reply_ok(&server, 0, "{\"data\":[{\"id\":\"m\"},{\"id\":\"n\"},{\"id\":\"o\"}]}");
+    listing_port = loopback_start(&server);
+    EXPECT(listing_port > 0);
+    p.probe_model = listing_probe;
+    model_meta_refresh(&p, "n");
+    model_meta_wait(&p);
+    ids = model_meta_listed_ids(&p);
+    EXPECT(string_array_count((const char *const *)ids) == 3);
+    if (string_array_count((const char *const *)ids) == 3)
+        EXPECT(strcmp(ids[0], "m") == 0 && strcmp(ids[2], "o") == 0);
+    string_array_free(ids);
+    loopback_stop(&server);
+    model_meta_release(&p);
+}
+
+/* Nothing waits for a listing-only probe, so poll for its ids. */
+static char **wait_for_listed_ids(const struct provider *p)
+{
+    const struct timespec poll_interval = {.tv_nsec = 1000000};
+    char **ids = NULL;
+    for (int i = 0; i < 5000 && !ids; i++) {
+        ids = model_meta_listed_ids(p);
+        if (!ids)
+            nanosleep(&poll_interval, NULL);
+    }
+    return ids;
+}
+
+/* Without a model, a listing probe still collects the ids but reports no model. */
+static void test_listing_probe_without_model(void)
+{
+    struct provider p = make_provider("test", list_no_efforts);
+    p.probe_model = listing_probe;
+    struct loopback server = {0};
+    loopback_reply_ok(&server, 0, "{\"data\":[{\"id\":\"m\"},{\"id\":\"n\"}]}");
+    listing_port = loopback_start(&server);
+    EXPECT(listing_port > 0);
+
+    model_meta_refresh(&p, NULL);
+    model_meta_refresh(&p, ""); /* the running listing probe already covers this */
+    char **ids = wait_for_listed_ids(&p);
+    EXPECT(string_array_count((const char *const *)ids) == 2);
+    string_array_free(ids);
+    struct model_info report;
+    EXPECT(model_meta_snapshot(&p, &report) == 0);
+    model_info_clear(&report);
+
+    loopback_stop(&server);
+    model_meta_release(&p);
+}
+
+static int ids_only_probe(struct provider *p, const char *model, struct model_probe *probe)
+{
+    (void)p;
+    (void)model;
+    probe->url = xasprintf("http://127.0.0.1:%d/models", listing_port);
+    probe->timeout_s = 5;
+    return 0;
+}
+
+/* A probe that can learn nothing about the model lists ids alone, which no wait holds up for. */
+static void test_ids_only_probe_is_not_waited_for(void)
+{
+    struct provider p = make_provider("test", list_no_efforts);
+    p.probe_model = ids_only_probe;
+    struct loopback server = {.hold = 1};
+    loopback_reply_ok(&server, 0, "{\"data\":[{\"id\":\"m\"},{\"id\":\"n\"}]}");
+    listing_port = loopback_start(&server);
+    EXPECT(listing_port > 0);
+
+    model_meta_refresh(&p, "m");
+    long started_ms = monotonic_ms();
+    model_meta_wait(&p);
+    model_meta_wait_ms(&p, MODEL_META_WAIT_MS, NULL, NULL);
+    EXPECT(monotonic_ms() - started_ms < 1000);
+
+    loopback_release(&server);
+    char **ids = wait_for_listed_ids(&p);
+    EXPECT(string_array_count((const char *const *)ids) == 2);
+    string_array_free(ids);
+    struct model_info report;
+    EXPECT(model_meta_snapshot(&p, &report) == 0);
+    model_info_clear(&report);
+
+    loopback_stop(&server);
+
+    /* Known ids need no second listing: nothing connects to a listener that never accepts. */
+    struct loopback idle = {0};
+    listing_port = loopback_listen(&idle);
+    EXPECT(listing_port > 0);
+    model_meta_refresh(&p, "n");
+    const struct timespec settle = {.tv_nsec = 200000000};
+    nanosleep(&settle, NULL);
+    struct pollfd poll_fd = {.fd = idle.listener_fd, .events = POLLIN};
+    EXPECT(poll(&poll_fd, 1, 0) == 0);
+    model_meta_release(&p);
+    loopback_stop(&idle);
+}
+
+/* Refreshing the same model keeps a running ids-only probe rather than restarting it. */
+static void test_same_model_refresh_keeps_ids_only_probe(void)
+{
+    struct provider p = make_provider("test", list_no_efforts);
+    p.probe_model = ids_only_probe;
+    struct loopback server = {.hold = 1};
+    loopback_reply_ok(&server, 0, "{\"data\":[{\"id\":\"m\"}]}");
+    listing_port = loopback_start(&server);
+    EXPECT(listing_port > 0);
+    model_meta_refresh(&p, "m");
+
+    /* A restarted probe would connect to a listener that never accepts. */
+    struct loopback idle = {0};
+    listing_port = loopback_listen(&idle);
+    EXPECT(listing_port > 0);
+    model_meta_refresh(&p, "m");
+    const struct timespec settle = {.tv_nsec = 200000000};
+    nanosleep(&settle, NULL);
+    struct pollfd poll_fd = {.fd = idle.listener_fd, .events = POLLIN};
+    EXPECT(poll(&poll_fd, 1, 0) == 0);
+
+    loopback_release(&server);
+    char **ids = wait_for_listed_ids(&p);
+    EXPECT(string_array_count((const char *const *)ids) == 1);
+    string_array_free(ids);
+    model_meta_release(&p);
+    loopback_stop(&server);
+    loopback_stop(&idle);
+}
+
+/* A listing stored while a probe is in flight is newer than the probe's response. */
+static void test_probe_keeps_newer_stored_listing(void)
+{
+    struct provider p = make_provider("test", list_no_efforts);
+    p.probe_model = listing_probe;
+    struct loopback server = {.hold = 1};
+    loopback_reply_ok(&server, 0, "{\"data\":[{\"id\":\"m\"}]}");
+    listing_port = loopback_start(&server);
+    EXPECT(listing_port > 0);
+    model_meta_refresh(&p, "m");
+
+    const char *const picked[] = {"m", "new", NULL};
+    model_meta_store_ids(&p, picked);
+    loopback_release(&server);
+    model_meta_wait(&p);
+
+    char **ids = model_meta_listed_ids(&p);
+    EXPECT(string_array_count((const char *const *)ids) == 2);
+    string_array_free(ids);
+    EXPECT(model_meta_context(&p, "m") == 1); /* the probe's metadata still lands */
+    model_meta_release(&p);
+    loopback_stop(&server);
+}
+
 /* Exercise the metadata lifecycle through every provider destroy callback. */
 static void test_release_is_honored_by_every_provider(void)
 {
@@ -630,6 +820,11 @@ int main(void)
     test_store_during_probe_keeps_costs_unknown();
     test_incomplete_report_still_probes();
     test_provider_without_levels_stays_without_them();
+    test_listed_ids();
+    test_listing_probe_without_model();
+    test_ids_only_probe_is_not_waited_for();
+    test_same_model_refresh_keeps_ids_only_probe();
+    test_probe_keeps_newer_stored_listing();
     test_release_is_honored_by_every_provider();
     T_REPORT();
 }

@@ -166,6 +166,17 @@ static int compare_model_info(const void *left, const void *right)
     return model_id_order(left_model->id, right_model->id);
 }
 
+static int compare_model_ids(const void *left, const void *right)
+{
+    return model_id_order(*(char *const *)left, *(char *const *)right);
+}
+
+/* Otherwise models keep the provider's listing order. */
+static int sorts_models(const struct provider *provider)
+{
+    return config_bool_or("sort_models", !provider->keep_model_order);
+}
+
 /* ---------- /model picker gutter ---------- */
 
 static void append_segment(struct buf *buffer, const char *text)
@@ -283,7 +294,7 @@ static struct model_pick_result pick_model_from_list(struct provider *provider,
                                                      struct model_info *models, size_t model_count,
                                                      const char *current_model)
 {
-    if (config_bool_or("sort_models", !provider->keep_model_order))
+    if (sorts_models(provider))
         qsort(models, model_count, sizeof(*models), compare_model_info);
 
     /* Batch catalog lookup avoids loading the snapshot once per model. */
@@ -384,6 +395,12 @@ static struct model_pick_result choose_model(struct agent_state *state, struct p
         model_info_free(models, model_count);
         return result;
     }
+    const char **listed_ids = xmalloc((model_count + 1) * sizeof(*listed_ids));
+    for (size_t i = 0; i < model_count; i++)
+        listed_ids[i] = models[i].id;
+    listed_ids[model_count] = NULL;
+    model_meta_store_ids(provider, listed_ids);
+    free(listed_ids);
     if (model_count == 0) {
         /* An empty catalog has no provider-independent remedy. */
         ui_note("%s has no models available", provider_name);
@@ -660,6 +677,18 @@ static void commit_model(struct agent_state *state, struct provider *provider, c
      * the refresh because the model did not change. */
     model_meta_refresh(provider, model);
     free(provider_id);
+}
+
+void select_model_choices(struct agent_state *state, struct completion *choices)
+{
+    if (!state->provider)
+        return;
+    char **ids = model_meta_listed_ids(state->provider);
+    for (char **id = ids; id && *id; id++)
+        completion_add(choices, *id);
+    string_array_free(ids);
+    if (sorts_models(state->provider) && choices->count > 1)
+        qsort(choices->candidates, choices->count, sizeof(*choices->candidates), compare_model_ids);
 }
 
 void select_model(struct agent_state *state, const char *model)
