@@ -18,6 +18,7 @@
 #include "terminal/ansi.h"
 #include "terminal/theme.h"
 #include "terminal/width.h"
+#include "text/display_safe.h"
 #include "text/width.h"
 
 #define HEADER_EXTRA_MAX_CELLS 20

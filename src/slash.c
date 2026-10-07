@@ -31,6 +31,7 @@
 #include "terminal/ui.h"
 #include "terminal/width.h"
 #include "text/completion.h"
+#include "text/display_safe.h"
 #include "text/fmt.h"
 #include "text/width.h"
 #include "tools/task_registry.h"

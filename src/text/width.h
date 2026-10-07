@@ -32,9 +32,4 @@ size_t wrap_row_bytes(const char *str, size_t max_cells, size_t *separator_bytes
 char *reflow_for_display(const char *str, int first_row_cells, int other_row_cells, int max_rows,
                          int last_row_reserve);
 
-/* Prepare untrusted UTF-8 for one-line display: collapse ASCII whitespace, replace malformed or
- * direction-changing codepoints, and bound combining-mark runs. Returns an allocated string; NULL
- * input becomes empty. */
-char *flatten_for_display(const char *str);
-
 #endif /* HAX_TEXT_WIDTH_H */

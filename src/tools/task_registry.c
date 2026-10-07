@@ -22,6 +22,7 @@
 #include "system/clock.h"
 #include "system/fd.h"
 #include "terminal/interrupt.h"
+#include "text/display_safe.h"
 #include "text/fmt.h"
 #include "text/utf8_sanitize.h"
 #include "text/width.h"

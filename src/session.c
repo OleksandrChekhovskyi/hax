@@ -25,6 +25,7 @@
 #include "system/git.h"
 #include "system/path.h"
 #include "system/rand.h"
+#include "text/display_safe.h"
 #include "text/width.h"
 
 /* struct stat's sub-second mtime field is spelled differently across
