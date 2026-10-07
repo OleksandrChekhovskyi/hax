@@ -72,10 +72,26 @@ static void test_keep_prefixed_preserves_order(void)
     EXPECT(completion.count == 0 && completion.candidates == NULL);
 }
 
+static void test_sort_orders_bytewise(void)
+{
+    struct completion completion = {0};
+    completion_sort(&completion);
+    EXPECT(completion.count == 0);
+
+    const char *const words[] = {"review", "Fast", "focus", NULL};
+    add_all(&completion, words);
+    completion_sort(&completion);
+    EXPECT_STR_EQ(completion.candidates[0], "Fast");
+    EXPECT_STR_EQ(completion.candidates[1], "focus");
+    EXPECT_STR_EQ(completion.candidates[2], "review");
+    completion_free(&completion);
+}
+
 int main(void)
 {
     test_extend_like_a_shell();
     test_extend_keeps_utf8_whole();
     test_keep_prefixed_preserves_order();
+    test_sort_orders_bytewise();
     T_REPORT();
 }

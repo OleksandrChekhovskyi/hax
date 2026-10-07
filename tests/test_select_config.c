@@ -17,6 +17,7 @@
 #include "xalloc.h"
 #include "render/render_ctx.h"
 #include "terminal/picker.h"
+#include "text/completion.h"
 #include "transport/http.h"
 
 /* select.c reaches into agent.c for these; stub them so the test links without pulling the whole
@@ -393,6 +394,52 @@ static void test_effort_default_clears_without_levels(void)
     unsetenv("XDG_STATE_HOME");
 }
 
+static void test_effort_choices_follow_live_model(void)
+{
+    reset();
+    struct agent_state *state = fresh_state();
+    struct agent_session session = {.model = "model"};
+    struct provider provider = {.name = "test", .list_efforts = test_list_efforts};
+    state->session = &session;
+    struct completion choices = {0};
+
+    select_effort_choices(state, &choices);
+    EXPECT(choices.count == 0);
+
+    state->provider = &provider;
+    select_effort_choices(state, &choices);
+    EXPECT(choices.count == 3);
+    if (choices.count == 3) {
+        EXPECT_STR_EQ(choices.candidates[0], "low");
+        EXPECT_STR_EQ(choices.candidates[1], "high");
+        EXPECT_STR_EQ(choices.candidates[2], "default");
+    }
+    completion_free(&choices);
+
+    /* Default also clears a request carried over to a model without levels. */
+    provider.list_efforts = NULL;
+    select_effort_choices(state, &choices);
+    EXPECT(choices.count == 1);
+    if (choices.count == 1)
+        EXPECT_STR_EQ(choices.candidates[0], "default");
+    completion_free(&choices);
+    model_meta_release(&provider);
+}
+
+static void test_provider_choices_list_sorted_ids(void)
+{
+    struct completion choices = {0};
+    select_provider_choices(&choices);
+    int has_deepseek = 0;
+    for (size_t i = 0; i < choices.count; i++) {
+        has_deepseek |= strcmp(choices.candidates[i], "deepseek") == 0;
+        if (i > 0)
+            EXPECT(strcmp(choices.candidates[i - 1], choices.candidates[i]) < 0);
+    }
+    EXPECT(has_deepseek);
+    completion_free(&choices);
+}
+
 static int g_probe_port;
 
 static void parse_low_only(const char *body, const char *model, struct model_info *out)
@@ -668,6 +715,8 @@ int main(void)
     test_effort_persists_after_reconfiguration();
     test_effort_argument_applies_without_picker();
     test_effort_default_clears_without_levels();
+    test_effort_choices_follow_live_model();
+    test_provider_choices_list_sorted_ids();
     test_effort_argument_waits_for_model_probe();
     test_model_argument_carries_requested_effort();
     test_provider_argument_switches_without_picker();

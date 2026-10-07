@@ -16,6 +16,19 @@ void completion_add(struct completion *completion, const char *candidate)
     completion->candidates[completion->count++] = xstrdup(candidate);
 }
 
+static int compare_candidates(const void *left, const void *right)
+{
+    return strcmp(*(char *const *)left, *(char *const *)right);
+}
+
+void completion_sort(struct completion *completion)
+{
+    /* An empty completion's array is NULL, which qsort must not receive even with a zero count. */
+    if (completion->count > 1)
+        qsort(completion->candidates, completion->count, sizeof(*completion->candidates),
+              compare_candidates);
+}
+
 void completion_keep_prefixed(struct completion *completion, const char *prefix)
 {
     size_t prefix_len = strlen(prefix);

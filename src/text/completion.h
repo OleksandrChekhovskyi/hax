@@ -13,6 +13,9 @@ struct completion {
 
 void completion_add(struct completion *completion, const char *candidate);
 
+/* Order the candidates bytewise. */
+void completion_sort(struct completion *completion);
+
 /* Drop the candidates that do not start with `prefix`, keeping the order of the rest. */
 void completion_keep_prefixed(struct completion *completion, const char *prefix);
 

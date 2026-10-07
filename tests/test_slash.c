@@ -14,6 +14,7 @@
 #include "xalloc.h"
 #include "render/render_ctx.h"
 #include "terminal/input_core.h"
+#include "text/completion.h"
 
 /* Link-only tool stubs; slash tests never invoke them. */
 static char *stub_run(const char *args, struct tool_run_ctx *ctx)
@@ -108,6 +109,20 @@ void select_effort(struct agent_state *state, const char *level)
 {
     (void)state;
     record_argument(&stub_selector_argument, level);
+}
+/* Choice stubs show which state completion hands the selectors. */
+static struct agent_state *stub_choices_state = NULL;
+void select_provider_choices(struct completion *choices)
+{
+    completion_add(choices, "mock");
+    completion_add(choices, "openai");
+}
+void select_effort_choices(struct agent_state *state, struct completion *choices)
+{
+    stub_choices_state = state;
+    completion_add(choices, "low");
+    completion_add(choices, "high");
+    completion_add(choices, "default");
 }
 static int stub_preset_rc = 0;
 static char *stub_preset_name = NULL;
@@ -796,6 +811,9 @@ static void test_compaction_seed_history_rules(void)
 
 /* ---------- completion and prompt hints ---------- */
 
+static struct agent_state completion_state;
+static struct input_completer slash_completer;
+
 static void expect_completion(const char *text, const char *expected)
 {
     char *completion = slash_completer.complete(text, slash_completer.user);
@@ -859,6 +877,16 @@ static void test_complete_preset_arguments(void)
     EXPECT(config_load(NULL) == 0);
     expect_completion("preset ", NULL);
     expect_candidates("preset ", NULL);
+}
+
+static void test_complete_selection_arguments(void)
+{
+    expect_completion("provider o", "provider openai ");
+    expect_candidates("provider ", "  mock openai");
+    expect_completion("effort h", "effort high ");
+    EXPECT(stub_choices_state == &completion_state);
+    expect_candidates("effort ", "  low high default");
+    expect_completion("effort high h", NULL);
 }
 
 static int match_word(const char *buffer, size_t cursor, size_t *start, size_t *end)
@@ -951,6 +979,7 @@ int main(void)
      * hax parent or user environment. */
     unsetenv("HAX_DISPLAY_WIDTH");
     unsetenv("HAX_CONTEXT_LIMIT");
+    slash_completer_init(&slash_completer, &completion_state);
 
     test_dispatch_not_a_command();
     test_dispatch_unknown();
@@ -982,6 +1011,7 @@ int main(void)
     test_complete_names_and_aliases();
     test_name_candidates_list_ambiguous_prefixes();
     test_complete_preset_arguments();
+    test_complete_selection_arguments();
     test_completer_matches_word_at_cursor();
     test_hint_shows_argument_placeholder();
     test_hint_stays_quiet_otherwise();

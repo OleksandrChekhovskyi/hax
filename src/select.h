@@ -6,6 +6,7 @@ struct agent_state;
 struct provider;
 struct model_info;
 struct catalog_entry;
+struct completion;
 
 /* Selectors persist a choice and apply it to the live session. A NULL argument opens the pickers,
  * which chain from provider to model to effort. An argument applies directly without a picker: a
@@ -15,6 +16,12 @@ struct catalog_entry;
 void select_provider(struct agent_state *state, const char *provider);
 void select_model(struct agent_state *state, const char *model);
 void select_effort(struct agent_state *state, const char *level);
+
+/* Add the arguments select_provider and select_effort accept, for Tab completion: provider ids,
+ * sorted, and the levels the live model offers followed by "default". Neither waits on the network
+ * or background work. */
+void select_provider_choices(struct completion *choices);
+void select_effort_choices(struct agent_state *state, struct completion *choices);
 
 /* Apply `name`, or open the preset picker when name is NULL. A fresh provider is constructed and
  * transferred only after validation succeeds. `announce` controls the confirmation display.

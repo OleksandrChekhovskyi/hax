@@ -38,6 +38,7 @@
 #include "system/tempfiles.h"
 #include "terminal/ansi.h"
 #include "terminal/input.h"
+#include "terminal/input_core.h"
 #include "terminal/interrupt.h"
 #include "terminal/notify.h"
 #include "terminal/theme.h"
@@ -1137,6 +1138,8 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
     input_history_open_tty(input, history_path, recording_enabled);
     free(history_path);
     free(cwd);
+    struct input_completer slash_completer;
+    slash_completer_init(&slash_completer, &state);
     input_add_completer(input, &slash_completer);
     input_add_completer(input, &file_mention_completer);
     input_set_hint(input, slash_hint_cb, NULL);

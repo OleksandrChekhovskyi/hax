@@ -57,7 +57,8 @@ struct slash_command {
     /* Add the values of the argument word that follows `preceding`, the trimmed earlier
      * arguments. Runs on Tab, so it must return promptly: no network, child processes, waiting on
      * background work, or tty output. NULL completes nothing. */
-    void (*argument_choices)(const char *preceding, struct completion *choices);
+    void (*argument_choices)(struct agent_state *state, const char *preceding,
+                             struct completion *choices);
 };
 
 struct shortcut {
@@ -90,7 +91,12 @@ static void run_usage(const struct command_call *call);
 static void run_login(const struct command_call *call);
 static void run_logout(const struct command_call *call);
 static void run_help(const struct command_call *call);
-static void preset_name_choices(const char *preceding, struct completion *choices);
+static void provider_id_choices(struct agent_state *state, const char *preceding,
+                                struct completion *choices);
+static void effort_level_choices(struct agent_state *state, const char *preceding,
+                                 struct completion *choices);
+static void preset_name_choices(struct agent_state *state, const char *preceding,
+                                struct completion *choices);
 
 /* Registry order is also /help order. */
 static const struct slash_command COMMANDS[] = {
@@ -128,6 +134,7 @@ static const struct slash_command COMMANDS[] = {
         .usage = "[id]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_provider,
+        .argument_choices = provider_id_choices,
     },
     {
         .name = "model",
@@ -142,6 +149,7 @@ static const struct slash_command COMMANDS[] = {
         .usage = "[level]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_effort,
+        .argument_choices = effort_level_choices,
     },
     {
         .name = "preset",
@@ -354,7 +362,8 @@ static int scan_command_name(const char *line, size_t *name_end)
 
 /* `text` is the command line after its slash, up to the cursor. Collect the choices matching its
  * last word, which `*word` points at; that word is the command name when no space precedes it. */
-static void collect_choices(const char *text, struct completion *choices, const char **word)
+static void collect_choices(struct agent_state *state, const char *text, struct completion *choices,
+                            const char **word)
 {
     const char *word_start = text + strlen(text);
     while (word_start > text && !isspace((unsigned char)word_start[-1]))
@@ -382,7 +391,7 @@ static void collect_choices(const char *text, struct completion *choices, const 
         while (preceding_len > 0 && isspace((unsigned char)preceding[preceding_len - 1]))
             preceding_len--;
         char *trimmed = xasprintf("%.*s", (int)preceding_len, preceding);
-        command->argument_choices(trimmed, choices);
+        command->argument_choices(state, trimmed, choices);
         free(trimmed);
     }
     completion_keep_prefixed(choices, word_start);
@@ -415,13 +424,11 @@ static int match_command(const char *buffer, size_t buffer_len, size_t cursor, s
 
 static char *complete_command(const char *text, void *user)
 {
-    (void)user;
-
     struct completion choices = {0};
     const char *word;
     char *replacement = NULL;
 
-    collect_choices(text, &choices, &word);
+    collect_choices(user, text, &choices, &word);
     char *extended = completion_extend(&choices, word);
     if (extended)
         replacement = xasprintf("%.*s%s", (int)(word - text), text, extended);
@@ -434,8 +441,6 @@ static char *complete_command(const char *text, void *user)
  * which /help already lists in full instead of a truncated row. */
 static char *list_command_choices(const char *text, void *user)
 {
-    (void)user;
-
     if (*text == '\0')
         return xstrdup("  see /help");
 
@@ -443,7 +448,7 @@ static char *list_command_choices(const char *text, void *user)
     const char *word;
     char *listing = NULL;
 
-    collect_choices(text, &choices, &word);
+    collect_choices(user, text, &choices, &word);
     if (choices.count > 1) {
         const char *marker = word == text ? "/" : "";
         struct buf list;
@@ -459,11 +464,15 @@ static char *list_command_choices(const char *text, void *user)
     return listing;
 }
 
-const struct input_completer slash_completer = {
-    .match = match_command,
-    .complete = complete_command,
-    .candidates = list_command_choices,
-};
+void slash_completer_init(struct input_completer *completer, struct agent_state *state)
+{
+    *completer = (struct input_completer){
+        .match = match_command,
+        .complete = complete_command,
+        .candidates = list_command_choices,
+        .user = state,
+    };
+}
 
 /* Placeholders appear once the name is complete and before any argument, so a mistyped or
  * partial name draws nothing. */
@@ -642,6 +651,14 @@ static void run_provider(const struct command_call *call)
     select_provider(call->state, call->argument);
 }
 
+static void provider_id_choices(struct agent_state *state, const char *preceding,
+                                struct completion *choices)
+{
+    (void)state;
+    if (!*preceding)
+        select_provider_choices(choices);
+}
+
 static void run_model(const struct command_call *call)
 {
     select_model(call->state, call->argument);
@@ -652,34 +669,36 @@ static void run_effort(const struct command_call *call)
     select_effort(call->state, call->argument);
 }
 
+static void effort_level_choices(struct agent_state *state, const char *preceding,
+                                 struct completion *choices)
+{
+    if (!*preceding)
+        select_effort_choices(state, choices);
+}
+
 static void run_preset(const struct command_call *call)
 {
     select_preset(call->state, call->argument, 1);
 }
 
-static int compare_strings(const void *left, const void *right)
-{
-    return strcmp(*(char *const *)left, *(char *const *)right);
-}
-
 /* Alphabetical, like the preset picker. Only names in the preset-name grammar are offered: a
  * hand-written name outside it, such as one with a space, cannot complete as one word. */
-static void preset_name_choices(const char *preceding, struct completion *choices)
+static void preset_name_choices(struct agent_state *state, const char *preceding,
+                                struct completion *choices)
 {
+    (void)state;
     if (*preceding)
         return;
 
     char **names = NULL;
     size_t count = config_preset_names(&names);
-    /* An empty list is NULL, which qsort must not receive even with a zero count. */
-    if (count > 1)
-        qsort(names, count, sizeof(*names), compare_strings);
     for (size_t i = 0; i < count; i++) {
         if (config_preset_name_valid(names[i]))
             completion_add(choices, names[i]);
         free(names[i]);
     }
     free(names);
+    completion_sort(choices);
 }
 
 static void run_preset_save(const struct command_call *call)

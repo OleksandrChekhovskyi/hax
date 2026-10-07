@@ -26,6 +26,7 @@
 #include "terminal/picker.h"
 #include "terminal/theme.h"
 #include "terminal/ui.h"
+#include "text/completion.h"
 #include "text/fmt.h"
 #include "transport/http.h"
 
@@ -521,6 +522,17 @@ static struct value_pick_result check_effort_level(struct agent_state *state,
     return result;
 }
 
+void select_effort_choices(struct agent_state *state, struct completion *choices)
+{
+    if (!state->provider)
+        return;
+    struct effort_set levels;
+    model_meta_efforts(state->provider, state->session->model, &levels);
+    for (size_t i = 0; i < levels.count; i++)
+        completion_add(choices, levels.values[i]);
+    completion_add(choices, "default");
+}
+
 static void persist_selection(struct agent_state *state, const char *provider_id, const char *model,
                               const char *effort, int model_discovered)
 {
@@ -824,6 +836,15 @@ static void switch_provider(struct agent_state *state, const char *name)
     commit_selection(state, candidate, def->id, model ? model : CONFIG_VALUE_DEFAULT,
                      CONFIG_VALUE_DEFAULT, candidate->model_discovered, APPLY_SWITCH_LINE);
     free(model);
+}
+
+void select_provider_choices(struct completion *choices)
+{
+    size_t def_count = 0;
+    const struct provider_def *const *defs = provider_all(&def_count);
+    for (size_t i = 0; i < def_count; i++)
+        completion_add(choices, defs[i]->id);
+    completion_sort(choices);
 }
 
 void select_provider(struct agent_state *state, const char *name)
