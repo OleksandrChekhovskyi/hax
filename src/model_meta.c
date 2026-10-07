@@ -231,16 +231,25 @@ void model_meta_wait(struct provider *provider)
     join_probe(provider);
 }
 
-void model_meta_wait_ms(struct provider *provider, long timeout_ms)
+void model_meta_wait_ms(struct provider *provider, long timeout_ms, http_tick_cb tick,
+                        void *tick_user)
 {
-    model_meta_wait_catalog(provider, timeout_ms, NULL, NULL);
+    model_meta_wait_catalog(provider, timeout_ms, tick, tick_user);
     if (!provider || !provider->meta || !provider->meta->probe_job)
         return;
     /* The budget is anchored at probe start so stacked callers on one request path do not each
      * wait the full amount for a slow probe. */
-    long remaining_ms = timeout_ms - (monotonic_ms() - provider->meta->probe_started_ms);
-    if (bg_job_wait_ms(provider->meta->probe_job, remaining_ms > 0 ? remaining_ms : 0))
-        join_probe(provider);
+    long deadline_ms = provider->meta->probe_started_ms + timeout_ms;
+    for (;;) {
+        long remaining_ms = deadline_ms - monotonic_ms();
+        long slice_ms = remaining_ms < 20 ? remaining_ms : 20;
+        if (bg_job_wait_ms(provider->meta->probe_job, slice_ms > 0 ? slice_ms : 0)) {
+            join_probe(provider);
+            return;
+        }
+        if (remaining_ms <= 20 || (tick && tick(tick_user)))
+            return;
+    }
 }
 
 static int model_info_has_details(const struct model_info *info)

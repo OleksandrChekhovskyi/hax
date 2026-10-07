@@ -11,6 +11,9 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 - Shell-like Tab completion of `/` commands and their arguments.
 - A dim placeholder after a `/` command shows the arguments it takes.
+- `/provider`, `/model`, and `/effort` take an id or level and apply it without a picker:
+  `/model <id>` also switches models on providers that cannot list theirs, and `/provider <id>`
+  starts on that provider's default model, or on none until `/model` picks one.
 - The built-in pickers take fzf's keys: Ctrl-J/Ctrl-K move the selection, and Ctrl-W and
   Alt-Backspace delete a word of the query.
 - A preset name right after `hax` starts with that preset: `hax review` is short for

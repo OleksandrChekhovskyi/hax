@@ -175,6 +175,15 @@ static char *resolve_model_label(struct provider *provider, const char *model)
                                                : xstrdup(model);
 }
 
+/* The configured model, else the provider's default; NULL when neither names one. */
+static char *selected_model(const struct provider *provider)
+{
+    const char *model = config_str("model");
+    if ((!model || !*model) && provider)
+        model = provider->default_model;
+    return (model && *model) ? xstrdup(model) : NULL;
+}
+
 const char *agent_provider_id(const struct provider *provider)
 {
     const char *id = config_str("provider");
@@ -208,10 +217,7 @@ void agent_session_init(struct agent_session *session, struct provider *provider
     memset(session, 0, sizeof(*session));
     session->last_user_turn_ms = -1;
 
-    const char *model = config_str("model");
-    if ((!model || !*model) && provider)
-        model = provider->default_model;
-    session->model = model ? xstrdup(model) : NULL;
+    session->model = selected_model(provider);
     session->model_label = resolve_model_label(provider, session->model);
     session->provider_id = provider ? provider_stable_id(provider) : NULL;
 
@@ -232,17 +238,9 @@ void agent_session_init(struct agent_session *session, struct provider *provider
     export_selection(provider, session);
 }
 
-int agent_session_reconfigure(struct agent_session *session, struct provider *provider)
+void agent_session_reconfigure(struct agent_session *session, struct provider *provider)
 {
-    const char *model = config_str("model");
-    if (!model || !*model)
-        model = provider->default_model;
-    if (!model || !*model) {
-        hax_err("no model available for provider '%s' (set one with /model)",
-                provider->name ? provider->name : "?");
-        return -1;
-    }
-    char *new_model = xstrdup(model);
+    char *new_model = selected_model(provider);
     char *new_model_label = resolve_model_label(provider, new_model);
     free(session->model);
     free(session->model_label);
@@ -256,7 +254,6 @@ int agent_session_reconfigure(struct agent_session *session, struct provider *pr
     free(session->effort);
     session->effort = effort;
     export_selection(provider, session);
-    return 0;
 }
 
 int agent_session_resync_effort(struct agent_session *session, struct provider *provider,
@@ -268,7 +265,7 @@ int agent_session_resync_effort(struct agent_session *session, struct provider *
         return 0;
     /* Bounded: this runs on the interactive foreground thread, and a router-autoload probe can
      * take minutes. A late report refines effort before the next prompt instead. */
-    model_meta_wait_ms(provider, MODEL_META_WAIT_MS);
+    model_meta_wait_ms(provider, MODEL_META_WAIT_MS, NULL, NULL);
     char *effort = resolve_effort(provider, session->model);
     int unchanged = (!effort && !session->effort) ||
                     (effort && session->effort && strcmp(effort, session->effort) == 0);
@@ -491,7 +488,7 @@ int agent_session_has_reported_usage(const struct agent_session *session)
 static void settle_resumed_metadata(struct provider *provider, const struct agent_session *session)
 {
     if (provider && agent_session_has_reported_usage(session))
-        model_meta_wait_ms(provider, MODEL_META_WAIT_MS);
+        model_meta_wait_ms(provider, MODEL_META_WAIT_MS, NULL, NULL);
 }
 
 void agent_session_prepare_resumed(struct agent_session *session, struct provider *provider,

@@ -53,7 +53,6 @@ struct fixture {
     struct render_ctx render;
     struct agent_state state;
     struct provider *candidate;
-    int result;
 };
 
 static void fixture_init(struct fixture *f)
@@ -107,7 +106,7 @@ static void fixture_free(struct fixture *f)
 static void do_apply(void *user)
 {
     struct fixture *f = user;
-    f->result = agent_apply_settings(&f->state, f->candidate, 1);
+    agent_apply_settings(&f->state, f->candidate, APPLY_BANNER_WHEN_EMPTY);
 }
 
 static void test_apply_settings_empty_reprints_banner(void)
@@ -117,7 +116,6 @@ static void test_apply_settings_empty_reprints_banner(void)
     EXPECT(f.session.n_items == 0);
 
     char *out = capture_stdout(do_apply, &f);
-    EXPECT(f.result == 0);
     EXPECT(strstr(out, "hax") != NULL);
     EXPECT(strstr(out, "prov-x · model-a") != NULL);
     EXPECT(strstr(out, "ctrl-d quit") != NULL);
@@ -137,7 +135,6 @@ static void test_apply_settings_nonempty_prints_marker(void)
     EXPECT(f.session.n_items > 0);
 
     char *out = capture_stdout(do_apply, &f);
-    EXPECT(f.result == 0);
     EXPECT(strstr(out, "switched to prov-x · model-a") != NULL);
     EXPECT(strstr(out, "ctrl-d quit") == NULL);
     /* The marker uses disp, so its trailing newline remains pending. */
@@ -148,16 +145,38 @@ static void test_apply_settings_nonempty_prints_marker(void)
     fixture_free(&f);
 }
 
+static void do_apply_switch_line(void *user)
+{
+    struct fixture *f = user;
+    agent_apply_settings(&f->state, f->candidate, APPLY_SWITCH_LINE);
+}
+
+static void test_apply_settings_switch_line_skips_banner(void)
+{
+    /* A typed /model or /effort changes one thing, so even before the conversation starts it
+     * confirms with a line instead of redrawing the banner. */
+    struct fixture f;
+    fixture_init(&f);
+    EXPECT(f.session.n_items == 0);
+
+    char *out = capture_stdout(do_apply_switch_line, &f);
+    EXPECT(strstr(out, "switched to prov-x · model-a") != NULL);
+    EXPECT(strstr(out, "ctrl-d quit") == NULL);
+
+    free(out);
+    fixture_free(&f);
+}
+
 static void do_apply_quiet(void *user)
 {
     struct fixture *f = user;
-    f->result = agent_apply_settings(&f->state, f->candidate, 0);
+    agent_apply_settings(&f->state, f->candidate, APPLY_SILENT);
 }
 
 static void test_apply_settings_quiet_prints_nothing(void)
 {
     /* `/new <preset>` applies before it resets and prints its own banner
-     * afterwards, so announce = 0 must produce no output at all — not the
+     * afterwards, so APPLY_SILENT must produce no output at all — not the
      * mid-conversation marker this history would otherwise earn — while
      * still applying the settings. disp is left exactly as the caller set
      * it, so the banner that follows draws into the same gap. */
@@ -168,7 +187,6 @@ static void test_apply_settings_quiet_prints_nothing(void)
     setenv("HAX_MODEL", "model-b", 1); /* the change the silent apply resolves */
 
     char *out = capture_stdout(do_apply_quiet, &f);
-    EXPECT(f.result == 0);
     EXPECT_STR_EQ(out, "");
     /* Silence is about output, not effect. */
     EXPECT_STR_EQ(f.session.model, "model-b");
@@ -176,34 +194,6 @@ static void test_apply_settings_quiet_prints_nothing(void)
     EXPECT(f.render.disp.pending_newlines == 0);
 
     free(out);
-    fixture_free(&f);
-}
-
-static void test_apply_settings_no_model_fails_intact(void)
-{
-    struct fixture f;
-    fixture_init(&f);
-    agent_session_add_user(&f.session, "hello");
-    size_t items_before = f.session.n_items;
-    char *model_before = xstrdup(f.session.model);
-
-    /* Pull the model out from under the next resolve: no env value and no
-     * provider default. reconfigure must fail without touching history or
-     * the currently-applied model, and print no confirmation. (Its "no
-     * model available" diagnostic goes to stderr and shows in the test
-     * log — expected, not a failure.) */
-    unsetenv("HAX_MODEL");
-    f.provider.default_model = NULL;
-
-    char *out = capture_stdout(do_apply, &f);
-    EXPECT(f.result == -1);
-    EXPECT(f.session.n_items == items_before);
-    EXPECT_STR_EQ(f.session.model, model_before);
-    EXPECT(strstr(out, "switched to") == NULL);
-    EXPECT(strstr(out, "ctrl-d quit") == NULL);
-
-    free(out);
-    free(model_before);
     fixture_free(&f);
 }
 
@@ -231,10 +221,13 @@ static int counting_probe_model(struct provider *p, const char *model, struct mo
     return -1;
 }
 
-static void test_apply_settings_failed_provider_change_keeps_old(void)
+static void test_apply_settings_switches_without_model(void)
 {
     struct fixture f;
     fixture_init(&f);
+    agent_session_add_user(&f.session, "hello");
+    size_t items_before = f.session.n_items;
+    /* No env value and no provider default: like startup, the switch leaves the model unset. */
     unsetenv("HAX_MODEL");
     f.provider.destroy = counting_provider_destroy;
     struct provider next = {.name = "prov-y"};
@@ -242,11 +235,12 @@ static void test_apply_settings_failed_provider_change_keeps_old(void)
     provider_destroy_calls = 0;
 
     char *out = capture_stdout(do_apply, &f);
-    EXPECT(f.result == -1);
-    EXPECT(f.state.provider == &f.provider);
-    EXPECT(provider_destroy_calls == 0);
-    EXPECT_STR_EQ(f.session.provider_id, "prov-x");
-    EXPECT(out[0] == '\0');
+    EXPECT(f.state.provider == &next);
+    EXPECT(provider_destroy_calls == 1);
+    EXPECT_STR_EQ(f.session.provider_id, "prov-y");
+    EXPECT(f.session.model == NULL);
+    EXPECT(f.session.n_items == items_before);
+    EXPECT(strstr(out, "switched to prov-y · no model — use /model") != NULL);
 
     free(out);
     fixture_free(&f);
@@ -263,14 +257,12 @@ static void test_apply_settings_refreshes_on_model_or_provider_change(void)
      * must not re-run — re-probing on every apply would add a needless
      * network round-trip and cancel/join churn. */
     char *out = capture_stdout(do_apply, &f);
-    EXPECT(f.result == 0);
     EXPECT(refresh_calls == 0);
     free(out);
 
     /* A real model change re-probes, with the new model. */
     setenv("HAX_MODEL", "model-b", 1);
     out = capture_stdout(do_apply, &f);
-    EXPECT(f.result == 0);
     EXPECT(refresh_calls == 1);
     EXPECT_STR_EQ(refresh_last_model, "model-b");
     free(out);
@@ -288,7 +280,6 @@ static void test_apply_settings_refreshes_on_model_or_provider_change(void)
     refresh_calls = 0;
     provider_destroy_calls = 0;
     out = capture_stdout(do_apply, &f);
-    EXPECT(f.result == 0);
     EXPECT(f.state.provider == &next);
     EXPECT(provider_destroy_calls == 1);
     EXPECT(refresh_calls == 1);
@@ -788,7 +779,6 @@ static void test_apply_settings_records_switch(void)
 
     setenv("HAX_MODEL", "model-b", 1);
     char *out = capture_stdout(do_apply, &f);
-    EXPECT(f.result == 0);
 
     /* A switch the user hasn't used yet stays out of the file. */
     struct session_meta m;
@@ -816,9 +806,9 @@ int main(void)
     EXPECT(chdir(t_tempdir()) == 0);
     test_apply_settings_empty_reprints_banner();
     test_apply_settings_nonempty_prints_marker();
+    test_apply_settings_switch_line_skips_banner();
     test_apply_settings_quiet_prints_nothing();
-    test_apply_settings_no_model_fails_intact();
-    test_apply_settings_failed_provider_change_keeps_old();
+    test_apply_settings_switches_without_model();
     test_apply_settings_refreshes_on_model_or_provider_change();
     test_resync_effort_follows_late_metadata();
     test_new_conversation_resets_everything();

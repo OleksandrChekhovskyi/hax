@@ -61,10 +61,21 @@ void agent_undo(struct agent_state *state, size_t turn_index);
  * unchanged. */
 void agent_fork(struct agent_state *state, size_t turn_index);
 
-/* Re-resolve the session against `provider`. A distinct provider transfers into `state` only on
- * success; on failure the caller retains it and the live session and provider remain unchanged.
- * When `announce` is zero, no confirmation is rendered. Returns 0 on success. */
-int agent_apply_settings(struct agent_state *state, struct provider *provider, int announce);
+/* How agent_apply_settings confirms a selection. */
+enum apply_announce {
+    APPLY_SILENT,
+    /* A whole selection set at once, as by a preset or the pickers, redraws the banner before the
+     * conversation starts, like startup; mid-conversation a banner would imply a reset. */
+    APPLY_BANNER_WHEN_EMPTY,
+    /* A single typed change prints one "switched to" line even before the conversation starts. */
+    APPLY_SWITCH_LINE,
+};
+
+/* Re-resolve the session against `provider`, which transfers into `state` when distinct from the
+ * live provider. A provider without a configured or default model leaves the model unset until
+ * /model chooses one. */
+void agent_apply_settings(struct agent_state *state, struct provider *provider,
+                          enum apply_announce announce);
 
 /* Rebuild display settings between provider streams. */
 void agent_display_refresh(struct agent_state *state);

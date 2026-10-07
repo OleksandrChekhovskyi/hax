@@ -85,9 +85,9 @@ Type `/help` for the authoritative live list.
 | `/resume` | Pick a past session for this directory. |
 | `/fork [n]` | Create a new session before an earlier prompt; `/fork 0` clones the current tip. |
 | `/undo [n]` | Roll the conversation back to before an earlier prompt. |
-| `/provider` | Choose a provider, model, and effort. |
-| `/model` | Choose a model and effort for the current provider. |
-| `/effort` | Choose reasoning effort when supported. |
+| `/provider [id]` | Switch provider. |
+| `/model [id]` | Switch the current provider's model. |
+| `/effort [level]` | Set reasoning effort, when the model supports it. |
 | `/preset [name]` | Apply a config-defined preset. |
 | `/preset-save <name> [tint]` | Save the current provider/model/effort as a preset. |
 | `/config [key [value]]` | Inspect settings or change one for this process. |
@@ -98,6 +98,12 @@ Type `/help` for the authoritative live list.
 | `/usage` | Query provider account/subscription usage when supported. |
 | `/login [provider]` | Log in to a provider account with a hax-managed token (ChatGPT/codex). |
 | `/logout [provider]` | Revoke and remove a hax-managed login. |
+
+Without an argument, `/provider`, `/model`, and `/effort` open pickers that walk through the rest of
+the selection: `/provider` continues to the model and effort, `/model` to the effort. With an
+argument, they switch without a picker: `/provider <id>` starts on the provider's default model and
+effort, or on no model until `/model` picks one; `/model <id>` keeps the current effort, or the
+nearest level the new model offers; `/effort <level>` takes a level the model offers, or `default`.
 
 Prefer `/fork` when trying an alternative: the original session stays intact. `/undo` has no redo;
 the removed user turns still count toward the session's usage totals.

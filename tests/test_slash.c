@@ -85,26 +85,31 @@ long picker_run(const struct picker_opts *opts)
     return -1;
 }
 
-/* Selector stubs expose only routing state relevant to slash commands. */
-void select_provider(struct agent_state *state)
-{
-    (void)state;
-}
-void select_model(struct agent_state *state)
-{
-    (void)state;
-}
-void select_effort(struct agent_state *state)
-{
-    (void)state;
-}
-static int stub_preset_rc = 0;
 /* Stubs copy borrowed arguments, which the dispatcher frees once the handler returns. */
 static void record_argument(char **slot, const char *value)
 {
     free(*slot);
     *slot = value ? xstrdup(value) : NULL;
 }
+
+/* Selector stubs expose only routing state relevant to slash commands. */
+static char *stub_selector_argument = NULL;
+void select_provider(struct agent_state *state, const char *provider)
+{
+    (void)state;
+    record_argument(&stub_selector_argument, provider);
+}
+void select_model(struct agent_state *state, const char *model)
+{
+    (void)state;
+    record_argument(&stub_selector_argument, model);
+}
+void select_effort(struct agent_state *state, const char *level)
+{
+    (void)state;
+    record_argument(&stub_selector_argument, level);
+}
+static int stub_preset_rc = 0;
 static char *stub_preset_name = NULL;
 static int stub_preset_announce = -1;
 int select_preset(struct agent_state *state, const char *name, int announce)
@@ -640,6 +645,31 @@ static void test_preset_save_routes_whole_argument(void)
     EXPECT(stub_preset_save_argument == NULL);
 }
 
+static void test_selectors_receive_arguments(void)
+{
+    struct render_ctx r = {0};
+    r.disp.committed_newlines = 1;
+    struct agent_state state = {.render = &r};
+    const char *const lines[][2] = {
+        {"/provider openrouter", "openrouter"},
+        {"/model vendor/model-1", "vendor/model-1"},
+        {"/effort high", "high"},
+        {"/effort", NULL},
+    };
+
+    for (size_t i = 0; i < sizeof(lines) / sizeof(lines[0]); i++) {
+        record_argument(&stub_selector_argument, "not called");
+        struct dispatch_call c = {.line = lines[i][0], .state = &state};
+        char *out = capture_stdout(do_dispatch, &c);
+        free(out);
+        EXPECT(c.result == SLASH_HANDLED);
+        if (!lines[i][1])
+            EXPECT(stub_selector_argument == NULL);
+        else
+            EXPECT(stub_selector_argument && strcmp(stub_selector_argument, lines[i][1]) == 0);
+    }
+}
+
 static void test_dispatch_trims_trailing_whitespace(void)
 {
     struct render_ctx r = {0};
@@ -890,6 +920,7 @@ static void test_hint_shows_argument_placeholder(void)
     expect_hint("/new   ", "[preset]");
     expect_hint("/preset", " [name]");
     expect_hint("/clear", " [preset]");
+    expect_hint("/effort", " [level]");
 }
 
 static void test_hint_stays_quiet_otherwise(void)
@@ -899,8 +930,8 @@ static void test_hint_stays_quiet_otherwise(void)
     expect_hint("/", NULL);
     expect_hint("/zzz", NULL);
     expect_hint("/zzz x", NULL);
-    expect_hint("/model", NULL);
-    expect_hint("/model ", NULL);
+    expect_hint("/copy", NULL);
+    expect_hint("/copy ", NULL);
     expect_hint("/model foo", NULL);
     expect_hint("/new foo", NULL);
 }
@@ -941,6 +972,7 @@ int main(void)
     test_new_keeps_conversation_when_preset_fails();
     test_clear_alias_takes_preset_too();
     test_preset_save_routes_whole_argument();
+    test_selectors_receive_arguments();
     test_dispatch_trims_trailing_whitespace();
     test_resume_cancelled_picker_keeps_newline_state();
     test_resume_selected_session_keeps_newline_state();

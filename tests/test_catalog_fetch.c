@@ -284,7 +284,7 @@ static void scenario_no_identity_never_fetches(void)
     struct provider local = {.catalog_id = NULL};
     model_meta_prefetch(&local);
     model_meta_wait_catalog(&local, 5000, NULL, NULL);
-    model_meta_wait_ms(&local, 5000);
+    model_meta_wait_ms(&local, 5000, NULL, NULL);
     /* Draining returns at once when nothing was fetched and otherwise waits for the fetch, so any
      * request it made has reached the listener by now. */
     catalog_drain(5000);

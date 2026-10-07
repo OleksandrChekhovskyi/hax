@@ -353,7 +353,7 @@ static int http_provider_stream(struct provider *base, const struct context *con
     /* Bounded: a router-autoload probe can take minutes, and the request waits for that model
      * anyway. */
     if (request_reads_metadata(provider))
-        model_meta_wait_ms(base, MODEL_META_WAIT_MS);
+        model_meta_wait_ms(base, MODEL_META_WAIT_MS, NULL, NULL);
     const struct wire *wire = resolve_model_wire(provider, model);
     if (!wire) {
         char *message = xasprintf("model %s needs a protocol hax does not support", model);

@@ -346,7 +346,11 @@ static struct model_pick_result choose_model(struct agent_state *state, struct p
 
     /* Missing enumeration, fetch failure, and an empty catalog need different diagnostics. */
     if (!provider->list_models) {
-        ui_note("%s can't list models — set one with HAX_MODEL or in config", provider_name);
+        /* A switch target is not live yet, so /model would not reach it. */
+        if (provider == state->provider)
+            ui_note("%s can't list models — use /model <id> to name one", provider_name);
+        else
+            ui_note("%s can't list models", provider_name);
         disp_sync_external_line(&state->render->disp);
         return result;
     }
@@ -401,34 +405,49 @@ static struct model_pick_result choose_model(struct agent_state *state, struct p
     return result;
 }
 
+/* Resolve the levels `model` offers. The ladder may come from the catalog or a model probe, and
+ * either still in flight would leave the provider's unverified levels, so wait for both; usually a
+ * no-op after a model pick. Returns -1 when the wait is interrupted. */
+static int load_effort_levels(struct agent_state *state, struct provider *provider,
+                              const char *model, struct effort_set *levels)
+{
+    struct busy *busy = busy_begin("fetching model metadata...");
+    model_meta_wait_ms(provider, MODEL_META_WAIT_MS, busy_tick, NULL);
+    if (busy_end(busy)) {
+        disp_sync_external_line(&state->render->disp);
+        return -1;
+    }
+    model_meta_efforts(provider, model, levels);
+    return 0;
+}
+
+/* Distinguish a model-specific restriction from a provider without effort support. */
+static void note_no_effort_levels(struct agent_state *state, struct provider *provider,
+                                  const char *model)
+{
+    const char *const *provider_efforts = NULL;
+    if (provider->list_efforts && provider->list_efforts(provider, &provider_efforts) > 0)
+        ui_note("%s doesn't take reasoning-effort levels", model ? model : "this model");
+    else
+        ui_note("the %s provider doesn't expose reasoning-effort levels",
+                provider->name ? provider->name : "?");
+    disp_sync_external_line(&state->render->disp);
+}
+
 /* Offer only effort levels accepted by `model`. A NULL value means provider default. */
 static struct value_pick_result choose_effort(struct agent_state *state, struct provider *provider,
                                               const char *model, const char *current_effort,
                                               int announce_unavailable)
 {
     struct value_pick_result result = {.status = PICK_NONE};
-    /* The ladder may come from the catalog; a cold cache would otherwise offer the provider's
-     * unverified levels. Usually a no-op after a model pick. */
-    struct busy *busy = busy_begin("fetching model catalog...");
-    model_meta_wait_catalog(provider, MODEL_META_WAIT_MS, busy_tick, NULL);
-    if (busy_end(busy)) {
-        disp_sync_external_line(&state->render->disp);
+    struct effort_set levels;
+    if (load_effort_levels(state, provider, model, &levels) != 0) {
         result.status = PICK_CANCELLED;
         return result;
     }
-    struct effort_set levels;
-    model_meta_efforts(provider, model, &levels);
     if (levels.count == 0) {
-        if (announce_unavailable) {
-            /* Distinguish a model-specific restriction from a provider without effort support. */
-            const char *const *provider_efforts = NULL;
-            if (provider->list_efforts && provider->list_efforts(provider, &provider_efforts) > 0)
-                ui_note("%s doesn't take reasoning-effort levels", model ? model : "this model");
-            else
-                ui_note("the %s provider doesn't expose reasoning-effort levels",
-                        provider->name ? provider->name : "?");
-            disp_sync_external_line(&state->render->disp);
-        }
+        if (announce_unavailable)
+            note_no_effort_levels(state, provider, model);
         return result;
     }
 
@@ -462,17 +481,44 @@ static struct value_pick_result choose_effort(struct agent_state *state, struct 
     return result;
 }
 
-/* NULL model or effort retains same-provider state; callers pass default sentinels when changing
- * provider. */
-static void apply_selection_overrides(const char *provider_id, const char *model,
-                                      const char *effort)
+/* Accept a typed `level` only when `model` offers it; "default" lets the provider choose. */
+static struct value_pick_result check_effort_level(struct agent_state *state,
+                                                   struct provider *provider, const char *model,
+                                                   const char *level)
 {
-    config_preset_exit(CONFIG_TIER_RUN);
-    config_set_override("provider", provider_id);
-    if (model)
-        config_set_override("model", model);
-    if (effort)
-        config_set_override("effort", effort);
+    struct value_pick_result result = {.status = PICK_FAILED};
+    /* Default needs no levels, so it also clears a request carried over from another model. */
+    if (strcmp(level, "default") == 0) {
+        result.status = PICK_MADE;
+        return result;
+    }
+    struct effort_set levels;
+    if (load_effort_levels(state, provider, model, &levels) != 0) {
+        result.status = PICK_CANCELLED;
+        return result;
+    }
+    if (levels.count == 0) {
+        note_no_effort_levels(state, provider, model);
+        return result;
+    }
+    if (effort_set_has(&levels, level)) {
+        result.status = PICK_MADE;
+        result.value = xstrdup(level);
+        return result;
+    }
+
+    struct buf expected;
+    buf_init(&expected);
+    for (size_t i = 0; i < levels.count; i++) {
+        buf_append_str(&expected, levels.values[i]);
+        buf_append_str(&expected, ", ");
+    }
+    buf_append_str(&expected, "or default");
+    ui_error("%s doesn't take effort '%s' — expected %s", model ? model : "this model", level,
+             expected.data);
+    disp_sync_external_line(&state->render->disp);
+    buf_free(&expected);
+    return result;
 }
 
 static void persist_selection(struct agent_state *state, const char *provider_id, const char *model,
@@ -491,6 +537,24 @@ static void persist_selection(struct agent_state *state, const char *provider_id
     }
 }
 
+/* Make a selection live and remembered: run overrides, the live session, and state.json. A NULL
+ * model or effort retains same-provider state; callers pass default sentinels when changing
+ * provider. `provider_id` must survive config writes. */
+static void commit_selection(struct agent_state *state, struct provider *provider,
+                             const char *provider_id, const char *model, const char *effort,
+                             int model_discovered, enum apply_announce announce)
+{
+    config_preset_exit(CONFIG_TIER_RUN);
+    config_set_override("provider", provider_id);
+    if (model)
+        config_set_override("model", model);
+    if (effort)
+        config_set_override("effort", effort);
+    agent_apply_settings(state, provider, announce);
+    provider->model_discovered = model_discovered;
+    persist_selection(state, provider_id, model, effort, model_discovered);
+}
+
 /* Config writes invalidate the borrowed provider id, so copy it before committing. */
 static char *current_provider_id(const struct provider *provider)
 {
@@ -498,26 +562,52 @@ static char *current_provider_id(const struct provider *provider)
     return xstrdup(provider_id ? provider_id : "");
 }
 
-/* Raw constructor diagnostics bypass disp; synchronize its trailing-row state afterward. */
-static void sync_constructor_diagnostics(struct agent_state *state, unsigned long before)
+static struct provider *require_provider(struct agent_state *state)
 {
-    if (hax_diag_sequence() != before)
+    if (!state->provider) {
+        ui_note("no provider selected — use /provider to choose one first");
         disp_sync_external_line(&state->render->disp);
+    }
+    return state->provider;
+}
+
+/* Construct `def` under the overrides staged since `snapshot`. Returns NULL with them rolled back
+ * once the constructor has reported why. */
+static struct provider *construct_provider(struct agent_state *state,
+                                           const struct provider_def *def,
+                                           struct config_snapshot *snapshot)
+{
+    unsigned long diagnostics_before = hax_diag_sequence();
+    struct provider *candidate = provider_construct(def);
+    /* Raw constructor diagnostics bypass disp; synchronize its trailing-row state afterward. */
+    if (hax_diag_sequence() != diagnostics_before)
+        disp_sync_external_line(&state->render->disp);
+    if (!candidate) {
+        config_snapshot_restore(snapshot);
+        disp_sync_external_line(&state->render->disp); /* the constructor printed an error line */
+    }
+    return candidate;
+}
+
+/* Whether `candidate` has a model: one in the overrides, possibly reconciled during construction,
+ * or its default. */
+static int resolves_model(const struct provider *candidate)
+{
+    const char *model = config_str("model");
+    return (model && *model) || (candidate->default_model && *candidate->default_model);
 }
 
 /* ---------- public flows ---------- */
 
-void select_effort(struct agent_state *state)
+void select_effort(struct agent_state *state, const char *level)
 {
-    struct provider *provider = state->provider;
-    if (!provider) {
-        ui_note("no provider selected — use /provider to choose one first");
-        disp_sync_external_line(&state->render->disp);
+    struct provider *provider = require_provider(state);
+    if (!provider)
         return;
-    }
 
     struct value_pick_result effort_pick =
-        choose_effort(state, provider, state->session->model, state->session->effort, 1);
+        level ? check_effort_level(state, provider, state->session->model, level)
+              : choose_effort(state, provider, state->session->model, state->session->effort, 1);
     if (effort_pick.status != PICK_MADE)
         return;
 
@@ -530,14 +620,8 @@ void select_effort(struct agent_state *state)
                       : NULL;
     const char *effort = effort_pick.value ? effort_pick.value : CONFIG_VALUE_DEFAULT;
     char *provider_id = current_provider_id(provider);
-    struct config_snapshot *snapshot = config_snapshot_take();
-    apply_selection_overrides(provider_id, model, effort);
-    if (agent_apply_settings(state, provider, 1) != 0) {
-        config_snapshot_restore(snapshot);
-    } else {
-        config_snapshot_free(snapshot);
-        persist_selection(state, provider_id, model, effort, provider->model_discovered);
-    }
+    commit_selection(state, provider, provider_id, model, effort, provider->model_discovered,
+                     level ? APPLY_SWITCH_LINE : APPLY_BANNER_WHEN_EMPTY);
     free(provider_id);
     free(model);
     free(effort_pick.value);
@@ -553,14 +637,34 @@ static void restore_model_metadata(struct provider *provider, struct model_info 
     model_info_clear(saved_metadata);
 }
 
-void select_model(struct agent_state *state)
+/* Pin the provider with an explicit model and `effort`. Callers pass the default sentinel rather
+ * than a NULL effort so a stale lower-tier effort cannot leak into the new model. */
+static void commit_model(struct agent_state *state, struct provider *provider, const char *model,
+                         const char *effort, int model_discovered, enum apply_announce announce)
 {
-    struct provider *provider = state->provider;
-    if (!provider) {
-        ui_note("no provider selected — use /provider to choose one first");
-        disp_sync_external_line(&state->render->disp);
+    char *provider_id = current_provider_id(provider);
+    commit_selection(state, provider, provider_id, model, effort, model_discovered, announce);
+    /* Re-selecting the unchanged model must retry a failed metadata probe; settings apply skips
+     * the refresh because the model did not change. */
+    model_meta_refresh(provider, model);
+    free(provider_id);
+}
+
+void select_model(struct agent_state *state, const char *model)
+{
+    struct provider *provider = require_provider(state);
+    if (!provider)
+        return;
+    if (model) {
+        /* Carry the requested effort over; reconfiguration narrows it to the new model's levels.
+         * Copy it first because config writes invalidate borrowed values. */
+        const char *requested_effort = config_str("effort");
+        char *effort = xstrdup(requested_effort ? requested_effort : CONFIG_VALUE_DEFAULT);
+        commit_model(state, provider, model, effort, 0, APPLY_SWITCH_LINE);
+        free(effort);
         return;
     }
+
     /* The candidate metadata needed by effort selection temporarily displaces the live model's;
      * snapshot it for cancellation. */
     struct model_info saved_metadata;
@@ -584,27 +688,10 @@ void select_model(struct agent_state *state)
 
     /* An explicit choice converts discovered server state into a persisted model preference. */
     int model_discovered = model_pick.explicit_choice ? 0 : provider->model_discovered;
-
-    /* Pin the provider with an explicit model. Missing/default effort uses the sentinel so stale
-     * lower-tier effort cannot leak into a provider that did not advertise it. */
     const char *effort = effort_pick.value ? effort_pick.value : CONFIG_VALUE_DEFAULT;
-    char *provider_id = current_provider_id(provider);
-    struct config_snapshot *snapshot = config_snapshot_take();
-    apply_selection_overrides(provider_id, model_pick.model, effort);
-    if (agent_apply_settings(state, provider, 1) != 0) {
-        config_snapshot_restore(snapshot);
-        restore_model_metadata(provider, &saved_metadata, had_saved_metadata,
-                               state->session->model);
-    } else {
-        model_info_clear(&saved_metadata);
-        provider->model_discovered = model_discovered;
-        config_snapshot_free(snapshot);
-        persist_selection(state, provider_id, model_pick.model, effort, model_discovered);
-        /* Re-selecting the unchanged model must retry a failed metadata probe; settings apply
-         * skips the refresh because the model did not change. */
-        model_meta_refresh(provider, model_pick.model);
-    }
-    free(provider_id);
+    commit_model(state, provider, model_pick.model, effort, model_discovered,
+                 APPLY_BANNER_WHEN_EMPTY);
+    model_info_clear(&saved_metadata);
     free(model_pick.model);
     free(effort_pick.value);
 }
@@ -676,8 +763,76 @@ static struct provider_pick_result choose_provider_def(const char *current_provi
     return result;
 }
 
-void select_provider(struct agent_state *state)
+static int recheck_available(struct agent_state *state, const struct provider_def *def)
 {
+    char *unavailable_reason = NULL;
+    int available = def_available(def, &unavailable_reason);
+    if (!available) {
+        ui_note("%s is unavailable — %s", provider_display_name(def),
+                unavailable_reason ? unavailable_reason : "unavailable");
+        disp_sync_external_line(&state->render->disp);
+    }
+    free(unavailable_reason);
+    return available;
+}
+
+/* Construct `def` as a switch target under a snapshotted prospective selection. Default sentinels
+ * prevent the old backend's model and effort from influencing value-dependent constructors. */
+static struct provider *construct_candidate(struct agent_state *state,
+                                            const struct provider_def *def,
+                                            struct config_snapshot **snapshot)
+{
+    *snapshot = config_snapshot_take();
+    config_set_override("provider", def->id);
+    config_set_override("model", CONFIG_VALUE_DEFAULT);
+    config_set_override("effort", CONFIG_VALUE_DEFAULT);
+    return construct_provider(state, def, *snapshot);
+}
+
+/* Switch without pickers to the provider's discovered or default model, if any, and its default
+ * effort. Model settings from lower tiers stay shadowed, since they may target another provider. */
+static void switch_provider(struct agent_state *state, const char *name)
+{
+    const struct provider_def *def = provider_find(name);
+    if (!def) {
+        ui_error("unknown provider '%s' — /provider lists them", name);
+        disp_sync_external_line(&state->render->disp);
+        return;
+    }
+    char *current_id = state->provider ? current_provider_id(state->provider) : NULL;
+    int is_current = current_id && strcmp(def->id, current_id) == 0;
+    free(current_id);
+    if (is_current) {
+        ui_note("already using %s — /model switches its model", provider_display_name(def));
+        disp_sync_external_line(&state->render->disp);
+        return;
+    }
+    if (!recheck_available(state, def))
+        return;
+
+    struct config_snapshot *snapshot;
+    struct provider *candidate = construct_candidate(state, def, &snapshot);
+    if (!candidate)
+        return;
+
+    config_snapshot_free(snapshot);
+
+    /* Construction may have reconciled a discovered model into the override tier; copy it before
+     * config writes invalidate it. */
+    const char *resolved_model = config_str("model");
+    char *model = (resolved_model && *resolved_model) ? xstrdup(resolved_model) : NULL;
+    commit_selection(state, candidate, def->id, model ? model : CONFIG_VALUE_DEFAULT,
+                     CONFIG_VALUE_DEFAULT, candidate->model_discovered, APPLY_SWITCH_LINE);
+    free(model);
+}
+
+void select_provider(struct agent_state *state, const char *name)
+{
+    if (name) {
+        switch_provider(state, name);
+        return;
+    }
+
     char *current_id = state->provider ? current_provider_id(state->provider) : NULL;
     struct provider_pick_result provider_pick = choose_provider_def(current_id);
     const struct provider_def *def = provider_pick.def;
@@ -687,38 +842,21 @@ void select_provider(struct agent_state *state)
     }
 
     /* Recheck an unavailable row at commit because the advisory probe may be stale. */
-    if (!provider_pick.probe_available) {
-        char *unavailable_reason = NULL;
-        if (!def_available(def, &unavailable_reason)) {
-            ui_note("%s is unavailable — %s", provider_display_name(def),
-                    unavailable_reason ? unavailable_reason : "unavailable");
-            disp_sync_external_line(&state->render->disp);
-            free(unavailable_reason);
-            free(current_id);
-            return;
-        }
-        free(unavailable_reason);
+    if (!provider_pick.probe_available && !recheck_available(state, def)) {
+        free(current_id);
+        return;
     }
 
     /* Re-picking the live provider avoids rebuilding it and continues to model selection. */
     if (current_id && strcmp(def->id, current_id) == 0) {
         free(current_id);
-        select_model(state);
+        select_model(state, NULL);
         return;
     }
 
-    /* Construct under a snapshotted prospective selection. Default sentinels prevent the old
-     * backend's model and effort from influencing value-dependent constructors. */
-    struct config_snapshot *snapshot = config_snapshot_take();
-    config_set_override("provider", def->id);
-    config_set_override("model", CONFIG_VALUE_DEFAULT);
-    config_set_override("effort", CONFIG_VALUE_DEFAULT);
-    unsigned long diagnostics_before = hax_diag_sequence();
-    struct provider *candidate = provider_construct(def);
-    sync_constructor_diagnostics(state, diagnostics_before);
+    struct config_snapshot *snapshot;
+    struct provider *candidate = construct_candidate(state, def, &snapshot);
     if (!candidate) {
-        config_snapshot_restore(snapshot);
-        disp_sync_external_line(&state->render->disp); /* the constructor printed an error line */
         free(current_id);
         return;
     }
@@ -750,22 +888,12 @@ void select_provider(struct agent_state *state)
         return;
     }
 
-    int model_discovered = model_pick.explicit_choice ? 0 : candidate->model_discovered;
-    const char *model_override = model_pick.model ? model_pick.model : CONFIG_VALUE_DEFAULT;
-    const char *effort_override = effort_pick.value ? effort_pick.value : CONFIG_VALUE_DEFAULT;
-    apply_selection_overrides(def->id, model_override, effort_override);
-
-    if (agent_apply_settings(state, candidate, 1) != 0) {
-        candidate->destroy(candidate); /* ownership transfers only on success */
-        config_snapshot_restore(snapshot);
-        free(current_id);
-        free(model_pick.model);
-        free(effort_pick.value);
-        return;
-    }
-    candidate->model_discovered = model_discovered;
     config_snapshot_free(snapshot);
-    persist_selection(state, def->id, model_override, effort_override, model_discovered);
+    int model_discovered = model_pick.explicit_choice ? 0 : candidate->model_discovered;
+    commit_selection(state, candidate, def->id,
+                     model_pick.model ? model_pick.model : CONFIG_VALUE_DEFAULT,
+                     effort_pick.value ? effort_pick.value : CONFIG_VALUE_DEFAULT, model_discovered,
+                     APPLY_BANNER_WHEN_EMPTY);
 
     free(current_id);
     free(model_pick.model);
@@ -863,20 +991,12 @@ int select_preset(struct agent_state *state, const char *name, int announce)
         disp_sync_external_line(&state->render->disp);
         goto out;
     }
-    unsigned long diagnostics_before = hax_diag_sequence();
-    struct provider *candidate = provider_construct(def);
-    sync_constructor_diagnostics(state, diagnostics_before);
-    if (!candidate) {
-        /* The constructor already diagnosed the failure. */
-        config_snapshot_restore(snapshot);
-        disp_sync_external_line(&state->render->disp);
+    struct provider *candidate = construct_provider(state, def, snapshot);
+    if (!candidate)
         goto out;
-    }
 
-    /* Validate the post-construction model before ownership transfer; construction may have
-     * reconciled a discovered model into the override tier. */
-    const char *model = config_str("model");
-    if ((!model || !*model) && !(candidate->default_model && *candidate->default_model)) {
+    /* A preset promises a whole selection, so it needs a model before ownership transfer. */
+    if (!resolves_model(candidate)) {
         ui_error("preset '%s': no model resolves for provider '%s' — name one in the preset", name,
                  def->id);
         candidate->destroy(candidate);
@@ -885,14 +1005,8 @@ int select_preset(struct agent_state *state, const char *name, int announce)
         goto out;
     }
 
-    /* Ownership transfers only after validation; unexpected apply failure still rolls back. */
-    if (agent_apply_settings(state, candidate, announce) != 0) {
-        candidate->destroy(candidate);
-        config_snapshot_restore(snapshot);
-        disp_sync_external_line(&state->render->disp);
-        goto out;
-    }
     config_snapshot_free(snapshot);
+    agent_apply_settings(state, candidate, announce ? APPLY_BANNER_WHEN_EMPTY : APPLY_SILENT);
 
     /* Persist the name only after application succeeds, keeping its definition authoritative. */
     if (config_persist_state("preset", name) != 0) {
@@ -1019,12 +1133,9 @@ static const char *preset_save_initial_tint(const char *name, int preset_exists)
 
 void select_preset_save(struct agent_state *state, const char *argument)
 {
-    struct provider *provider = state->provider;
-    if (!provider) {
-        ui_note("no provider selected — use /provider to choose one first");
-        disp_sync_external_line(&state->render->disp);
+    struct provider *provider = require_provider(state);
+    if (!provider)
         return;
-    }
     /* A model-less preset could resolve differently from the live session. */
     if (!state->session->model || !*state->session->model) {
         ui_note("no model resolved yet — use /model to pick one first");
@@ -1125,6 +1236,15 @@ static int selection_value_equal(const char *left, const char *right)
     return right && strcmp(left, right) == 0;
 }
 
+/* Restored history must not move silently to another backend. */
+static void note_not_restored(struct agent_state *state, const char *provider_id,
+                              const char *current_id)
+{
+    ui_note("couldn't restore %s — staying on %s (use /provider to switch)", provider_id,
+            current_id ? current_id : "no provider");
+    disp_sync_external_line(&state->render->disp);
+}
+
 void select_restore_session(struct agent_state *state, const char *provider_id, const char *model,
                             const char *effort, const char *preset)
 {
@@ -1160,41 +1280,30 @@ void select_restore_session(struct agent_state *state, const char *provider_id, 
     /* Reconstruct even the same provider id so value-dependent setup runs under restored values. */
     const char *restored_provider_id = config_str("provider");
     const struct provider_def *def = provider_find(restored_provider_id);
-    const char *display_provider_id = def ? def->id : restored_provider_id;
-    unsigned long diagnostics_before = hax_diag_sequence();
-    struct provider *candidate = def ? provider_construct(def) : NULL;
-    sync_constructor_diagnostics(state, diagnostics_before);
+    if (!def) {
+        ui_error("session used unknown provider '%s'", restored_provider_id);
+        note_not_restored(state, restored_provider_id, current_id);
+        config_snapshot_restore(snapshot); /* invalidates restored_provider_id */
+        free(current_id);
+        return;
+    }
+    struct provider *candidate = construct_provider(state, def, snapshot);
     if (!candidate) {
-        if (!def)
-            ui_error("session used unknown provider '%s'", display_provider_id);
-        /* Do not silently move restored history to another backend. */
-        ui_note("couldn't restore %s — staying on %s (use /provider to switch)",
-                display_provider_id, current_id ? current_id : "no provider");
-        disp_sync_external_line(&state->render->disp);
-        config_snapshot_restore(snapshot);
+        note_not_restored(state, def->id, current_id);
         free(current_id);
         return;
     }
-    /* Validate the model before transferring provider ownership. */
-    const char *restored_model = config_str("model");
-    if ((!restored_model || !*restored_model) &&
-        !(candidate->default_model && *candidate->default_model)) {
-        ui_note("couldn't restore %s — no model resolves for it; staying on %s",
-                display_provider_id, current_id ? current_id : "no provider");
+    if (!resolves_model(candidate)) {
+        ui_note("couldn't restore %s — no model resolves for it; staying on %s", def->id,
+                current_id ? current_id : "no provider");
         disp_sync_external_line(&state->render->disp);
         candidate->destroy(candidate);
         config_snapshot_restore(snapshot);
-        free(current_id);
-        return;
-    }
-    if (agent_apply_settings(state, candidate, 1) != 0) {
-        candidate->destroy(candidate);
-        config_snapshot_restore(snapshot);
-        disp_sync_external_line(&state->render->disp);
         free(current_id);
         return;
     }
     config_snapshot_free(snapshot);
+    agent_apply_settings(state, candidate, APPLY_BANNER_WHEN_EMPTY);
     free(current_id);
 }
 

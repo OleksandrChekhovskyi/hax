@@ -7,10 +7,14 @@ struct provider;
 struct model_info;
 struct catalog_entry;
 
-/* Interactive selectors persist a choice and apply it to the live session. */
-void select_provider(struct agent_state *state);
-void select_model(struct agent_state *state);
-void select_effort(struct agent_state *state);
+/* Selectors persist a choice and apply it to the live session. A NULL argument opens the pickers,
+ * which chain from provider to model to effort. An argument applies directly without a picker: a
+ * provider switches with its default or discovered model, if any, and default effort; a model keeps
+ * the requested effort as far as the model offers it, and a level must be one the live model offers
+ * or "default". */
+void select_provider(struct agent_state *state, const char *provider);
+void select_model(struct agent_state *state, const char *model);
+void select_effort(struct agent_state *state, const char *level);
 
 /* Apply `name`, or open the preset picker when name is NULL. A fresh provider is constructed and
  * transferred only after validation succeeds. `announce` controls the confirmation display.

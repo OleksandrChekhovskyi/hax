@@ -124,19 +124,22 @@ static const struct slash_command COMMANDS[] = {
     },
     {
         .name = "provider",
-        .summary = "switch provider, then model and effort",
+        .summary = "switch provider",
+        .usage = "[id]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_provider,
     },
     {
         .name = "model",
-        .summary = "switch model, then effort",
+        .summary = "switch model",
+        .usage = "[id]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_model,
     },
     {
         .name = "effort",
         .summary = "set reasoning effort",
+        .usage = "[level]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_effort,
     },
@@ -636,17 +639,17 @@ static void run_fork(const struct command_call *call)
 
 static void run_provider(const struct command_call *call)
 {
-    select_provider(call->state);
+    select_provider(call->state, call->argument);
 }
 
 static void run_model(const struct command_call *call)
 {
-    select_model(call->state);
+    select_model(call->state, call->argument);
 }
 
 static void run_effort(const struct command_call *call)
 {
-    select_effort(call->state);
+    select_effort(call->state, call->argument);
 }
 
 static void run_preset(const struct command_call *call)

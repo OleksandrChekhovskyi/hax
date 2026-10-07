@@ -41,9 +41,10 @@ void model_meta_wait(struct provider *provider);
 
 /* Bounded model_meta_wait for callers that must stay responsive. `timeout_ms` is measured from
  * each source's start, not per call, so callers stacked on one request path share the budget.
- * On timeout the work keeps running in the background and lands whenever it completes.
- * NULL-safe. */
-void model_meta_wait_ms(struct provider *provider, long timeout_ms);
+ * A non-NULL `tick` returning non-zero abandons the wait early. On timeout or abandonment the work
+ * keeps running in the background and lands whenever it completes. NULL-safe. */
+void model_meta_wait_ms(struct provider *provider, long timeout_ms, http_tick_cb tick,
+                        void *tick_user);
 
 /* Covers metadata-endpoint probes and the catalog refresh; probes that also load a model
  * (llama.cpp router autoload) exceed it and finish in the background. */
