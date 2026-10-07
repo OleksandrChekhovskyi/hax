@@ -16,6 +16,7 @@
 #include "system/clock.h"
 #include "system/fs.h"
 #include "system/path.h"
+#include "text/json_scan.h"
 #include "transport/http.h"
 
 #define CATALOG_CACHE_FILE "catalog.json"
@@ -267,172 +268,27 @@ static void merge_entry(struct catalog_entry *dst, const struct catalog_entry *s
     }
 }
 
-/* ---------------- top-level member extraction ---------------- */
-
-/* Jansson greatly inflates the full artifact, so tree-parse only the requested member. The
- * structural byte scan is UTF-8-safe because quotes and backslashes cannot occur inside multibyte
- * sequences. */
-
-static const char *scan_ws(const char *p)
-{
-    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
-        p++;
-    return p;
-}
-
-/* Advance past the string whose opening '"' is at `p`. Returns the
- * position just past the closing quote, NULL on truncated input. */
-static const char *scan_string(const char *p)
-{
-    for (p++; *p; p++) {
-        if (*p == '\\') {
-            if (!p[1])
-                return NULL;
-            p++;
-        } else if (*p == '"') {
-            return p + 1;
-        }
-    }
-    return NULL;
-}
-
-/* Advance past one JSON value starting at `p`: strings and {} / []
- * nesting are honored, everything else is structural-only. NULL on
- * truncated input. */
-static const char *scan_value(const char *p)
-{
-    if (*p == '"')
-        return scan_string(p);
-    if (*p == '{' || *p == '[') {
-        int depth = 0;
-        while (*p) {
-            if (*p == '"') {
-                p = scan_string(p);
-                if (!p)
-                    return NULL;
-                continue;
-            }
-            if (*p == '{' || *p == '[') {
-                depth++;
-            } else if (*p == '}' || *p == ']') {
-                if (--depth == 0)
-                    return p + 1;
-            }
-            p++;
-        }
-        return NULL;
-    }
-    /* Scalar token (number / true / false / null): up to a delimiter. */
-    while (*p && *p != ',' && *p != '}' && *p != ']' && *p != ' ' && *p != '\t' && *p != '\n' &&
-           *p != '\r')
-        p++;
-    return p;
-}
-
-enum scan_member_result {
-    SCAN_MEMBER_INVALID = -1,
-    SCAN_MEMBER_MORE,
-    SCAN_MEMBER_LAST,
-};
-
-struct scanned_member {
-    const char *key;
-    size_t key_length;
-    const char *value_start;
-    const char *value_end;
-};
-
-/* On success, `cursor` advances to the next key or past the root's closing brace. */
-static enum scan_member_result scan_member(const char **cursor, struct scanned_member *member)
-{
-    const char *p = *cursor;
-    if (*p != '"')
-        return SCAN_MEMBER_INVALID;
-    member->key = p + 1;
-    const char *key_end = scan_string(p);
-    if (!key_end)
-        return SCAN_MEMBER_INVALID;
-    member->key_length = (size_t)(key_end - 1 - member->key);
-    p = scan_ws(key_end);
-    if (*p != ':')
-        return SCAN_MEMBER_INVALID;
-    p = scan_ws(p + 1);
-    member->value_start = p;
-    p = scan_value(p);
-    if (!p)
-        return SCAN_MEMBER_INVALID;
-    member->value_end = p;
-    p = scan_ws(p);
-    if (*p == ',') {
-        *cursor = scan_ws(p + 1);
-        return SCAN_MEMBER_MORE;
-    }
-    if (*p == '}') {
-        *cursor = p + 1;
-        return SCAN_MEMBER_LAST;
-    }
-    return SCAN_MEMBER_INVALID;
-}
-
-/* Position of the first member key in object `text`; NULL for an empty
- * object or a non-object. */
-static const char *scan_first_member(const char *text)
-{
-    const char *p = scan_ws(text);
-    if (*p != '{')
-        return NULL;
-    p = scan_ws(p + 1);
-    return *p == '"' ? p : NULL;
-}
-
-json_t *catalog_extract_member(const char *text, const char *key)
-{
-    if (!text || !key || !*key)
-        return NULL;
-    size_t key_length = strlen(key);
-    const char *cursor = scan_first_member(text);
-    if (!cursor)
-        return NULL;
-    for (;;) {
-        struct scanned_member member;
-        enum scan_member_result result = scan_member(&cursor, &member);
-        if (result == SCAN_MEMBER_INVALID)
-            return NULL;
-        if (member.key_length == key_length && memcmp(member.key, key, key_length) == 0)
-            return json_loadb(member.value_start, (size_t)(member.value_end - member.value_start),
-                              JSON_DECODE_ANY, NULL);
-        if (result == SCAN_MEMBER_LAST)
-            return NULL;
-    }
-}
-
 /* Validate every member and trailing byte before replacing a working snapshot. Requiring a
  * provider-shaped member also rejects JSON error payloads. Parse each member separately to retain
  * the bounded-memory property of lookups. */
 static int catalog_text_valid(const char *text)
 {
-    int has_models_object = 0;
-    const char *cursor = scan_first_member(text);
-    if (!cursor)
+    struct json_scan scan;
+    if (json_scan_object(&scan, text) != 0)
         return 0;
-    for (;;) {
-        struct scanned_member member;
-        enum scan_member_result result = scan_member(&cursor, &member);
-        if (result == SCAN_MEMBER_INVALID)
-            return 0;
-        json_t *value =
-            json_loadb(member.value_start, (size_t)(member.value_end - member.value_start),
-                       JSON_DECODE_ANY, NULL);
+    int has_models_object = 0;
+    struct json_scan_entry member;
+    int result;
+    while ((result = json_scan_next(&scan, &member)) == 1) {
+        json_t *value = json_scan_load(&member);
         if (!value)
             return 0;
         if (!has_models_object)
             has_models_object =
                 json_is_object(value) && json_is_object(json_object_get(value, "models"));
         json_decref(value);
-        if (result == SCAN_MEMBER_LAST)
-            break;
     }
-    return has_models_object && *scan_ws(cursor) == '\0';
+    return result == 0 && has_models_object && scan.cursor[strspn(scan.cursor, " \t\n\r")] == '\0';
 }
 
 /* ---------------- config tier: the catalog.models block ---------------- */
@@ -485,7 +341,11 @@ static json_t *cache_provider_slice(const char *provider_id)
     free(path);
     if (!text)
         return NULL;
-    json_t *provider = truncated ? NULL : catalog_extract_member(text, provider_id);
+    /* Jansson greatly inflates the full snapshot, so tree-parse only the provider's member. */
+    struct json_scan_entry member;
+    json_t *provider = !truncated && json_scan_find(text, provider_id, &member) == 1
+                           ? json_scan_load(&member)
+                           : NULL;
     free(text);
     return provider;
 }

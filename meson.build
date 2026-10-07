@@ -176,6 +176,7 @@ sources = files(
     'src/text/display_safe.c',
     'src/text/fmt.c',
     'src/text/frontmatter.c',
+    'src/text/json_scan.c',
     'src/text/placeholder.c',
     'src/text/sha256.c',
     'src/text/shell_quote.c',

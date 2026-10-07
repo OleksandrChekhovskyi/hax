@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "xalloc.h"
+#include "text/json_scan.h"
 
 char *item_image_placeholder(const struct item_image *image)
 {
@@ -168,20 +169,24 @@ void model_probe_parse(const struct model_probe *probe, const char *body, const 
     if (!probe->parse_entry)
         return;
 
-    json_t *root = json_loads(body, 0, NULL);
-    json_t *entries = json_object_get(root, probe->list_member ? probe->list_member : "data");
+    /* Listings can run to megabytes once tree-parsed, so parse one entry at a time. */
+    struct json_scan_entry list;
+    struct json_scan entries;
+    if (json_scan_find(body, probe->list_member ? probe->list_member : "data", &list) != 1 ||
+        json_scan_array(&entries, list.value) != 0)
+        return;
     const char *id_member = probe->id_member ? probe->id_member : "id";
-    size_t index;
-    json_t *entry;
-    json_array_foreach(entries, index, entry)
-    {
+    struct json_scan_entry element;
+    while (json_scan_next(&entries, &element) == 1) {
+        json_t *entry = json_scan_load(&element);
         const char *id = json_string_value(json_object_get(entry, id_member));
         if (id && strcmp(id, model) == 0) {
             probe->parse_entry(entry, out);
-            break;
+            json_decref(entry);
+            return;
         }
+        json_decref(entry);
     }
-    json_decref(root);
 }
 
 void model_probe_clear(struct model_probe *probe)

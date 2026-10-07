@@ -114,10 +114,28 @@ static void test_unrecognized_shape_reports_error(void)
     free(error);
 }
 
+static void test_malformed_entry_reports_error(void)
+{
+    struct model_info *models = NULL;
+    size_t n_models = 0;
+    char *error = NULL;
+    int result = list_from_server("{\"data\":[{\"id\":\"m1\"},{\"id\" \"m2\"}]}", &models,
+                                  &n_models, &error);
+    if (result == -2)
+        T_SKIP("cannot run a loopback server here");
+    EXPECT(result == -1);
+    EXPECT(models == NULL);
+    EXPECT(error != NULL);
+    if (error)
+        EXPECT(strstr(error, "not valid JSON") != NULL);
+    free(error);
+}
+
 int main(void)
 {
     test_lists_flat_models();
     test_null_data_is_empty_success();
     test_unrecognized_shape_reports_error();
+    test_malformed_entry_reports_error();
     T_REPORT();
 }

@@ -117,6 +117,7 @@ test_sources = [
     'text/test_display_safe.c',
     'text/test_fmt.c',
     'text/test_frontmatter.c',
+    'text/test_json_scan.c',
     'text/test_placeholder.c',
     'text/test_sha256.c',
     'text/test_shell_quote.c',

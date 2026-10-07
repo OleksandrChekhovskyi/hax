@@ -8,6 +8,7 @@
 #include "provider.h"
 #include "xalloc.h"
 #include "providers/http_provider.h"
+#include "text/json_scan.h"
 #include "transport/api_error.h"
 #include "transport/http.h"
 
@@ -38,44 +39,60 @@ int openai_list_models(struct provider *provider, struct model_info **models, si
         return -1;
     }
 
-    json_t *root = json_loads(response_body, 0, NULL);
-    free(response_body);
+    /* OpenRouter's listing tree-parses to several megabytes, so parse one entry at a time. */
     const char *provider_name = provider->name ? provider->name : "provider";
-    if (!root) {
-        *error = xasprintf("%s /models response is not valid JSON", provider_name);
-        return -1;
-    }
-
-    json_t *data = json_object_get(root, "data");
+    struct json_scan_entry data;
+    int found = json_scan_find(response_body, "data", &data);
     /* Ollama reports data:null when the server is reachable but has no models. */
-    if (json_is_null(data) || (json_is_array(data) && json_array_size(data) == 0)) {
-        json_decref(root);
+    if (found == 1 && data.value_len == 4 && memcmp(data.value, "null", 4) == 0) {
+        free(response_body);
         return 0;
     }
-    if (!json_is_array(data)) {
-        json_decref(root);
-        *error = xasprintf("%s /models response has no model list", provider_name);
+    struct json_scan entries;
+    if (found != 1 || json_scan_array(&entries, data.value) != 0) {
+        free(response_body);
+        *error = found < 0 ? xasprintf("%s /models response is not valid JSON", provider_name)
+                           : xasprintf("%s /models response has no model list", provider_name);
         return -1;
     }
 
     http_parse_model_cb parse_model = http_provider_parse_model(provider);
-    size_t n_entries = json_array_size(data);
-    struct model_info *available = xmalloc(n_entries * sizeof(*available));
+    struct model_info *available = NULL;
     size_t n_available = 0;
-    for (size_t i = 0; i < n_entries; i++) {
-        json_t *entry = json_array_get(data, i);
+    size_t capacity = 0;
+    size_t n_entries = 0;
+    struct json_scan_entry element;
+    int scanned;
+    while ((scanned = json_scan_next(&entries, &element)) == 1) {
+        json_t *entry = json_scan_load(&element);
+        if (!entry) {
+            scanned = -1;
+            break;
+        }
+        n_entries++;
         const char *model_id = json_string_value(json_object_get(entry, "id"));
-        if (!model_id || !*model_id)
-            continue;
-
-        model_info_init(&available[n_available]);
-        available[n_available].id = xstrdup(model_id);
-        if (parse_model)
-            parse_model(entry, &available[n_available]);
-        n_available++;
+        if (model_id && *model_id) {
+            if (n_available == capacity) {
+                capacity = capacity ? capacity * 2 : 64;
+                available = xrealloc(available, capacity * sizeof(*available));
+            }
+            model_info_init(&available[n_available]);
+            available[n_available].id = xstrdup(model_id);
+            if (parse_model)
+                parse_model(entry, &available[n_available]);
+            n_available++;
+        }
+        json_decref(entry);
     }
-    json_decref(root);
+    free(response_body);
 
+    if (scanned < 0) {
+        model_info_free(available, n_available);
+        *error = xasprintf("%s /models response is not valid JSON", provider_name);
+        return -1;
+    }
+    if (n_entries == 0)
+        return 0;
     if (n_available == 0) {
         free(available);
         *error = xasprintf("%s /models response contains no usable model ids", provider_name);

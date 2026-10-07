@@ -1,6 +1,5 @@
 /* SPDX-License-Identifier: MIT */
 #include <errno.h>
-#include <jansson.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -518,47 +517,6 @@ static void test_tier_only_entry(void)
     config_load(NULL);
 }
 
-static void test_extract_member(void)
-{
-    /* Keys match exactly (no prefix hits), later members are reachable
-     * past earlier ones, and escaped quotes/braces inside strings don't
-     * derail the byte scan. */
-    const char *text = "{\n"
-                       "  \"open\": {\"models\": {}},\n"
-                       "  \"tricky\": {\"s\": \"esc \\\" } ] {\", \"a\": [1, {\"b\": []}]},\n"
-                       "  \"openai\": {\"models\": {\"m\": {\"cost\": {\"input\": 2}}}, \"n\": 1}\n"
-                       "}";
-    json_t *value = catalog_extract_member(text, "openai");
-    EXPECT(value != NULL);
-    if (value) {
-        EXPECT(json_is_object(json_object_get(value, "models")));
-        json_decref(value);
-    }
-    value = catalog_extract_member(text, "tricky");
-    EXPECT(value != NULL);
-    if (value) {
-        EXPECT_STR_EQ(json_string_value(json_object_get(value, "s")), "esc \" } ] {");
-        json_decref(value);
-    }
-    /* Scalar member values come back too (JSON_DECODE_ANY). */
-    value = catalog_extract_member("{\"n\": 42}", "n");
-    EXPECT(value != NULL && json_is_integer(value) && json_integer_value(value) == 42);
-    json_decref(value);
-
-    /* Misses: absent key, prefix-of-a-key, wrong roots, truncation. */
-    EXPECT(catalog_extract_member(text, "ope") == NULL);
-    EXPECT(catalog_extract_member(text, "openai2") == NULL);
-    EXPECT(catalog_extract_member(text, "models") == NULL); /* nested, not top-level */
-    EXPECT(catalog_extract_member("[1, 2]", "k") == NULL);
-    EXPECT(catalog_extract_member("null", "k") == NULL);
-    EXPECT(catalog_extract_member("{}", "k") == NULL);
-    EXPECT(catalog_extract_member("{", "k") == NULL);
-    EXPECT(catalog_extract_member("{\"k\": {\"a\": 1}", "k") == NULL); /* unterminated root */
-    EXPECT(catalog_extract_member("{\"k\": \"unterminated", "k") == NULL);
-    EXPECT(catalog_extract_member(NULL, "k") == NULL);
-    EXPECT(catalog_extract_member("{}", NULL) == NULL);
-}
-
 static void test_prefetch_disabled_is_noop(void)
 {
     /* Opting out of refreshes also opts out of stale-snapshot warnings. */
@@ -717,7 +675,6 @@ int main(void)
     test_price_tiers();
     test_lookup_parses_tiers();
     test_tier_only_entry();
-    test_extract_member();
     test_prefetch_disabled_is_noop();
     test_wire_api_hints();
     test_interleaved_hints();
