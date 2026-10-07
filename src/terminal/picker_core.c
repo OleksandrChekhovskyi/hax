@@ -48,19 +48,6 @@ int picker_core_label_cells(const struct picker_item *item, int terminal_cols)
     return label_cells < 1 ? 1 : label_cells;
 }
 
-void picker_core_append_sanitized(struct buf *output, const char *text, size_t len)
-{
-    for (size_t offset = 0; offset < len;) {
-        size_t bytes;
-        int width = utf8_codepoint_cells(text, len, offset, &bytes);
-        if (width < 0)
-            buf_append(output, "?", 1);
-        else
-            buf_append(output, text + offset, bytes ? bytes : 1);
-        offset += bytes ? bytes : 1;
-    }
-}
-
 static unsigned char ascii_lower(unsigned char c)
 {
     return c >= 'A' && c <= 'Z' ? (unsigned char)(c + ('a' - 'A')) : c;

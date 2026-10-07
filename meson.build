@@ -171,7 +171,9 @@ sources = files(
     'src/terminal/width.c',
 
     'src/text/base64.c',
+    'src/text/completion.c',
     'src/text/diff.c',
+    'src/text/display_safe.c',
     'src/text/fmt.c',
     'src/text/frontmatter.c',
     'src/text/placeholder.c',

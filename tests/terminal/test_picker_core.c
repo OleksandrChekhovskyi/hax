@@ -177,51 +177,6 @@ static void test_truncate_query_refilters(void)
     buf_free(&fixture.core.query);
 }
 
-static void test_sanitize_replaces_escape_sequences(void)
-{
-    const char *unsafe = "safe\x1b[2J\x1b[Hgone";
-    struct buf output;
-    buf_init(&output);
-
-    picker_core_append_sanitized(&output, unsafe, strlen(unsafe));
-    buf_append(&output, "", 1);
-    EXPECT(strchr(output.data, 0x1b) == NULL);
-    EXPECT_STR_EQ(output.data, "safe?[2J?[Hgone");
-    buf_free(&output);
-}
-
-static void test_sanitize_replaces_controls_and_keeps_utf8(void)
-{
-    const char *controls = "a\rb\ac";
-    struct buf output;
-    buf_init(&output);
-
-    picker_core_append_sanitized(&output, controls, strlen(controls));
-    buf_append(&output, "", 1);
-    EXPECT_STR_EQ(output.data, "a?b?c");
-    buf_free(&output);
-
-    if (!locale_have_utf8())
-        return;
-
-    buf_init(&output);
-    picker_core_append_sanitized(&output, "c – ü", strlen("c – ü"));
-    buf_append(&output, "", 1);
-    EXPECT_STR_EQ(output.data, "c – ü");
-    buf_free(&output);
-}
-
-static void test_sanitize_accepts_counted_text(void)
-{
-    struct buf output;
-    buf_init(&output);
-
-    picker_core_append_sanitized(&output, "abcdef", 3);
-    buf_append(&output, "", 1);
-    EXPECT_STR_EQ(output.data, "abc");
-    buf_free(&output);
-}
-
 static void test_text_cells_accounts_for_line_break(void)
 {
     EXPECT(picker_core_text_cells("abc") == 3);
@@ -306,9 +261,6 @@ int main(void)
     test_dim_label_accounts_for_wider_separator();
     test_label_cells_narrow_terminal();
     test_text_cells_accounts_for_line_break();
-    test_sanitize_replaces_escape_sequences();
-    test_sanitize_replaces_controls_and_keeps_utf8();
-    test_sanitize_accepts_counted_text();
     test_empty_query_matches_all();
     test_substring_ignores_ascii_case();
     test_all_terms_must_match();

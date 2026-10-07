@@ -7,6 +7,7 @@
 
 #include "xalloc.h"
 #include "terminal/input.h"
+#include "text/display_safe.h"
 #include "text/utf8.h"
 
 /* ---------------- public API: alloc / free ---------------- */
@@ -34,6 +35,31 @@ void input_free(struct input *in)
     free(in->empty_placeholder);
     free(in->candidates);
     free(in);
+}
+
+static char *unsanitized_ghost_text(const struct input *in)
+{
+    if (in->cursor != in->len)
+        return NULL;
+    if (in->exit_armed && in->len == 0)
+        return xstrdup("ctrl+c again to exit");
+    if (in->candidates)
+        return xstrdup(in->candidates);
+    if (in->len == 0 && in->empty_placeholder)
+        return xstrdup(in->empty_placeholder);
+    if (in->hint_fn)
+        return in->hint_fn(in->buf, in->hint_user);
+    return NULL;
+}
+
+char *input_core_ghost_text(const struct input *in)
+{
+    char *ghost = unsanitized_ghost_text(in);
+    if (!ghost)
+        return NULL;
+    char *safe_ghost = sanitize_for_display(ghost, strlen(ghost));
+    free(ghost);
+    return safe_ghost;
 }
 
 int input_core_prompt_width(const char *prompt)

@@ -159,6 +159,12 @@ char *input_core_history_decode(const char *encoded, size_t len);
 /* Older entries are evicted past this cap. */
 #define INPUT_CORE_HISTORY_MAX 1000
 
+/* Return the allocated dim text drawn after the buffer, or NULL: the exit confirmation, then
+ * completion candidates, then the empty-buffer placeholder, then the hint. It appears only with the
+ * cursor at the buffer end, which lets the painter erase it from the cursor, and it is sanitized
+ * because candidates and hints may echo untrusted text. */
+char *input_core_ghost_text(const struct input *in);
+
 /* ---- layout / utf-8 ---- */
 
 /* Display columns of `prompt` up to its first '\n' or end, treating CSI

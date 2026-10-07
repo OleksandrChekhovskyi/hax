@@ -9,7 +9,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Added
 
-- Shell-like Tab completion of `/` commands, with a dim placeholder for a command's arguments.
+- Shell-like Tab completion of `/` commands and their arguments.
+- A dim placeholder after a `/` command shows the arguments it takes.
 - The built-in pickers take fzf's keys: Ctrl-J/Ctrl-K move the selection, and Ctrl-W and
   Alt-Backspace delete a word of the query.
 - A preset name right after `hax` starts with that preset: `hax review` is short for

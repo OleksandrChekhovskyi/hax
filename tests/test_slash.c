@@ -6,6 +6,7 @@
 
 #include "agent.h"
 #include "agent_core.h"
+#include "config.h"
 #include "harness.h"
 #include "provider.h"
 #include "slash.h"
@@ -98,20 +99,26 @@ void select_effort(struct agent_state *state)
     (void)state;
 }
 static int stub_preset_rc = 0;
-static const char *stub_preset_name = NULL;
+/* Stubs copy borrowed arguments, which the dispatcher frees once the handler returns. */
+static void record_argument(char **slot, const char *value)
+{
+    free(*slot);
+    *slot = value ? xstrdup(value) : NULL;
+}
+static char *stub_preset_name = NULL;
 static int stub_preset_announce = -1;
 int select_preset(struct agent_state *state, const char *name, int announce)
 {
     (void)state;
-    stub_preset_name = name;
+    record_argument(&stub_preset_name, name);
     stub_preset_announce = announce;
     return stub_preset_rc;
 }
-static const char *stub_preset_save_argument = NULL;
+static char *stub_preset_save_argument = NULL;
 void select_preset_save(struct agent_state *state, const char *argument)
 {
     (void)state;
-    stub_preset_save_argument = argument;
+    record_argument(&stub_preset_save_argument, argument);
 }
 void select_config(struct agent_state *state, const char *argument)
 {
@@ -514,7 +521,7 @@ static void test_new_clears_session_without_switching_preset(void)
     struct agent_session s = {0};
     seed_session(&s);
     EXPECT(s.n_items > 0);
-    stub_preset_name = NULL;
+    record_argument(&stub_preset_name, NULL);
     struct render_ctx r = {0};
     r.disp.committed_newlines = 1;
     struct agent_state state = {.session = &s, .render = &r};
@@ -553,7 +560,7 @@ static void test_new_with_preset_switches_then_clears(void)
     EXPECT(s.n_items > 0);
 
     stub_preset_rc = 0;
-    stub_preset_name = NULL;
+    record_argument(&stub_preset_name, NULL);
     stub_preset_announce = -1;
     struct render_ctx r = {0};
     r.disp.committed_newlines = 1;
@@ -595,7 +602,7 @@ static void test_clear_alias_takes_preset_too(void)
     seed_session(&s);
 
     stub_preset_rc = 0;
-    stub_preset_name = NULL;
+    record_argument(&stub_preset_name, NULL);
     struct render_ctx r = {0};
     r.disp.committed_newlines = 1;
     struct agent_state state = {.session = &s, .render = &r};
@@ -615,8 +622,8 @@ static void test_preset_save_routes_whole_argument(void)
     r.disp.committed_newlines = 1;
     struct agent_state state = {.render = &r};
 
-    stub_preset_save_argument = NULL;
-    stub_preset_name = NULL;
+    record_argument(&stub_preset_save_argument, NULL);
+    record_argument(&stub_preset_name, NULL);
     struct dispatch_call c = {.line = "/preset-save scout rose", .state = &state};
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_HANDLED);
@@ -625,7 +632,7 @@ static void test_preset_save_routes_whole_argument(void)
            strcmp(stub_preset_save_argument, "scout rose") == 0);
     EXPECT(stub_preset_name == NULL);
 
-    stub_preset_save_argument = "not overwritten";
+    record_argument(&stub_preset_save_argument, "not overwritten");
     struct dispatch_call bare = {.line = "/preset-save", .state = &state};
     out = capture_stdout(do_dispatch, &bare);
     EXPECT(bare.result == SLASH_HANDLED);
@@ -642,6 +649,14 @@ static void test_dispatch_trims_trailing_whitespace(void)
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_HANDLED);
     free(out);
+
+    /* Completion leaves a space after the argument it fills in. */
+    record_argument(&stub_preset_name, NULL);
+    struct dispatch_call preset = {.line = "/preset  focus \t", .state = &state};
+    out = capture_stdout(do_dispatch, &preset);
+    EXPECT(preset.result == SLASH_HANDLED);
+    free(out);
+    EXPECT(stub_preset_name != NULL && strcmp(stub_preset_name, "focus") == 0);
 }
 
 static void test_resume_cancelled_picker_keeps_newline_state(void)
@@ -749,98 +764,110 @@ static void test_compaction_seed_history_rules(void)
     agent_session_free(&s);
 }
 
-/* ---------- name completion and prompt hints ---------- */
+/* ---------- completion and prompt hints ---------- */
 
-static void expect_completion(const char *prefix, const char *expected)
+static void expect_completion(const char *text, const char *expected)
 {
-    char *completion = slash_complete_name(prefix);
+    char *completion = slash_completer.complete(text, slash_completer.user);
 
     if (!expected)
         EXPECT(completion == NULL);
     else if (!completion)
-        FAIL("no completion for '%s', expected '%s'", prefix, expected);
+        FAIL("no completion for '%s', expected '%s'", text, expected);
     else
         EXPECT_STR_EQ(completion, expected);
     free(completion);
 }
 
-static void test_complete_name_like_a_shell(void)
+static void expect_candidates(const char *text, const char *expected)
 {
-    expect_completion("mo", "model ");
-    expect_completion("help", "help ");
-    expect_completion("cle", "clear ");
-    expect_completion("pre", "preset");
-    expect_completion("preset", NULL);
-    expect_completion("preset-", "preset-save ");
-    expect_completion("c", NULL);
-    expect_completion("", NULL);
-    expect_completion("zzz", NULL);
-}
-
-static void expect_candidates(const char *prefix, const char *expected)
-{
-    char *candidates = slash_name_candidates(prefix);
+    char *candidates = slash_completer.candidates(text, slash_completer.user);
 
     if (!expected)
         EXPECT(candidates == NULL);
     else if (!candidates)
-        FAIL("no candidates for '%s', expected '%s'", prefix, expected);
+        FAIL("no candidates for '%s', expected '%s'", text, expected);
     else
         EXPECT_STR_EQ(candidates, expected);
     free(candidates);
 }
 
+static void test_complete_names_and_aliases(void)
+{
+    expect_completion("mo", "model ");
+    expect_completion("cle", "clear ");
+    expect_completion("pre", "preset");
+    expect_completion("zzz", NULL);
+}
+
 static void test_name_candidates_list_ambiguous_prefixes(void)
 {
-    expect_candidates("c", "/clear /config /compact /copy");
-    expect_candidates("preset", "/preset /preset-save");
+    expect_candidates("c", "  /clear /config /compact /copy");
     expect_candidates("mo", NULL);
-    expect_candidates("zzz", NULL);
-
-    char *all = slash_name_candidates("");
-    EXPECT(all && strncmp(all, "/new /clear /resume ", 20) == 0);
-    free(all);
-
-    char *listing = slash_completer.candidates("pre", slash_completer.user);
-    EXPECT(listing != NULL);
-    if (listing)
-        EXPECT_STR_EQ(listing, "  /preset /preset-save");
-    free(listing);
-
-    char *bare = slash_completer.candidates("", slash_completer.user);
-    EXPECT(bare != NULL);
-    if (bare)
-        EXPECT_STR_EQ(bare, "  see /help");
-    free(bare);
+    expect_candidates("", "  see /help");
 }
 
-static int match_name(const char *buffer, size_t len, size_t cursor, size_t *start, size_t *end)
+static void test_complete_preset_arguments(void)
 {
-    return slash_completer.match(buffer, len, cursor, start, end, slash_completer.user);
+    EXPECT(config_load("{\"presets\": {\"review\": {\"provider\": \"mock\"},"
+                       "\"fast\": {\"provider\": \"mock\"},"
+                       "\"focus\": {\"provider\": \"mock\"},"
+                       "\"code review\": {\"provider\": \"mock\"},"
+                       "\"code write\": {\"provider\": \"mock\"}}}") == 0);
+
+    expect_completion("preset r", "preset review ");
+    expect_completion("preset  re", "preset  review ");
+    expect_completion("new re", "new review ");
+    expect_completion("clear re", "clear review ");
+    expect_candidates("preset ", "  fast focus review");
+
+    expect_completion("preset c", NULL);
+    expect_completion("preset review r", NULL);
+    expect_completion("model r", NULL);
+    expect_completion("zzz r", NULL);
+
+    EXPECT(config_load(NULL) == 0);
+    expect_completion("preset ", NULL);
+    expect_candidates("preset ", NULL);
 }
 
-static void test_completer_matches_name_at_cursor(void)
+static int match_word(const char *buffer, size_t cursor, size_t *start, size_t *end)
+{
+    return slash_completer.match(buffer, strlen(buffer), cursor, start, end, slash_completer.user);
+}
+
+static void test_completer_matches_word_at_cursor(void)
 {
     size_t start = 999;
     size_t end = 999;
 
-    EXPECT(match_name("/mo", 3, 3, &start, &end) == 1);
+    EXPECT(match_word("/mo", 3, &start, &end) == 1);
     EXPECT(start == 1);
     EXPECT(end == 3);
 
-    EXPECT(match_name("/", 1, 1, &start, &end) == 1);
+    EXPECT(match_word("/", 1, &start, &end) == 1);
     EXPECT(start == 1);
     EXPECT(end == 1);
 
-    EXPECT(match_name("/mo x", 5, 3, &start, &end) == 1);
+    EXPECT(match_word("/mo x", 3, &start, &end) == 1);
     EXPECT(end == 3);
 
-    EXPECT(match_name("/mo x", 5, 5, &start, &end) == 0);
-    EXPECT(match_name("/mo", 3, 2, &start, &end) == 0);
-    EXPECT(match_name("/home/x", 7, 7, &start, &end) == 0);
-    EXPECT(match_name("hello", 5, 5, &start, &end) == 0);
-    EXPECT(match_name("@foo", 4, 4, &start, &end) == 0);
-    EXPECT(match_name("", 0, 0, &start, &end) == 0);
+    /* The span runs from the name through the argument word ending at the cursor. */
+    EXPECT(match_word("/preset x", 9, &start, &end) == 1);
+    EXPECT(start == 1);
+    EXPECT(end == 9);
+    EXPECT(match_word("/preset ", 8, &start, &end) == 1);
+    EXPECT(end == 8);
+
+    EXPECT(match_word("/preset x", 8, &start, &end) == 0);
+    EXPECT(match_word("/compact @src", 13, &start, &end) == 0);
+    EXPECT(match_word("/zzz x", 6, &start, &end) == 0);
+    EXPECT(match_word("/mo", 2, &start, &end) == 0);
+    EXPECT(match_word("/new\nfoo", 8, &start, &end) == 0);
+    EXPECT(match_word("/home/x", 7, &start, &end) == 0);
+    EXPECT(match_word("hello", 5, &start, &end) == 0);
+    EXPECT(match_word("@foo", 4, &start, &end) == 0);
+    EXPECT(match_word("", 0, &start, &end) == 0);
 }
 
 static void expect_hint(const char *line, const char *expected)
@@ -920,9 +947,10 @@ int main(void)
     test_resume_no_picker_repairs_newline_state();
     test_undo_fork_empty_conversation();
     test_compaction_seed_history_rules();
-    test_complete_name_like_a_shell();
+    test_complete_names_and_aliases();
     test_name_candidates_list_ambiguous_prefixes();
-    test_completer_matches_name_at_cursor();
+    test_complete_preset_arguments();
+    test_completer_matches_word_at_cursor();
     test_hint_shows_argument_placeholder();
     test_hint_stays_quiet_otherwise();
     test_hint_ignores_non_commands();

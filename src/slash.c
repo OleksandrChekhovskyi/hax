@@ -30,6 +30,7 @@
 #include "terminal/theme.h"
 #include "terminal/ui.h"
 #include "terminal/width.h"
+#include "text/completion.h"
 #include "text/fmt.h"
 #include "text/width.h"
 #include "tools/task_registry.h"
@@ -52,6 +53,10 @@ struct slash_command {
     const char *usage; /* argument placeholder such as "[preset]"; NULL takes no argument */
     enum command_display display;
     void (*handler)(const struct command_call *call);
+    /* Add the values of the argument word that follows `preceding`, the trimmed earlier
+     * arguments. Runs on Tab, so it must return promptly: no network, child processes, waiting on
+     * background work, or tty output. NULL completes nothing. */
+    void (*argument_choices)(const char *preceding, struct completion *choices);
 };
 
 struct shortcut {
@@ -63,7 +68,7 @@ struct shortcut {
 
 struct parsed_command {
     char *name;
-    const char *argument;
+    char *argument; /* trimmed; NULL when absent */
 };
 
 static void run_new(const struct command_call *call);
@@ -84,6 +89,7 @@ static void run_usage(const struct command_call *call);
 static void run_login(const struct command_call *call);
 static void run_logout(const struct command_call *call);
 static void run_help(const struct command_call *call);
+static void preset_name_choices(const char *preceding, struct completion *choices);
 
 /* Registry order is also /help order. */
 static const struct slash_command COMMANDS[] = {
@@ -93,6 +99,7 @@ static const struct slash_command COMMANDS[] = {
         .summary = "start a fresh conversation",
         .usage = "[preset]",
         .handler = run_new,
+        .argument_choices = preset_name_choices,
     },
     {
         .name = "resume",
@@ -138,6 +145,7 @@ static const struct slash_command COMMANDS[] = {
         .usage = "[name]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_preset,
+        .argument_choices = preset_name_choices,
     },
     /* `/preset save` would conflict with a preset named "save". */
     {
@@ -256,7 +264,10 @@ static int parse_command(const char *line, struct parsed_command *parsed)
 
     while (*cursor && isspace((unsigned char)*cursor))
         cursor++;
-    parsed->argument = *cursor ? cursor : NULL;
+    size_t argument_length = strlen(cursor);
+    while (argument_length > 0 && isspace((unsigned char)cursor[argument_length - 1]))
+        argument_length--;
+    parsed->argument = argument_length ? xasprintf("%.*s", (int)argument_length, cursor) : NULL;
     return 1;
 }
 
@@ -268,6 +279,15 @@ static const struct slash_command *find_command(const char *name)
             return &COMMANDS[i];
     }
     return NULL;
+}
+
+/* Look up the command spelled by the first `name_len` bytes of `text`. */
+static const struct slash_command *find_command_span(const char *text, size_t name_len)
+{
+    char *name = xasprintf("%.*s", (int)name_len, text);
+    const struct slash_command *command = find_command(name);
+    free(name);
+    return command;
 }
 
 enum slash_result slash_dispatch(const char *line, struct agent_state *state)
@@ -299,83 +319,18 @@ enum slash_result slash_dispatch(const char *line, struct agent_state *state)
     command->handler(&call);
     if (command->display == COMMAND_DISPLAY_RAW)
         disp_sync_external_line(disp);
+    free(parsed.argument);
     free(parsed.name);
     return SLASH_HANDLED;
 
 raw_output:
     disp_sync_external_line(disp);
+    free(parsed.argument);
     free(parsed.name);
     return result;
 }
 
-/* ---------- name completion and prompt hints ---------- */
-
-/* Every command name and alias starting with `prefix`, in registry order. */
-struct name_matches {
-    const char *names[2 * N_COMMANDS];
-    size_t count;
-};
-
-static void collect_name_matches(const char *prefix, struct name_matches *matches)
-{
-    size_t prefix_len = strlen(prefix);
-
-    matches->count = 0;
-    for (size_t i = 0; i < N_COMMANDS; i++) {
-        const char *spellings[] = {COMMANDS[i].name, COMMANDS[i].alias};
-        for (size_t j = 0; j < 2; j++) {
-            const char *spelling = spellings[j];
-            if (spelling && strncmp(spelling, prefix, prefix_len) == 0)
-                matches->names[matches->count++] = spelling;
-        }
-    }
-}
-
-static size_t shared_prefix_len(const struct name_matches *matches)
-{
-    size_t shared = strlen(matches->names[0]);
-
-    for (size_t i = 1; i < matches->count; i++) {
-        size_t common = 0;
-        while (common < shared && matches->names[i][common] == matches->names[0][common])
-            common++;
-        shared = common;
-    }
-    return shared;
-}
-
-char *slash_complete_name(const char *prefix)
-{
-    struct name_matches matches;
-
-    collect_name_matches(prefix, &matches);
-    if (matches.count == 1)
-        return xasprintf("%s ", matches.names[0]);
-    if (matches.count == 0)
-        return NULL;
-
-    size_t shared = shared_prefix_len(&matches);
-    if (shared <= strlen(prefix))
-        return NULL;
-    return xasprintf("%.*s", (int)shared, matches.names[0]);
-}
-
-char *slash_name_candidates(const char *prefix)
-{
-    struct name_matches matches;
-    struct buf list;
-
-    collect_name_matches(prefix, &matches);
-    if (matches.count < 2)
-        return NULL;
-
-    buf_init(&list);
-    for (size_t i = 0; i < matches.count; i++) {
-        buf_append_str(&list, i > 0 ? " /" : "/");
-        buf_append_str(&list, matches.names[i]);
-    }
-    return buf_steal(&list);
-}
+/* ---------- completion and prompt hints ---------- */
 
 /* The command name occupies [1, name_end) of a line that starts with a slash. Return 0 for input
  * that is not command-shaped, such as a path, so no completion or hint applies. */
@@ -393,45 +348,117 @@ static int scan_command_name(const char *line, size_t *name_end)
     return 1;
 }
 
-static int match_command_name(const char *buffer, size_t buffer_len, size_t cursor, size_t *start,
-                              size_t *end, void *user)
+/* `text` is the command line after its slash, up to the cursor. Collect the choices matching its
+ * last word, which `*word` points at; that word is the command name when no space precedes it. */
+static void collect_choices(const char *text, struct completion *choices, const char **word)
+{
+    const char *word_start = text + strlen(text);
+    while (word_start > text && !isspace((unsigned char)word_start[-1]))
+        word_start--;
+    *word = word_start;
+
+    if (word_start == text) {
+        for (size_t i = 0; i < N_COMMANDS; i++) {
+            completion_add(choices, COMMANDS[i].name);
+            if (COMMANDS[i].alias)
+                completion_add(choices, COMMANDS[i].alias);
+        }
+    } else {
+        size_t name_len = 0;
+        while (is_name_byte((unsigned char)text[name_len]))
+            name_len++;
+        const struct slash_command *command = find_command_span(text, name_len);
+        if (!command || !command->argument_choices)
+            return;
+
+        const char *preceding = text + name_len;
+        while (isspace((unsigned char)*preceding))
+            preceding++;
+        size_t preceding_len = (size_t)(word_start - preceding);
+        while (preceding_len > 0 && isspace((unsigned char)preceding[preceding_len - 1]))
+            preceding_len--;
+        char *trimmed = xasprintf("%.*s", (int)preceding_len, preceding);
+        command->argument_choices(trimmed, choices);
+        free(trimmed);
+    }
+    completion_keep_prefixed(choices, word_start);
+}
+
+/* Complete only the word that ends at the cursor, on the line's first row. */
+static int match_command(const char *buffer, size_t buffer_len, size_t cursor, size_t *start,
+                         size_t *end, void *user)
 {
     (void)user;
 
     size_t name_end;
-    if (cursor > buffer_len || !scan_command_name(buffer, &name_end) || cursor != name_end)
+    if (cursor > buffer_len || !scan_command_name(buffer, &name_end) || cursor < name_end)
         return 0;
+    if (cursor < buffer_len && !isspace((unsigned char)buffer[cursor]))
+        return 0;
+    if (memchr(buffer, '\n', cursor))
+        return 0;
+    /* Leave other argument words, such as an @file mention in a /compact focus, to later
+     * completers. */
+    if (cursor > name_end) {
+        const struct slash_command *command = find_command_span(buffer + 1, name_end - 1);
+        if (!command || !command->argument_choices)
+            return 0;
+    }
     *start = 1;
-    *end = name_end;
+    *end = cursor;
     return 1;
 }
 
-static char *complete_command_name(const char *name, void *user)
+static char *complete_command(const char *text, void *user)
 {
     (void)user;
-    return slash_complete_name(name);
+
+    struct completion choices = {0};
+    const char *word;
+    char *replacement = NULL;
+
+    collect_choices(text, &choices, &word);
+    char *extended = completion_extend(&choices, word);
+    if (extended)
+        replacement = xasprintf("%.*s%s", (int)(word - text), text, extended);
+    free(extended);
+    completion_free(&choices);
+    return replacement;
 }
 
-/* Two spaces set the list apart from the name it follows. A bare slash matches every command,
+/* Two spaces set the list apart from the text it follows. A bare slash matches every command,
  * which /help already lists in full instead of a truncated row. */
-static char *list_command_names(const char *name, void *user)
+static char *list_command_choices(const char *text, void *user)
 {
     (void)user;
 
-    if (*name == '\0')
+    if (*text == '\0')
         return xstrdup("  see /help");
-    char *names = slash_name_candidates(name);
-    if (!names)
-        return NULL;
-    char *listing = xasprintf("  %s", names);
-    free(names);
+
+    struct completion choices = {0};
+    const char *word;
+    char *listing = NULL;
+
+    collect_choices(text, &choices, &word);
+    if (choices.count > 1) {
+        const char *marker = word == text ? "/" : "";
+        struct buf list;
+        buf_init(&list);
+        for (size_t i = 0; i < choices.count; i++) {
+            buf_append_str(&list, i > 0 ? " " : "  ");
+            buf_append_str(&list, marker);
+            buf_append_str(&list, choices.candidates[i]);
+        }
+        listing = buf_steal(&list);
+    }
+    completion_free(&choices);
     return listing;
 }
 
 const struct input_completer slash_completer = {
-    .match = match_command_name,
-    .complete = complete_command_name,
-    .candidates = list_command_names,
+    .match = match_command,
+    .complete = complete_command,
+    .candidates = list_command_choices,
 };
 
 /* Placeholders appear once the name is complete and before any argument, so a mistyped or
@@ -443,9 +470,7 @@ char *slash_hint(const char *line)
     if (!scan_command_name(line, &name_end) || strchr(line, '\n'))
         return NULL;
 
-    char *name = xasprintf("%.*s", (int)(name_end - 1), line + 1);
-    const struct slash_command *command = find_command(name);
-    free(name);
+    const struct slash_command *command = find_command_span(line + 1, name_end - 1);
     if (!command || !command->usage)
         return NULL;
 
@@ -626,6 +651,31 @@ static void run_effort(const struct command_call *call)
 static void run_preset(const struct command_call *call)
 {
     select_preset(call->state, call->argument, 1);
+}
+
+static int compare_strings(const void *left, const void *right)
+{
+    return strcmp(*(char *const *)left, *(char *const *)right);
+}
+
+/* Alphabetical, like the preset picker. Only names in the preset-name grammar are offered: a
+ * hand-written name outside it, such as one with a space, cannot complete as one word. */
+static void preset_name_choices(const char *preceding, struct completion *choices)
+{
+    if (*preceding)
+        return;
+
+    char **names = NULL;
+    size_t count = config_preset_names(&names);
+    /* An empty list is NULL, which qsort must not receive even with a zero count. */
+    if (count > 1)
+        qsort(names, count, sizeof(*names), compare_strings);
+    for (size_t i = 0; i < count; i++) {
+        if (config_preset_name_valid(names[i]))
+            completion_add(choices, names[i]);
+        free(names[i]);
+    }
+    free(names);
 }
 
 static void run_preset_save(const struct command_call *call)

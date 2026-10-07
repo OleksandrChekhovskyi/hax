@@ -28,6 +28,7 @@
 #include "terminal/theme.h"
 #include "terminal/ui.h"
 #include "terminal/width.h"
+#include "text/display_safe.h"
 #include "text/utf8.h"
 #include "text/utf8_sanitize.h"
 #include "text/width.h"
@@ -358,23 +359,6 @@ static int edit_area_rows(int terminal_rows)
     return cap;
 }
 
-/* Drawn only with the cursor at the buffer end, which lets leave_edit_area erase it from the
- * cursor. A response to a keystroke already pressed wins over the hint. */
-static char *ghost_text(struct input *in)
-{
-    if (in->cursor != in->len)
-        return NULL;
-    if (in->exit_armed && in->len == 0)
-        return xstrdup("ctrl+c again to exit");
-    if (in->candidates)
-        return xstrdup(in->candidates);
-    if (in->len == 0 && in->empty_placeholder)
-        return xstrdup(in->empty_placeholder);
-    if (in->hint_fn)
-        return in->hint_fn(in->buf, in->hint_user);
-    return NULL;
-}
-
 /* Batch each repaint under DEC synchronized output and draw before clearing stale rows,
  * avoiding partial or blank frames on terminals that ignore synchronization. Clip tall buffers
  * because relative cursor motion cannot reach rows pushed into scrollback; clipping requires two
@@ -427,7 +411,7 @@ static void paint(struct input *in)
     /* Ghost text after the buffer end; the cursor repositioning below lands on top of it. */
     in->ghost_painted = 0;
     if (!clipped && layout.end_col < in->display_columns) {
-        char *ghost = ghost_text(in);
+        char *ghost = input_core_ghost_text(in);
         if (ghost && *ghost) {
             char *fitted =
                 truncate_for_display(ghost, (size_t)(in->display_columns - layout.end_col));
@@ -873,35 +857,6 @@ static void recompute_history_match(struct input *in, const struct buf *query,
     }
 }
 
-/* Search prompts bypass the render walker, so sanitize untrusted query bytes here. */
-static char *sanitize_query_for_display(const char *query)
-{
-    size_t len = strlen(query);
-    struct buf sanitized;
-
-    buf_init(&sanitized);
-    for (size_t offset = 0; offset < len;) {
-        unsigned char byte = (unsigned char)query[offset];
-        if (byte < 0x20 || byte == 0x7f) {
-            buf_append(&sanitized, "?", 1);
-            offset++;
-            continue;
-        }
-
-        size_t consumed;
-        int width = utf8_codepoint_cells(query, len, offset, &consumed);
-        if (width < 0) {
-            buf_append(&sanitized, "?", 1);
-            offset += consumed ? consumed : 1;
-            continue;
-        }
-        consumed = consumed ? consumed : 1;
-        buf_append(&sanitized, query + offset, consumed);
-        offset += consumed;
-    }
-    return buf_steal(&sanitized);
-}
-
 /* Keep the tail because it contains the portion of the query being edited. */
 static char *clip_query_left(const char *query, int available_columns, int have_utf8)
 {
@@ -966,7 +921,8 @@ static char *build_history_search_prompt(const struct buf *query,
     const char *label = direction == HISTORY_SEARCH_OLDER ? "reverse-search" : "forward-search";
     const char *separator = query->len > 0 ? (have_utf8 ? " \xc2\xb7 " : " : ") : "";
     const char *arrow = have_utf8 ? " \xe2\x86\x92 " : " > ";
-    char *safe_query = query->len > 0 ? sanitize_query_for_display(query->data) : NULL;
+    /* The prompt bypasses the render walker, so sanitize the untrusted query here. */
+    char *safe_query = query->len > 0 ? sanitize_for_display(query->data, query->len) : NULL;
     int budget = display_columns > 1 ? display_columns - 1 : 1;
     int fixed_width = (int)strlen(label) + (query->len > 0 ? 3 : 0) + 3 + (no_match ? 10 : 0);
     char *prompt;

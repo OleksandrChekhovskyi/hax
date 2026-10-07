@@ -19,6 +19,7 @@
 #include "terminal/theme.h"
 #include "terminal/ui.h"
 #include "terminal/width.h"
+#include "text/display_safe.h"
 #include "text/utf8.h"
 #include "text/width.h"
 
@@ -397,7 +398,9 @@ static void render_title(struct frame *frame, const char *title, int line_count)
         } else {
             size_t separator_bytes;
             size_t line_bytes = wrap_row_bytes(remaining, (size_t)frame->width, &separator_bytes);
-            picker_core_append_sanitized(&frame->row, remaining, line_bytes);
+            char *safe_line = sanitize_for_display(remaining, line_bytes);
+            buf_append_str(&frame->row, safe_line);
+            free(safe_line);
             remaining += line_bytes + separator_bytes;
         }
         buf_append_str(&frame->row, ANSI_BOLD_OFF);
@@ -439,7 +442,9 @@ static void render_footer(struct frame *frame, const struct picker *picker,
             } else {
                 size_t separator_bytes;
                 size_t line_bytes = wrap_row_bytes(remaining, (size_t)text_cells, &separator_bytes);
-                picker_core_append_sanitized(&frame->row, remaining, line_bytes);
+                char *safe_line = sanitize_for_display(remaining, line_bytes);
+                buf_append_str(&frame->row, safe_line);
+                free(safe_line);
                 remaining += line_bytes + separator_bytes;
             }
             buf_append_str(&frame->row, ANSI_BOLD_OFF);

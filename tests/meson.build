@@ -112,7 +112,9 @@ test_sources = [
     'terminal/test_width.c',
 
     'text/test_base64.c',
+    'text/test_completion.c',
     'text/test_diff.c',
+    'text/test_display_safe.c',
     'text/test_fmt.c',
     'text/test_frontmatter.c',
     'text/test_placeholder.c',
