@@ -143,9 +143,6 @@ int main(void)
 {
     /* Segment placement measures display cells of UTF-8 text. */
     locale_init_utf8();
-    /* Both leak in from any hax parent process and would skew the fixtures below. */
-    unsetenv("HAX_PRESET");
-    unsetenv("HAX_DISPLAY_WIDTH");
 
     test_identity_single_row();
     test_identity_breaks_after_provider();

@@ -504,7 +504,6 @@ int main(void)
     /* Outside any repository, so recorded sessions neither run git nor depend on the checkout. */
     EXPECT(chdir(t_tempdir()) == 0);
     setenv("XDG_STATE_HOME", t_tempdir(), 1);
-    unsetenv("HAX_NO_SESSION");
     test_over_threshold();
     test_should_auto();
     test_applies_summary();

@@ -164,11 +164,6 @@ static void test_session_wraps_to_narrow_width(void)
 
 int main(void)
 {
-    /* Row-layout and row-presence assertions depend on these; the variables leak in from any
-     * hax parent or user environment. */
-    unsetenv("HAX_DISPLAY_WIDTH");
-    unsetenv("HAX_CONTEXT_LIMIT");
-
     test_session_prints_totals();
     test_session_hides_unreported_rows();
     test_session_shows_window_before_first_request();

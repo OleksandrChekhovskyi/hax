@@ -160,11 +160,6 @@ static void test_command_rejects_other_arguments(void)
 
 int main(void)
 {
-    /* Assertions assume tasks are enabled, room for every task, and a known width; the variables
-     * leak in from any hax parent or user environment. */
-    unsetenv("HAX_NO_TASKS");
-    unsetenv("HAX_TASK_MAX_RUNNING");
-    unsetenv("HAX_DISPLAY_WIDTH");
     setenv("HAX_BASH_TIMEOUT_GRACE", TEST_KILL_GRACE, 1);
 
     test_choices_follow_kill_grammar();

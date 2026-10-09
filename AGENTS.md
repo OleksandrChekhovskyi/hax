@@ -138,11 +138,12 @@ Extension workflows:
 ## Tests
 
 Unit tests are plain C binaries using `tests/harness.h` (`EXPECT`, `EXPECT_STR_EQ`, `T_SKIP`,
-`T_REPORT`). Create scratch directories with the harness's `t_tempdir()`, which removes them
-at process exit; raw `mkdtemp` in tests fails `make lint`. To add a test, append its source to
-`test_sources` in `tests/meson.build`, grouped to mirror the production `sources` list. Test
-names are path-derived: `tools/test_read.c` becomes `tools/read`, and `test_buf.c` becomes
-`buf`.
+`T_REPORT`). Create scratch directories with the harness's `t_tempdir()`, which removes them at
+process exit; raw `mkdtemp` in tests fails `make lint`. The harness also removes inherited `HAX_*`
+variables before `main`, so a test sets the ones it depends on and need not unset the rest. To add a
+test, append its source to `test_sources` in `tests/meson.build`, grouped to mirror the production
+`sources` list. Test names are path-derived: `tools/test_read.c` becomes `tools/read`, and
+`test_buf.c` becomes `buf`.
 
 End-to-end scenarios follow the same conventions in Python: standalone scripts under
 `tests/e2e/`, registered in `e2e_scenarios` in `tests/meson.build`. They run the built binary

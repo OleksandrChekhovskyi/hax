@@ -305,17 +305,6 @@ static const char CONFIG_JSON[] =
 
 int main(void)
 {
-    /* Constructing a provider starts a metadata probe for the configured
-     * model, and this file mutates config while one could be in flight. The
-     * providers here name no model of their own, so an ambient HAX_MODEL is
-     * the only way one arrives — drop it. The compat env aliases would
-     * configure the shipped -compatible defs tested below. */
-    unsetenv("HAX_MODEL");
-    unsetenv("HAX_OPENAI_BASE_URL");
-    unsetenv("HAX_OPENAI_API_KEY");
-    unsetenv("HAX_ANTHROPIC_BASE_URL");
-    unsetenv("HAX_OPENAI_DISPLAY_NAME");
-
     /* Loaded BEFORE any registry call, since the dynamic-provider set is built once and
      * cached. */
     EXPECT(config_load(CONFIG_JSON) == 0);

@@ -845,10 +845,6 @@ static void test_hint_ignores_non_commands(void)
 
 int main(void)
 {
-    /* Row-layout and /tasks assertions depend on these; the variables leak in from any hax parent
-     * or user environment. */
-    unsetenv("HAX_DISPLAY_WIDTH");
-    unsetenv("HAX_NO_TASKS");
     slash_completer_init(&slash_completer, &completion_state);
 
     test_dispatch_not_a_command();

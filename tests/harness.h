@@ -23,6 +23,9 @@
 #define T_ASAN 1
 #endif
 
+/* Every test process starts with inherited HAX_* variables removed, before main runs, so settings
+ * resolve to the registry defaults unless the test sets them. */
+
 /* This process's tallies; T_REPORT turns them into the exit status. A forked child inherits its
  * parent's counts. */
 extern int t_failures;

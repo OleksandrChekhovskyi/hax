@@ -14,6 +14,32 @@
 int t_failures;
 int t_skips;
 
+/* A hax parent or the user's shell would otherwise configure every test through the registry. */
+__attribute__((constructor)) static void t_clear_hax_environment(void)
+{
+    extern char **environ;
+    size_t count = 0;
+    while (environ[count])
+        count++;
+    /* unsetenv rewrites environ, so collect the names first. */
+    char **names = calloc(count + 1, sizeof(*names));
+    if (!names)
+        abort();
+    size_t name_count = 0;
+    for (size_t i = 0; i < count; i++) {
+        const char *equals = strchr(environ[i], '=');
+        if (strncmp(environ[i], "HAX_", 4) == 0 && equals)
+            names[name_count++] = strndup(environ[i], (size_t)(equals - environ[i]));
+    }
+    for (size_t i = 0; i < name_count; i++) {
+        if (!names[i])
+            abort();
+        unsetenv(names[i]);
+        free(names[i]);
+    }
+    free(names);
+}
+
 /* Ownership is per pid: a forked child that never calls t_tempdir() must not remove its parent's
  * dirs, and one that does removes only entries from t_tmpdir_first on, since an ancestor created
  * (and removes) the ones before. */

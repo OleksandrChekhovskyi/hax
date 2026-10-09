@@ -221,9 +221,6 @@ static void test_first_party_pins_endpoint(void)
 int main(void)
 {
     setenv("HAX_ANTHROPIC_API_KEY", "test-key", 1);
-
-    /* Keep constructor probes from racing the model-list fixture for its canned response. */
-    unsetenv("HAX_MODEL");
     test_first_party_pins_endpoint();
     test_max_tokens_uses_model_limit();
     test_background_probe_publishes_metadata();
