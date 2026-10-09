@@ -910,6 +910,11 @@ size_t task_running_count(void)
 
 void task_registry_shutdown(void)
 {
+    /* Kill every tree before stopping any drainer, so each pipe closes and its drainer ends at EOF
+     * rather than at its next poll timeout. Nothing is reaped yet, so signaling stays safe. */
+    for (struct task *t = tasks; t; t = t->next)
+        if (!t->done)
+            bash_signal_process_tree(t->pid, SIGKILL);
     while (tasks) {
         struct task *t = tasks;
         tasks = t->next;
