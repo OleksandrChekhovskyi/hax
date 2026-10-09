@@ -1236,8 +1236,53 @@ int session_load(const char *path, struct item **out_items, size_t *out_count,
     return 0;
 }
 
-/* A prompt should occur before this bound; avoid reading an early multi-megabyte result. */
+/* A prompt should occur before this bound; avoid reading an early multi-megabyte result. An undo
+ * record past it goes unseen, so the label may name a prompt undone after a long first turn. */
 #define LABEL_SCAN_CAP (64 * 1024)
+
+static void label_take_selection(struct session_label *out, const json_t *record)
+{
+    free(out->provider);
+    out->provider = json_dup_string(record, "provider");
+    free(out->model);
+    out->model = json_dup_string(record, "model_label");
+    if (!out->model)
+        out->model = json_dup_string(record, "model");
+    free(out->effort);
+    out->effort = json_dup_string(record, "effort");
+    free(out->preset);
+    out->preset = json_dup_string(record, "preset");
+}
+
+static void label_take_git(struct session_label *out, const json_t *header)
+{
+    free(out->git_branch);
+    out->git_branch = json_dup_string(header, "git_branch");
+    free(out->git_subject);
+    out->git_subject = json_dup_string(header, "git_subject");
+}
+
+/* A typed prompt without text, such as an image alone, still opens the conversation, so it labels
+ * it with an empty prompt rather than letting a later one stand in. */
+static void label_take_user_message(struct session_label *out, const json_t *item, int max_cells,
+                                    int *saw_compaction_seed)
+{
+    enum item_origin origin = json_get_item_origin(item);
+    if (origin == ITEM_ORIGIN_COMPACT_SEED)
+        *saw_compaction_seed = 1;
+    if (origin != ITEM_ORIGIN_NONE)
+        return;
+    char *flattened = flatten_for_display(json_string_value(json_object_get(item, "text")));
+    out->prompt = truncate_for_display(flattened, (size_t)max_cells);
+    free(flattened);
+}
+
+/* Any other undo keeps the opening prompt live, since undo counts prompts from the start. */
+static int undo_keeps_no_prompts(const json_t *record)
+{
+    json_t *keep = json_object_get(record, "keep_user_turns");
+    return json_is_integer(keep) && json_integer_value(keep) == 0;
+}
 
 void session_label_read(const char *path, int max_cells, struct session_label *out)
 {
@@ -1248,57 +1293,39 @@ void session_label_read(const char *path, int max_cells, struct session_label *o
 
     char *save = NULL;
     int saw_compaction_seed = 0;
+    /* The label shows the selection the opening prompt ran with. Undo keeps the live selection, so
+     * a switch recorded mid-conversation applies to a replacement opening prompt. */
+    json_t *selection = NULL;
     for (char *line = strtok_r(data, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
-        if (!*line)
+        /* Past the opening prompt only control records can change the label; skip parsing items. */
+        if (!*line || (out->prompt && !strstr(line, "\"type\"")))
             continue;
         json_t *object = json_loads(line, 0, NULL);
         if (!object)
             continue;
 
         const char *type = json_string_value(json_object_get(object, "type"));
-        if (type && (strcmp(type, "session") == 0 || strcmp(type, "selection") == 0)) {
-            /* Only records ahead of the opening prompt are seen, so a later /model switch does not
-             * show up — the label describes what the conversation started as. */
-            free(out->provider);
-            out->provider = json_dup_string(object, "provider");
-            free(out->model);
-            out->model = json_dup_string(object, "model_label");
-            if (!out->model)
-                out->model = json_dup_string(object, "model");
-            free(out->effort);
-            out->effort = json_dup_string(object, "effort");
-            free(out->preset);
-            out->preset = json_dup_string(object, "preset");
-            if (strcmp(type, "session") == 0) {
-                free(out->git_branch);
-                out->git_branch = json_dup_string(object, "git_branch");
-                free(out->git_subject);
-                out->git_subject = json_dup_string(object, "git_subject");
-            }
-            json_decref(object);
-            continue;
-        }
-
         const char *kind = json_string_value(json_object_get(object, "kind"));
-        if (kind && strcmp(kind, "user") == 0) {
-            enum item_origin origin = json_get_item_origin(object);
-            if (origin != ITEM_ORIGIN_NONE) {
-                if (origin == ITEM_ORIGIN_COMPACT_SEED)
-                    saw_compaction_seed = 1;
-                json_decref(object);
-                continue;
+        if (type && strcmp(type, "undo") == 0) {
+            if (undo_keeps_no_prompts(object)) {
+                free(out->prompt);
+                out->prompt = NULL;
             }
-            const char *text = json_string_value(json_object_get(object, "text"));
-            if (text) {
-                char *flattened = flatten_for_display(text);
-                out->prompt = truncate_for_display(flattened, (size_t)max_cells);
-                free(flattened);
-            }
-            json_decref(object);
-            break;
+        } else if (type && (strcmp(type, "session") == 0 || strcmp(type, "selection") == 0)) {
+            if (strcmp(type, "session") == 0)
+                label_take_git(out, object);
+            json_decref(selection);
+            selection = json_incref(object);
+        } else if (!out->prompt && kind && strcmp(kind, "user") == 0) {
+            label_take_user_message(out, object, max_cells, &saw_compaction_seed);
+            if (out->prompt && selection)
+                label_take_selection(out, selection);
         }
         json_decref(object);
     }
+    if (!out->prompt && selection)
+        label_take_selection(out, selection);
+    json_decref(selection);
     free(data);
     if (!out->prompt && saw_compaction_seed)
         out->prompt = xstrdup("(compacted)");

@@ -161,7 +161,7 @@ int session_load(const char *path, struct item **out_items, size_t *out_count,
  * optional: old files predate the git fields, and a file may be unreadable or empty. The header
  * also records the HEAD hash, which identifies nothing to a reader and so is not surfaced. */
 struct session_label {
-    char *prompt; /* single-line first typed prompt, or "(compacted)" for a seed-only session */
+    char *prompt; /* single-line first live typed prompt; "(compacted)" for a seed-only session */
     char *provider;
     char *model; /* the recorded display label, falling back to the wire id */
     char *effort;
@@ -189,8 +189,9 @@ void session_list_free(struct session_entry *entries, size_t count);
 char *session_prompt_history_path(const char *cwd);
 
 /* Reads a bounded file prefix, describing the session as it started: a later model or preset
- * switch is not reflected. The prompt is limited to max_cells. Overwrites out without releasing
- * it, so pass a zeroed or freed struct; unreadable files leave it zeroed. */
+ * switch is not reflected, but an undo of the whole conversation restarts it, so the label follows
+ * the replacement. The prompt is limited to max_cells. Overwrites out without releasing it, so pass
+ * a zeroed or freed struct; unreadable files leave it zeroed. */
 void session_label_read(const char *path, int max_cells, struct session_label *out);
 void session_label_free(struct session_label *label);
 
