@@ -15,6 +15,7 @@
 #include "render/render_ctx.h"
 #include "terminal/picker.h"
 #include "terminal/ui.h"
+#include "text/completion.h"
 
 /* A provider account hax can log in to and out of itself. Flows print their own outcome; `status`
  * returns an owned picker description or NULL when there is nothing to describe. `adopt` hands
@@ -169,4 +170,17 @@ void logout_command(struct agent_state *state, const char *argument)
         strcmp(provider_stable_id(state->provider), method->provider_id) == 0)
         method->adopt(state->provider);
     disp_sync_external_line(&state->render->disp);
+}
+
+void login_choices(struct completion *choices)
+{
+    for (size_t i = 0; i < N_METHODS; i++)
+        completion_add(choices, METHODS[i].provider_id);
+}
+
+void logout_choices(struct completion *choices)
+{
+    for (size_t i = 0; i < N_METHODS; i++)
+        if (METHODS[i].logged_in())
+            completion_add(choices, METHODS[i].provider_id);
 }

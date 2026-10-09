@@ -689,6 +689,8 @@ void select_model_choices(struct agent_state *state, struct completion *choices)
     string_array_free(ids);
     if (sorts_models(state->provider) && choices->count > 1)
         qsort(choices->candidates, choices->count, sizeof(*choices->candidates), compare_model_ids);
+    /* Aggregators such as OpenRouter name models "vendor/model". */
+    choices->separator = '/';
 }
 
 void select_model(struct agent_state *state, const char *model)
@@ -1587,20 +1589,25 @@ static void select_config_argument(struct agent_state *state, const char *argume
     free(canonical_value);
 }
 
+/* Provider blocks are definition data owned by /provider and config.json; their registered keys
+ * exist only to bind environment variables (registration also makes a key queryable here by name,
+ * which is why the api_key rows are marked secret). Field semantics live in the provider
+ * constructors. */
+static int setting_listed(const struct config_setting *setting)
+{
+    return strncmp(setting->key, "providers.", strlen("providers.")) != 0;
+}
+
 static const struct config_setting *choose_config_setting(void)
 {
     /* Preserve registry grouping; dim rows are inspectable but read-only. */
     size_t setting_count = 0;
     const struct config_setting *settings = config_settings(&setting_count);
 
-    /* Provider blocks are definition data owned by /provider and config.json; their registered
-     * keys exist only to bind environment variables (registration also makes a key queryable
-     * here by name, which is why the api_key rows are marked secret). Field semantics live in
-     * the provider constructors. */
     const struct config_setting **shown = xmalloc(setting_count * sizeof(*shown));
     size_t shown_count = 0;
     for (size_t i = 0; i < setting_count; i++) {
-        if (strncmp(settings[i].key, "providers.", strlen("providers.")) != 0)
+        if (setting_listed(&settings[i]))
             shown[shown_count++] = &settings[i];
     }
 
@@ -1642,6 +1649,46 @@ static const struct config_setting *choose_config_setting(void)
     const struct config_setting *choice = selected_index >= 0 ? shown[selected_index] : NULL;
     free(shown);
     return choice;
+}
+
+void select_config_key_choices(struct completion *choices)
+{
+    size_t setting_count = 0;
+    const struct config_setting *settings = config_settings(&setting_count);
+    for (size_t i = 0; i < setting_count; i++) {
+        if (setting_listed(&settings[i]))
+            completion_add(choices, settings[i].key);
+    }
+    choices->separator = '.';
+}
+
+static void add_setting_choices(const struct config_setting *setting, struct completion *choices)
+{
+    if (!setting->choices)
+        return;
+    char **values = NULL;
+    size_t value_count = split_choices(setting->choices, &values);
+    for (size_t i = 0; i < value_count; i++) {
+        completion_add(choices, values[i]);
+        free(values[i]);
+    }
+    free(values);
+}
+
+void select_config_value_choices(const char *key, struct completion *choices)
+{
+    const struct config_setting *setting = config_setting_find(key);
+    if (!setting || !setting->editable)
+        return;
+    add_setting_choices(setting, choices);
+    completion_add(choices, "default");
+}
+
+void select_tint_choices(struct completion *choices)
+{
+    const struct config_setting *setting = config_setting_find("tint");
+    if (setting)
+        add_setting_choices(setting, choices);
 }
 
 void select_config(struct agent_state *state, const char *argument)

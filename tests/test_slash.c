@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: MIT */
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,8 +14,10 @@
 #include "tool.h"
 #include "xalloc.h"
 #include "render/render_ctx.h"
+#include "system/clock.h"
 #include "terminal/input_core.h"
 #include "text/completion.h"
+#include "tools/task_registry.h"
 
 /* Link-only tool stubs; slash tests never invoke them. */
 static char *stub_run(const char *args, struct tool_run_ctx *ctx)
@@ -123,6 +126,7 @@ void select_model_choices(struct agent_state *state, struct completion *choices)
     completion_add(choices, "anthropic/claude-sonnet-4");
     completion_add(choices, "openai/gpt-5");
     completion_add(choices, "openai/gpt-5-mini");
+    choices->separator = '/';
 }
 void select_effort_choices(struct agent_state *state, struct completion *choices)
 {
@@ -151,6 +155,26 @@ void select_config(struct agent_state *state, const char *argument)
 {
     (void)state;
     (void)argument;
+}
+void select_config_key_choices(struct completion *choices)
+{
+    completion_add(choices, "bash.timeout");
+    completion_add(choices, "bash.timeout_max");
+    completion_add(choices, "bash.shell");
+    completion_add(choices, "theme");
+    choices->separator = '.';
+}
+static char *stub_value_key = NULL;
+void select_config_value_choices(const char *key, struct completion *choices)
+{
+    record_argument(&stub_value_key, key);
+    completion_add(choices, "dark");
+    completion_add(choices, "default");
+}
+void select_tint_choices(struct completion *choices)
+{
+    completion_add(choices, "teal");
+    completion_add(choices, "violet");
 }
 
 /* Return owned captured stdout and restore the original descriptor. */
@@ -894,12 +918,83 @@ static void test_complete_selection_arguments(void)
     EXPECT(stub_choices_state == &completion_state);
     expect_candidates("effort ", "  low high default");
     expect_completion("effort high h", NULL);
-    expect_completion("model op", "model openai/gpt-5");
+    expect_completion("model op", "model openai/");
+    expect_completion("model openai/", "model openai/gpt-5");
     expect_completion("model gpt", NULL);
-    expect_candidates("model ", "  anthropic/claude-sonnet-4 openai/gpt-5 openai/gpt-5-mini");
-    /* Past a slash, the listing drops the part every candidate shares. */
-    expect_candidates("model openai/", "  gpt-5 gpt-5-mini");
+    expect_candidates("model ", "  anthropic/ openai/");
     expect_candidates("model openai/gpt", "  gpt-5 gpt-5-mini");
+}
+
+static void test_complete_config_arguments(void)
+{
+    expect_completion("config ba", "config bash.");
+    expect_candidates("config ", "  bash. theme");
+    expect_candidates("config bash.", "  timeout timeout_max shell");
+    expect_completion("config theme da", "config theme dark ");
+    EXPECT_STR_EQ(stub_value_key, "theme");
+    expect_candidates("config theme ", "  dark default");
+    expect_completion("config theme dark da", NULL);
+}
+
+static void test_complete_preset_save_arguments(void)
+{
+    EXPECT(config_load("{\"presets\": {\"review\": {\"provider\": \"mock\"}}}") == 0);
+
+    expect_completion("preset-save r", "preset-save review ");
+    expect_completion("preset-save review t", "preset-save review teal ");
+    expect_candidates("preset-save fresh ", "  teal violet");
+    expect_completion("preset-save review teal t", NULL);
+
+    EXPECT(config_load(NULL) == 0);
+}
+
+/* Adopt a sleeping child as the running task `name`; task_registry_shutdown kills it. */
+static void adopt_sleeping_task(const char *name)
+{
+    int pipe_fds[2];
+    EXPECT(pipe(pipe_fds) == 0);
+    pid_t pid = fork();
+    if (pid == 0) {
+        setsid();
+        close(pipe_fds[0]);
+        execlp("sleep", "sleep", "30", (char *)NULL);
+        _exit(127);
+    }
+    EXPECT(pid > 0);
+    close(pipe_fds[1]);
+
+    char *spool_path = xasprintf("%s/spool", t_tempdir());
+    int spool_fd = open(spool_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    EXPECT(spool_fd >= 0);
+    EXPECT(task_adopt(pid, pipe_fds[0], "sleep 30", name, monotonic_ms(), spool_fd, spool_path, 0,
+                      0, 0) != NULL);
+}
+
+static void test_complete_task_arguments(void)
+{
+    expect_completion("tasks k", "tasks kill ");
+    expect_completion("tasks kill a", "tasks kill all ");
+    expect_completion("tasks kill all ", NULL);
+    expect_completion("tasks all ", NULL);
+
+    adopt_sleeping_task("build");
+    expect_candidates("tasks kill ", "  all build");
+    expect_completion("tasks kill b", "tasks kill build ");
+    expect_completion("tasks kill build ", NULL);
+    task_registry_shutdown();
+
+    config_set_override("no_tasks", "on");
+    expect_completion("tasks k", NULL);
+    config_set_override("no_tasks", NULL);
+}
+
+static void test_complete_login_arguments(void)
+{
+    setenv("XDG_STATE_HOME", t_tempdir(), 1);
+    expect_completion("login c", "login codex ");
+    expect_completion("login codex c", NULL);
+    /* Nothing is logged in to log out of. */
+    expect_completion("logout c", NULL);
 }
 
 static int match_word(const char *buffer, size_t cursor, size_t *start, size_t *end)
@@ -964,6 +1059,19 @@ static void test_hint_shows_argument_placeholder(void)
     expect_hint("/effort", " [level]");
 }
 
+static void test_hint_shows_later_argument_placeholder(void)
+{
+    expect_hint("/preset-save review ", "[tint]");
+    expect_hint("/preset-save review", NULL);
+    expect_hint("/preset-save review teal ", NULL);
+    expect_hint("/config theme ", "[value]");
+    expect_hint("/config  theme  ", "[value]");
+    expect_hint("/config catalog.url ", NULL);
+    expect_hint("/config zzz ", NULL);
+    expect_hint("/tasks kill ", "<id>... | all");
+    expect_hint("/tasks kill t1 ", NULL);
+}
+
 static void test_hint_stays_quiet_otherwise(void)
 {
     expect_hint("/mo", NULL);
@@ -1025,8 +1133,13 @@ int main(void)
     test_name_candidates_list_ambiguous_prefixes();
     test_complete_preset_arguments();
     test_complete_selection_arguments();
+    test_complete_config_arguments();
+    test_complete_preset_save_arguments();
+    test_complete_task_arguments();
+    test_complete_login_arguments();
     test_completer_matches_word_at_cursor();
     test_hint_shows_argument_placeholder();
+    test_hint_shows_later_argument_placeholder();
     test_hint_stays_quiet_otherwise();
     test_hint_ignores_non_commands();
     T_REPORT();

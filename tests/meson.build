@@ -36,6 +36,7 @@ test_sources = [
     'test_effort.c',
     'test_file_mention.c',
     'test_history.c',
+    'test_login.c',
     'test_model_meta.c',
     'test_model_sort.c',
     'test_harness.c',

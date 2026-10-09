@@ -9,6 +9,7 @@ struct completion {
     char **candidates;
     size_t count;
     size_t capacity;
+    char separator; /* splits candidates into parts that complete one at a time; '\0' for none */
 };
 
 void completion_add(struct completion *completion, const char *candidate);
@@ -21,8 +22,14 @@ void completion_keep_prefixed(struct completion *completion, const char *prefix)
 
 /* Extend `word`, a prefix of every candidate, like a shell: return the only candidate followed by
  * a space, or the prefix all candidates share when it is longer than `word`, ending on a whole
- * UTF-8 character. Return NULL when there is nothing to add. The result is malloc'd. */
+ * UTF-8 character. Either stops short, without the space, past the first separator after `word`.
+ * Return NULL when there is nothing to add. The result is malloc'd. */
 char *completion_extend(const struct completion *completion, const char *word);
+
+/* Reduce each candidate to the part a listing shows for `word`, a prefix of every candidate: from
+ * past the last separator in `word` through the next separator. Candidates that reduce to the same
+ * part keep only the first, so a listing shows each part once, in order. */
+void completion_to_parts(struct completion *completion, const char *word);
 
 void completion_free(struct completion *completion);
 

@@ -446,6 +446,7 @@ static void test_model_choices_come_from_listing(void)
     if (choices.count == 2)
         EXPECT(strcmp(choices.candidates[0], "new") == 0 &&
                strcmp(choices.candidates[1], "old") == 0);
+    EXPECT(choices.separator == '/');
     completion_free(&choices);
 
     const char *const listed[] = {"gpt-5-mini", "gpt-5", "gpt-5.1", NULL};
@@ -476,6 +477,64 @@ static void test_provider_choices_list_sorted_ids(void)
             EXPECT(strcmp(choices.candidates[i - 1], choices.candidates[i]) < 0);
     }
     EXPECT(has_deepseek);
+    completion_free(&choices);
+}
+
+static void expect_choices(const struct completion *choices, const char *const *expected)
+{
+    size_t expected_count = 0;
+    while (expected[expected_count])
+        expected_count++;
+    EXPECT(choices->count == expected_count);
+    for (size_t i = 0; i < choices->count && i < expected_count; i++)
+        EXPECT_STR_EQ(choices->candidates[i], expected[i]);
+}
+
+/* Keys follow the /config picker: registry order, without provider blocks. */
+static void test_config_key_choices_follow_picker(void)
+{
+    struct completion choices = {0};
+    select_config_key_choices(&choices);
+    EXPECT(choices.separator == '.');
+    EXPECT(choices.count > 0 && strcmp(choices.candidates[0], "preset") == 0);
+    int has_dotted = 0;
+    for (size_t i = 0; i < choices.count; i++) {
+        has_dotted |= strcmp(choices.candidates[i], "compact.auto") == 0;
+        EXPECT(strncmp(choices.candidates[i], "providers.", strlen("providers.")) != 0);
+    }
+    EXPECT(has_dotted);
+    completion_free(&choices);
+}
+
+static void test_config_value_choices_follow_setting(void)
+{
+    struct completion choices = {0};
+    select_config_value_choices("theme", &choices);
+    expect_choices(&choices,
+                   (const char *const[]){"auto", "dark", "light", "ansi", "off", "default", NULL});
+    completion_free(&choices);
+
+    /* Symbolic values of a numeric setting complete; numbers are left to the user. */
+    select_config_value_choices("display_width", &choices);
+    expect_choices(&choices, (const char *const[]){"auto", "terminal", "default", NULL});
+    completion_free(&choices);
+
+    select_config_value_choices("context_limit", &choices);
+    expect_choices(&choices, (const char *const[]){"default", NULL});
+    completion_free(&choices);
+
+    select_config_value_choices("catalog.url", &choices);
+    EXPECT(choices.count == 0);
+    select_config_value_choices("zzz", &choices);
+    EXPECT(choices.count == 0);
+    completion_free(&choices);
+}
+
+static void test_tint_choices_list_tints(void)
+{
+    struct completion choices = {0};
+    select_tint_choices(&choices);
+    expect_choices(&choices, (const char *const[]){"teal", "violet", "rose", "sage", NULL});
     completion_free(&choices);
 }
 
@@ -757,6 +816,9 @@ int main(void)
     test_effort_choices_follow_live_model();
     test_model_choices_come_from_listing();
     test_provider_choices_list_sorted_ids();
+    test_config_key_choices_follow_picker();
+    test_config_value_choices_follow_setting();
+    test_tint_choices_list_tints();
     test_effort_argument_waits_for_model_probe();
     test_model_argument_carries_requested_effort();
     test_provider_argument_switches_without_picker();

@@ -19,7 +19,8 @@ void select_effort(struct agent_state *state, const char *level);
 
 /* Add the arguments the selectors accept, for Tab completion, without waiting on the network or
  * background work: provider ids, sorted; the live provider's last-listed model ids, in model picker
- * order; and the live model's effort levels followed by "default". */
+ * order and split into parts at slashes; and the live model's effort levels followed by
+ * "default". */
 void select_provider_choices(struct completion *choices);
 void select_model_choices(struct agent_state *state, struct completion *choices);
 void select_effort_choices(struct agent_state *state, struct completion *choices);
@@ -39,6 +40,13 @@ void select_restore_session(struct agent_state *state, const char *provider_id, 
 
 /* Open the settings picker, or apply "<key> [value]" as a run-scoped override. */
 void select_config(struct agent_state *state, const char *argument);
+
+/* Add the arguments /config and /preset-save take, for Tab completion: the setting keys the
+ * /config picker lists, in its order and split into parts at dots; the values an editable `key`
+ * accepts followed by "default", or none for any other key; and the tints a preset can carry. */
+void select_config_key_choices(struct completion *choices);
+void select_config_value_choices(const char *key, struct completion *choices);
+void select_tint_choices(struct completion *choices);
 
 /* Build an owned model-picker description. `model` is required; `configured` and `catalog` may be
  * NULL and merge around it with model_meta_merge precedence. Unknown fields are omitted. Returns

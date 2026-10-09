@@ -59,6 +59,10 @@ struct slash_command {
      * background work, or tty output. NULL completes nothing. */
     void (*argument_choices)(struct agent_state *state, const char *preceding,
                              struct completion *choices);
+    /* Return the placeholder for the argument word after `preceding`, the trimmed earlier
+     * arguments, or NULL; `usage` already covers the first word. A NULL hook hints nothing
+     * past the first word. */
+    const char *(*later_usage)(const char *preceding);
 };
 
 struct shortcut {
@@ -99,6 +103,19 @@ static void effort_level_choices(struct agent_state *state, const char *precedin
                                  struct completion *choices);
 static void preset_name_choices(struct agent_state *state, const char *preceding,
                                 struct completion *choices);
+static void preset_save_choices(struct agent_state *state, const char *preceding,
+                                struct completion *choices);
+static const char *preset_save_later_usage(const char *preceding);
+static void config_choices(struct agent_state *state, const char *preceding,
+                           struct completion *choices);
+static const char *config_later_usage(const char *preceding);
+static void tasks_choices(struct agent_state *state, const char *preceding,
+                          struct completion *choices);
+static const char *tasks_later_usage(const char *preceding);
+static void login_provider_choices(struct agent_state *state, const char *preceding,
+                                   struct completion *choices);
+static void logout_provider_choices(struct agent_state *state, const char *preceding,
+                                    struct completion *choices);
 
 /* Registry order is also /help order. */
 static const struct slash_command COMMANDS[] = {
@@ -169,6 +186,8 @@ static const struct slash_command COMMANDS[] = {
         .usage = "<name> [tint]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_preset_save,
+        .argument_choices = preset_save_choices,
+        .later_usage = preset_save_later_usage,
     },
     {
         .name = "config",
@@ -176,6 +195,8 @@ static const struct slash_command COMMANDS[] = {
         .usage = "[key [value]]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_config,
+        .argument_choices = config_choices,
+        .later_usage = config_later_usage,
     },
     {
         .name = "compact",
@@ -194,6 +215,8 @@ static const struct slash_command COMMANDS[] = {
         .summary = "list background tasks",
         .usage = "[kill <id>... | kill all]",
         .handler = run_tasks,
+        .argument_choices = tasks_choices,
+        .later_usage = tasks_later_usage,
     },
     {
         .name = "session",
@@ -211,6 +234,7 @@ static const struct slash_command COMMANDS[] = {
         .usage = "[provider]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_login,
+        .argument_choices = login_provider_choices,
     },
     {
         .name = "logout",
@@ -218,6 +242,7 @@ static const struct slash_command COMMANDS[] = {
         .usage = "[provider]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_logout,
+        .argument_choices = logout_provider_choices,
     },
     {
         .name = "help",
@@ -442,7 +467,7 @@ static char *complete_command(const char *text, void *user)
 
 /* Two spaces set the list apart from the text it follows. A bare slash matches every command,
  * which /help already lists in full instead of a truncated row. Like a shell listing a directory,
- * candidates show only what follows the typed word's last slash, which they all share. */
+ * candidates that split into parts show only their next part. */
 static char *list_command_choices(const char *text, void *user)
 {
     if (*text == '\0')
@@ -453,16 +478,15 @@ static char *list_command_choices(const char *text, void *user)
     char *listing = NULL;
 
     collect_choices(user, text, &choices, &word);
+    completion_to_parts(&choices, word);
     if (choices.count > 1) {
         const char *marker = word == text ? "/" : "";
-        const char *last_slash = strrchr(word, '/');
-        size_t shared_len = last_slash ? (size_t)(last_slash + 1 - word) : 0;
         struct buf list;
         buf_init(&list);
         for (size_t i = 0; i < choices.count; i++) {
             buf_append_str(&list, i > 0 ? " " : "  ");
             buf_append_str(&list, marker);
-            buf_append_str(&list, choices.candidates[i] + shared_len);
+            buf_append_str(&list, choices.candidates[i]);
         }
         listing = buf_steal(&list);
     }
@@ -481,7 +505,7 @@ void slash_completer_init(struct input_completer *completer, struct agent_state 
 }
 
 /* Placeholders appear once the name is complete and before any argument, so a mistyped or
- * partial name draws nothing. */
+ * partial name draws nothing. A later argument's appears once a space ends the word before it. */
 char *slash_hint(const char *line)
 {
     size_t name_end;
@@ -496,9 +520,29 @@ char *slash_hint(const char *line)
     const char *argument = line + name_end;
     while (isspace((unsigned char)*argument))
         argument++;
-    if (*argument)
+    if (!*argument)
+        return xasprintf("%s%s", line[name_end] == '\0' ? " " : "", command->usage);
+
+    size_t argument_len = strlen(argument);
+    if (!command->later_usage || !isspace((unsigned char)argument[argument_len - 1]))
         return NULL;
-    return xasprintf("%s%s", line[name_end] == '\0' ? " " : "", command->usage);
+    while (isspace((unsigned char)argument[argument_len - 1]))
+        argument_len--;
+    char *preceding = xasprintf("%.*s", (int)argument_len, argument);
+    const char *usage = command->later_usage(preceding);
+    free(preceding);
+    return usage ? xstrdup(usage) : NULL;
+}
+
+/* Whether trimmed `arguments` hold exactly one word. */
+static int is_one_word(const char *arguments)
+{
+    if (!*arguments)
+        return 0;
+    for (const char *cursor = arguments; *cursor; cursor++)
+        if (isspace((unsigned char)*cursor))
+            return 0;
+    return 1;
 }
 
 /* ---------- /new ---------- */
@@ -719,9 +763,42 @@ static void run_preset_save(const struct command_call *call)
     select_preset_save(call->state, call->argument);
 }
 
+/* Naming an existing preset overwrites it after confirmation. */
+static void preset_save_choices(struct agent_state *state, const char *preceding,
+                                struct completion *choices)
+{
+    if (!*preceding)
+        preset_name_choices(state, preceding, choices);
+    else if (is_one_word(preceding))
+        select_tint_choices(choices);
+}
+
+static const char *preset_save_later_usage(const char *preceding)
+{
+    return is_one_word(preceding) ? "[tint]" : NULL;
+}
+
 static void run_config(const struct command_call *call)
 {
     select_config(call->state, call->argument);
+}
+
+static void config_choices(struct agent_state *state, const char *preceding,
+                           struct completion *choices)
+{
+    (void)state;
+    if (!*preceding)
+        select_config_key_choices(choices);
+    else if (is_one_word(preceding))
+        select_config_value_choices(preceding, choices);
+}
+
+static const char *config_later_usage(const char *preceding)
+{
+    if (!is_one_word(preceding))
+        return NULL;
+    const struct config_setting *setting = config_setting_find(preceding);
+    return setting && setting->editable ? "[value]" : NULL;
 }
 
 static void run_compact(const struct command_call *call)
@@ -838,6 +915,62 @@ static void kill_tasks(const char *arguments)
     free(words);
 }
 
+/* Return the arguments after a leading "kill" word, or NULL when `arguments` start otherwise. */
+static const char *kill_arguments(const char *arguments)
+{
+    if (strncmp(arguments, "kill", 4) != 0 ||
+        (arguments[4] != '\0' && arguments[4] != ' ' && arguments[4] != '\t'))
+        return NULL;
+    return arguments + 4;
+}
+
+static int names_word(const char *words, const char *word)
+{
+    size_t word_len = strlen(word);
+    for (const char *cursor = words; *cursor;) {
+        while (isspace((unsigned char)*cursor))
+            cursor++;
+        const char *end = cursor;
+        while (*end && !isspace((unsigned char)*end))
+            end++;
+        if ((size_t)(end - cursor) == word_len && strncmp(cursor, word, word_len) == 0)
+            return 1;
+        cursor = end;
+    }
+    return 0;
+}
+
+/* "kill" first, then "all" while no task is named, and the running tasks not named yet. */
+static void tasks_choices(struct agent_state *state, const char *preceding,
+                          struct completion *choices)
+{
+    (void)state;
+    if (config_bool("no_tasks"))
+        return;
+    if (!*preceding) {
+        completion_add(choices, "kill");
+        return;
+    }
+    const char *named = kill_arguments(preceding);
+    if (!named || names_word(named, "all"))
+        return;
+    if (!*named)
+        completion_add(choices, "all");
+
+    struct task_info *tasks = NULL;
+    size_t task_count = task_list(&tasks);
+    for (size_t i = 0; i < task_count; i++) {
+        if (tasks[i].running && !names_word(named, tasks[i].id))
+            completion_add(choices, tasks[i].id);
+    }
+    free(tasks);
+}
+
+static const char *tasks_later_usage(const char *preceding)
+{
+    return strcmp(preceding, "kill") == 0 ? "<id>... | all" : NULL;
+}
+
 static void run_tasks(const struct command_call *call)
 {
     if (config_bool("no_tasks")) {
@@ -846,9 +979,9 @@ static void run_tasks(const struct command_call *call)
     }
     const char *argument = call->argument;
     if (argument && *argument) {
-        if (strncmp(argument, "kill", 4) == 0 &&
-            (argument[4] == '\0' || argument[4] == ' ' || argument[4] == '\t'))
-            kill_tasks(argument + 4);
+        const char *named = kill_arguments(argument);
+        if (named)
+            kill_tasks(named);
         else
             ui_error("usage: /tasks [kill <id>... | kill all]");
         return;
@@ -1084,6 +1217,22 @@ static void run_login(const struct command_call *call)
 static void run_logout(const struct command_call *call)
 {
     logout_command(call->state, call->argument);
+}
+
+static void login_provider_choices(struct agent_state *state, const char *preceding,
+                                   struct completion *choices)
+{
+    (void)state;
+    if (!*preceding)
+        login_choices(choices);
+}
+
+static void logout_provider_choices(struct agent_state *state, const char *preceding,
+                                    struct completion *choices)
+{
+    (void)state;
+    if (!*preceding)
+        logout_choices(choices);
 }
 
 /* ---------- /help ---------- */

@@ -9,8 +9,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Added
 
-- Shell-like Tab completion of `/` commands and their arguments.
-- A dim placeholder after a `/` command shows the arguments it takes.
+- Shell-like Tab completion of `/` commands and their arguments, with a dim placeholder naming
+  the arguments a command takes.
 - `/provider`, `/model`, and `/effort` take an id or level and apply it without a picker:
   `/model <id>` also switches models on providers that cannot list theirs, and `/provider <id>`
   starts on that provider's default model, or on none until `/model` picks one.
