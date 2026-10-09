@@ -7,6 +7,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-09
+
 ### Added
 
 - DeepSeek provider (`deepseek`): set `DEEPSEEK_API_KEY`; `/usage` shows the account balance. See
