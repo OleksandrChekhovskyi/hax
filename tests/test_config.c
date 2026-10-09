@@ -895,6 +895,26 @@ static void test_choice_value_validation(void)
     EXPECT(!config_value_valid(theme, ""));
 }
 
+/* Only an explicit on/off spelling decides; auto, unset, and junk all defer to the consumer. */
+static void test_tristate(void)
+{
+    clear_env();
+    EXPECT(config_load(NULL) == 0);
+    EXPECT(config_tristate("image_input") == -1);
+    EXPECT(config_scoped_tristate("providers.x", "cache") == -1);
+    EXPECT(config_scoped_tristate(NULL, "cache") == -1);
+    EXPECT(config_load(
+               "{\"image_input\": \"off\","
+               " \"providers\": {\"x\": {\"cache\": true, \"reasoning_required\": \"maybe\"}}}") ==
+           0);
+    EXPECT(config_tristate("image_input") == 0);
+    EXPECT(config_scoped_tristate("providers.x", "cache") == 1);
+    EXPECT(config_scoped_tristate("providers.x", "reasoning_required") == -1);
+    EXPECT(config_load("{\"image_input\": \"auto\"}") == 0);
+    EXPECT(config_tristate("image_input") == -1);
+    EXPECT(config_load(NULL) == 0);
+}
+
 static void test_sort_models_auto(void)
 {
     clear_env();
@@ -2207,6 +2227,7 @@ int main(void)
     test_string_and_integer_value_validation();
     test_bounded_and_scaled_value_validation();
     test_choice_value_validation();
+    test_tristate();
     test_sort_models_auto();
     test_empty_policy();
     test_nested_and_flat();

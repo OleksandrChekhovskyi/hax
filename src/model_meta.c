@@ -498,9 +498,9 @@ int model_meta_rates(const struct provider *provider, const char *model, struct 
 
 int model_meta_image_input(const struct provider *provider, const char *model)
 {
-    const char *configured = config_str("image_input");
-    if (configured && *configured && strcmp(configured, "auto") != 0)
-        return config_bool("image_input");
+    int configured = config_tristate("image_input");
+    if (configured >= 0)
+        return configured;
 
     struct model_info info;
     resolve_model_info(provider, model, &info);

@@ -341,8 +341,8 @@ documents a need; selecting a provider warns about block members hax does not re
 Reasoning replay needs no setup: hax returns a model's reasoning in the field the server streamed it
 in. Set `reasoning_roundtrip` to a field name only for a server that reads reasoning from a
 different field, or to `off` for one that rejects it. Turn `reasoning_required` on for a server
-that rejects tool calls without their reasoning, such as a proxy to DeepSeek; it takes effect once
-the field is known from `catalog_id` or `reasoning_roundtrip`.
+that rejects tool calls without their reasoning, such as a proxy to DeepSeek without a
+`catalog_id`; it takes effect once the field is known from `catalog_id` or `reasoning_roundtrip`.
 
 Every provider reads only its own block. The `HAX_OPENAI_*` and `HAX_ANTHROPIC_*` variables belong
 to the shipped `openai-compatible` / `anthropic-compatible` blocks and do not bleed into others;

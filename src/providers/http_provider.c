@@ -50,6 +50,13 @@ struct thinking_setting {
     enum anthropic_thinking_mode mode;
 };
 
+/* Whether every assistant message carries the replay member, empty when there is no reasoning. */
+enum reasoning_requirement {
+    REASONING_OPTIONAL,
+    REASONING_PER_MODEL, /* required where the catalog names the model's member */
+    REASONING_REQUIRED,
+};
+
 struct http_provider {
     struct provider base;
     char *base_url;
@@ -71,7 +78,7 @@ struct http_provider {
     /* The replay before per-model catalog hints, which yield only to a pinned (configured) one. */
     struct chat_reasoning_replay reasoning_replay;
     int reasoning_replay_pinned;
-    int reasoning_required;
+    enum reasoning_requirement reasoning_required;
     char *reasoning_field; /* owns reasoning_replay.field */
     enum chat_reasoning_format reasoning_format;
     struct thinking_setting thinking; /* the def's; providers.<id>.thinking_mode overrides */
@@ -317,22 +324,28 @@ static const struct wire *resolve_model_wire(struct http_provider *provider, con
 }
 
 /* Precedence: a pinned setting, the catalog's per-model hint, the def default, then each item's
- * recorded member. The field is borrowed from static storage or the provider. */
+ * recorded member. The field is borrowed from static storage or the provider.
+ *
+ * Unless configured otherwise, a hint naming the member also makes it required. Such a model's
+ * chat template renders an empty member exactly like a missing one, so the empty member costs
+ * nothing, while some of these endpoints reject a tool loop whose messages lack it. */
 static struct chat_reasoning_replay
 resolve_model_reasoning_replay(const struct http_provider *provider, const char *model)
 {
     struct chat_reasoning_replay replay = provider->reasoning_replay;
+    struct catalog_entry entry;
+    catalog_lookup(provider_stable_id(&provider->base), provider->catalog_id, model, &entry);
     if (!provider->reasoning_replay_pinned) {
-        struct catalog_entry entry;
-        catalog_lookup(provider_stable_id(&provider->base), provider->catalog_id, model, &entry);
         /* A per-model hint against replay cannot waive what the endpoint requires. */
         if (entry.interleaved_field)
             replay = (struct chat_reasoning_replay){.mode = CHAT_REPLAY_FIELD,
                                                     .field = entry.interleaved_field};
-        else if (entry.interleaved_declared && !provider->reasoning_required)
+        else if (entry.interleaved_declared && provider->reasoning_required != REASONING_REQUIRED)
             replay = (struct chat_reasoning_replay){.mode = CHAT_REPLAY_OFF};
     }
-    replay.required = provider->reasoning_required;
+    replay.required =
+        provider->reasoning_required == REASONING_REQUIRED ||
+        (provider->reasoning_required == REASONING_PER_MODEL && entry.interleaved_field != NULL);
     return replay;
 }
 
@@ -500,12 +513,9 @@ static const struct wire *resolve_wire(const struct provider_def *def, const cha
 
 static enum chat_cache_mode resolve_cache_mode(const char *prefix, const char *def_default)
 {
-    /* Different fallbacks distinguish a parsed boolean from auto, unset, or invalid input. */
-    int with_false_fallback = config_scoped_bool_or(prefix, "cache", 0);
-    int with_true_fallback = config_scoped_bool_or(prefix, "cache", 1);
-
-    if (with_false_fallback == with_true_fallback)
-        return with_true_fallback ? CHAT_CACHE_ON : CHAT_CACHE_OFF;
+    int configured = config_scoped_tristate(prefix, "cache");
+    if (configured >= 0)
+        return configured ? CHAT_CACHE_ON : CHAT_CACHE_OFF;
     if (def_default && strcasecmp(def_default, "auto") == 0)
         return CHAT_CACHE_AUTO;
     if (def_default && strcasecmp(def_default, "on") == 0)
@@ -541,11 +551,20 @@ static void resolve_configured_reasoning_replay(struct http_provider *provider, 
     };
 }
 
+static enum reasoning_requirement resolve_reasoning_requirement(const char *prefix,
+                                                                int def_required)
+{
+    int configured = config_scoped_tristate(prefix, "reasoning_required");
+    if (configured >= 0)
+        return configured ? REASONING_REQUIRED : REASONING_OPTIONAL;
+    return def_required ? REASONING_REQUIRED : REASONING_PER_MODEL;
+}
+
 /* The required member can be sent only under a known name. A message without reasoning records
  * none, so a recorded replay leaves the requirement unmet unless a catalog hint names it. */
 static void warn_unmet_reasoning_requirement(const struct http_provider *provider, const char *name)
 {
-    if (!provider->reasoning_required)
+    if (provider->reasoning_required != REASONING_REQUIRED)
         return;
     if (provider->reasoning_replay_pinned && provider->reasoning_replay.mode == CHAT_REPLAY_OFF)
         hax_warn("provider '%s': reasoning_roundtrip is off, so the reasoning the endpoint "
@@ -954,8 +973,7 @@ struct provider *http_provider_new(const struct provider_def *def)
     provider->cache_mode = resolve_cache_mode(prefix, def->cache);
     provider->cache_ttl = xstrdup(provider_cache_ttl(prefix));
     resolve_configured_reasoning_replay(provider, prefix, def->reasoning_roundtrip);
-    provider->reasoning_required =
-        config_scoped_bool_or(prefix, "reasoning_required", def->reasoning_required);
+    provider->reasoning_required = resolve_reasoning_requirement(prefix, def->reasoning_required);
     warn_unmet_reasoning_requirement(provider, name);
     provider->reasoning_format = chat_reasoning_format_parse(
         config_scoped_str(prefix, "reasoning_format"),

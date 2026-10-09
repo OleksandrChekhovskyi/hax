@@ -846,16 +846,17 @@ static void test_interleaved_reasoning_replay(void)
     EXPECT(config_load(NULL) == 0);
 }
 
-/* A def that requires the member keeps it on a reasoning-less tool call, whether the member
- * comes from a catalog hint or the def, and even when the catalog hints against replay.
- * providers.<id>.reasoning_required overrides the def either way. */
+/* A reasoning-less tool call keeps the member where the def requires it, whether the member comes
+ * from a catalog hint or the def, and even when the catalog hints against replay. Otherwise it is
+ * required where the catalog names the model's member, under a pinned name if one is configured.
+ * providers.<id>.reasoning_required overrides either way. */
 static void test_required_reasoning_replay(void)
 {
     write_catalog_fixture();
     catalog_shutdown();
     struct loopback server = {
         .response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
-        .n_requests = 5,
+        .n_requests = 10,
     };
     int port = loopback_start(&server);
     EXPECT(port > 0);
@@ -892,6 +893,15 @@ static void test_required_reasoning_replay(void)
         provider->destroy(provider);
     }
 
+    provider = http_provider_new(&plain_def);
+    EXPECT(provider != NULL);
+    if (provider) {
+        provider->stream(provider, &context, "think-hint", log_error, &log, NULL, NULL);
+        provider->stream(provider, &context, "plain", log_error, &log, NULL, NULL);
+        provider->stream(provider, &context, "no-replay", log_error, &log, NULL, NULL);
+        provider->destroy(provider);
+    }
+
     EXPECT(config_load("{\"providers\": {\"zen\": {\"reasoning_required\": \"off\"}}}") == 0);
     provider = http_provider_new(&def);
     EXPECT(provider != NULL);
@@ -899,8 +909,24 @@ static void test_required_reasoning_replay(void)
         provider->stream(provider, &context, "think-hint", log_error, &log, NULL, NULL);
         provider->destroy(provider);
     }
+    provider = http_provider_new(&plain_def);
+    EXPECT(provider != NULL);
+    if (provider) {
+        provider->stream(provider, &context, "think-hint", log_error, &log, NULL, NULL);
+        provider->destroy(provider);
+    }
 
-    EXPECT(config_load("{\"providers\": {\"zen\": {\"reasoning_required\": \"on\"}}}") == 0);
+    EXPECT(config_load("{\"providers\": {\"zen\": {\"reasoning_required\": \"on\","
+                       " \"reasoning_roundtrip\": \"reasoning_content\"}}}") == 0);
+    provider = http_provider_new(&plain_def);
+    EXPECT(provider != NULL);
+    if (provider) {
+        provider->stream(provider, &context, "plain", log_error, &log, NULL, NULL);
+        provider->destroy(provider);
+    }
+
+    EXPECT(config_load("{\"providers\": {\"zen\": {\"reasoning_roundtrip\": \"reasoning\"}}}") ==
+           0);
     provider = http_provider_new(&plain_def);
     EXPECT(provider != NULL);
     if (provider) {
@@ -911,12 +937,18 @@ static void test_required_reasoning_replay(void)
     EXPECT(config_load(NULL) == 0);
 
     loopback_stop(&server);
-    EXPECT(atomic_load(&server.served) == 5);
+    EXPECT(atomic_load(&server.served) == 10);
     EXPECT(strstr(server.requests[0], "\"reasoning_content\":\"\"") != NULL);
     EXPECT(strstr(server.requests[1], "\"reasoning_content\":\"\"") != NULL);
     EXPECT(strstr(server.requests[2], "\"reasoning_content\":\"\"") != NULL);
-    EXPECT(strstr(server.requests[3], "reasoning_content") == NULL);
-    EXPECT(strstr(server.requests[4], "\"reasoning_content\":\"\"") != NULL);
+    EXPECT(strstr(server.requests[3], "\"reasoning_content\":\"\"") != NULL);
+    EXPECT(strstr(server.requests[4], "reasoning_content") == NULL);
+    EXPECT(strstr(server.requests[5], "reasoning_content") == NULL);
+    EXPECT(strstr(server.requests[6], "reasoning_content") == NULL);
+    EXPECT(strstr(server.requests[7], "reasoning_content") == NULL);
+    EXPECT(strstr(server.requests[8], "\"reasoning_content\":\"\"") != NULL);
+    EXPECT(strstr(server.requests[9], "\"reasoning\":\"\"") != NULL);
+    EXPECT(strstr(server.requests[9], "reasoning_content") == NULL);
 }
 
 static int construction_warns(const struct provider_def *def, const char *config)

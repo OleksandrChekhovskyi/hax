@@ -13,7 +13,7 @@
  * a client so a scenario fails instead of hanging. Set `hold` to keep each reply back until
  * loopback_release, so a test can act while a request is provably in flight. */
 
-#define LOOPBACK_MAX_REQUESTS     9
+#define LOOPBACK_MAX_REQUESTS     12
 #define LOOPBACK_REQUEST_CAPACITY 8192
 
 struct loopback {

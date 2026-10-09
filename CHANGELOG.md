@@ -65,6 +65,9 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Fixed
 
+- DeepSeek models on OpenCode Go and Zen no longer fail mid-task with `The reasoning_content in
+  the thinking mode must be passed back to the API`. Any model whose catalog entry names a
+  reasoning field now gets that field on every assistant message, empty when there is none.
 - Ollama models now get their own earlier reasoning back in later requests. Thinking models could
   otherwise degrade over a long session, especially across tool calls.
 - A turn that finishes almost at once, such as one that fails right away, no longer adds half a

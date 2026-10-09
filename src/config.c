@@ -182,7 +182,7 @@ static const struct config_setting REGISTRY[] = {
      .env_var = "HAX_OPENAI_REASONING_REQUIRED", .choices = CONFIG_CHOICES_TRISTATE,
      .description = "Send the reasoning field on every assistant message, empty when there is "
                     "none, for servers that reject tool calls without it; auto uses the provider "
-                    "default"},
+                    "default, else the model's catalog entry"},
     {.key = "providers.openai-compatible.send_cache_key", .env_var = "HAX_OPENAI_SEND_CACHE_KEY",
      .choices = CONFIG_CHOICES_TRISTATE,
      .description = "Send a stable prompt_cache_key (prefix-cache hint); auto uses the provider "
@@ -775,6 +775,11 @@ int config_bool_or(const char *key, int default_value)
     return value < 0 ? !!default_value : value;
 }
 
+int config_tristate(const char *key)
+{
+    return parse_bool(resolve(key, 1));
+}
+
 const char *config_scoped_str(const char *prefix, const char *leaf)
 {
     if (!prefix)
@@ -791,6 +796,16 @@ int config_scoped_bool_or(const char *prefix, const char *leaf, int fallback)
         return fallback;
     char *key = xasprintf("%s.%s", prefix, leaf);
     int value = config_bool_or(key, fallback);
+    free(key);
+    return value;
+}
+
+int config_scoped_tristate(const char *prefix, const char *leaf)
+{
+    if (!prefix)
+        return -1;
+    char *key = xasprintf("%s.%s", prefix, leaf);
+    int value = config_tristate(key);
     free(key);
     return value;
 }

@@ -73,11 +73,16 @@ long parse_duration_ms(const char *str);
 /* Parse a boolean setting, using `default_value` when it is unset or invalid. */
 int config_bool_or(const char *key, int default_value);
 
-/* Resolve "<prefix>.<leaf>" with the semantics of config_str, config_bool_or, and config_int.
- * A NULL prefix resolves nothing (NULL / fallback / 0): a caller without a config namespace
- * ships fixed behavior. */
+/* Parse a CONFIG_CHOICES_TRISTATE setting: 1 for on, 0 for off, and -1 when it is auto, unset, or
+ * invalid, which leaves the decision to the consumer. */
+int config_tristate(const char *key);
+
+/* Resolve "<prefix>.<leaf>" with the semantics of config_str, config_bool_or, config_tristate, and
+ * config_int. A NULL prefix resolves nothing (NULL / fallback / -1 / 0): a caller without a config
+ * namespace ships fixed behavior. */
 const char *config_scoped_str(const char *prefix, const char *leaf);
 int config_scoped_bool_or(const char *prefix, const char *leaf, int fallback);
+int config_scoped_tristate(const char *prefix, const char *leaf);
 int config_scoped_int(const char *prefix, const char *leaf);
 
 /* Expand a non-NULL system_prompt/system_prompt_append value into malloc'd prompt text. A

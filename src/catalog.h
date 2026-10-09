@@ -54,9 +54,10 @@ struct catalog_entry {
     struct effort_set efforts;
 
     /* Chat Completions member that must carry an assistant turn's own reasoning back to the
-     * model: interleaved-thinking models stop reasoning once it is missing from their history.
-     * Static storage, "reasoning" or "reasoning_content"; NULL when the model needs no replay
-     * or round-trips typed blocks instead. */
+     * model, on every assistant message: interleaved-thinking models stop reasoning once it is
+     * missing from their history, and some reject a tool loop without it. Static storage,
+     * "reasoning" or "reasoning_content"; NULL when the model needs no replay or round-trips
+     * typed blocks instead. */
     const char *interleaved_field;
     int interleaved_declared; /* Distinguishes an absent hint from one declared off. */
 
