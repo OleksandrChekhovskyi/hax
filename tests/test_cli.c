@@ -10,11 +10,11 @@
 #include "cli.h"
 #include "config.h"
 #include "harness.h"
+#include "output.h"
 #include "provider.h"
 #include "session.h"
 #include "xalloc.h"
 #include "system/locale.h"
-#include "text/width.h"
 
 static void test_parse_selection_and_prompt_arguments(void)
 {
@@ -164,95 +164,55 @@ static void test_parse_json_implies_print(void)
     EXPECT(options.agent_options.json == 0);
 }
 
+struct flag_call {
+    const char *flag;
+    enum cli_parse_result result;
+};
+
+static void parse_flag(void *data)
+{
+    struct flag_call *call = data;
+    char *argv[] = {"hax", (char *)call->flag, NULL};
+    struct cli_options options;
+    call->result = cli_parse(2, argv, &options);
+}
+
+/* Return what parsing `flag` alone printed; the flag must exit after printing. */
+static char *capture_flag_output(const char *flag)
+{
+    struct flag_call call = {.flag = flag};
+    char *out = t_capture_stdout(parse_flag, &call);
+    EXPECT(call.result == CLI_PARSE_EXIT);
+    return out;
+}
+
 static void test_parse_version_prints_and_exits(void)
 {
     const char *flags[] = {"--version", "-v"};
     for (size_t i = 0; i < sizeof(flags) / sizeof(*flags); i++) {
-        fflush(stdout);
-        int saved = dup(STDOUT_FILENO);
-        EXPECT(saved >= 0);
-        FILE *tmp = tmpfile();
-        EXPECT(tmp != NULL);
-        EXPECT(dup2(fileno(tmp), STDOUT_FILENO) >= 0);
-
-        char *argv[] = {"hax", (char *)flags[i], NULL};
-        struct cli_options options;
-        enum cli_parse_result result = cli_parse(2, argv, &options);
-
-        fflush(stdout);
-        EXPECT(dup2(saved, STDOUT_FILENO) >= 0);
-        close(saved);
-        EXPECT(result == CLI_PARSE_EXIT);
-
-        EXPECT(fseek(tmp, 0, SEEK_SET) == 0);
-        char line[256] = "";
-        EXPECT(fgets(line, sizeof(line), tmp) != NULL);
-        fclose(tmp);
-        EXPECT(strncmp(line, "hax ", 4) == 0);
-        EXPECT(strlen(line) > 5 && line[strlen(line) - 1] == '\n');
-    }
-}
-
-static char *capture_help_output(void)
-{
-    fflush(stdout);
-    int saved = dup(STDOUT_FILENO);
-    EXPECT(saved >= 0);
-    FILE *tmp = tmpfile();
-    EXPECT(tmp != NULL);
-    EXPECT(dup2(fileno(tmp), STDOUT_FILENO) >= 0);
-
-    char *argv[] = {"hax", "--help", NULL};
-    struct cli_options options;
-    enum cli_parse_result result = cli_parse(2, argv, &options);
-
-    fflush(stdout);
-    EXPECT(dup2(saved, STDOUT_FILENO) >= 0);
-    close(saved);
-    EXPECT(result == CLI_PARSE_EXIT);
-
-    EXPECT(fseek(tmp, 0, SEEK_END) == 0);
-    long size = ftell(tmp);
-    EXPECT(size > 0);
-    EXPECT(fseek(tmp, 0, SEEK_SET) == 0);
-    char *out = xmalloc((size_t)size + 1);
-    EXPECT(fread(out, 1, (size_t)size, tmp) == (size_t)size);
-    out[size] = '\0';
-    fclose(tmp);
-    return out;
-}
-
-static void expect_help_rows_fit(const char *out, size_t max_cells)
-{
-    const char *row = out;
-    while (row && *row) {
-        const char *end = strchr(row, '\n');
-        size_t row_bytes = end ? (size_t)(end - row) : strlen(row);
-        char *copy = xmalloc(row_bytes + 1);
-        memcpy(copy, row, row_bytes);
-        copy[row_bytes] = '\0';
-        if (display_cells(copy) > max_cells)
-            FAIL("row exceeds %zu cells: %s", max_cells, copy);
-        free(copy);
-        row = end ? end + 1 : NULL;
+        char *out = capture_flag_output(flags[i]);
+        const char *newline = strchr(out, '\n');
+        EXPECT(strncmp(out, "hax ", 4) == 0);
+        EXPECT(newline && newline - out > 4);
+        free(out);
     }
 }
 
 static void test_help_wraps_to_display_width(void)
 {
     setenv("HAX_DISPLAY_WIDTH", "60", 1);
-    char *out = capture_help_output();
+    char *out = capture_flag_output("--help");
     EXPECT(strstr(out, "usage:") != NULL);
     EXPECT(strstr(out, "--resume[=ID]") != NULL);
     EXPECT(strstr(out, "README.md") != NULL);
-    expect_help_rows_fit(out, 60);
+    t_expect_rows_fit(out, 60);
     free(out);
 
     /* Narrow widths drop the flag column and stack descriptions under their flags. */
     setenv("HAX_DISPLAY_WIDTH", "30", 1);
-    out = capture_help_output();
+    out = capture_flag_output("--help");
     unsetenv("HAX_DISPLAY_WIDTH");
-    expect_help_rows_fit(out, 30);
+    t_expect_rows_fit(out, 30);
     EXPECT(strstr(out, "barebones chat") != NULL);
     free(out);
 }

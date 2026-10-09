@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_LOGIN_H
-#define HAX_LOGIN_H
+#ifndef HAX_COMMANDS_LOGIN_H
+#define HAX_COMMANDS_LOGIN_H
 
 struct agent_state;
 
@@ -19,4 +19,4 @@ struct completion;
 void login_choices(struct completion *choices);
 void logout_choices(struct completion *choices);
 
-#endif /* HAX_LOGIN_H */
+#endif /* HAX_COMMANDS_LOGIN_H */

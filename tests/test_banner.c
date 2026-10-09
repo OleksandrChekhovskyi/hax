@@ -2,34 +2,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 #include "agent_core.h"
 #include "banner.h"
 #include "harness.h"
+#include "output.h"
 #include "provider.h"
-#include "xalloc.h"
 #include "system/locale.h"
-
-/* Row layout is asserted on plain text; SGR runs vary with theme resolution. */
-static char *strip_sgr(const char *s)
-{
-    char *out = xmalloc(strlen(s) + 1);
-    size_t n = 0;
-    while (*s) {
-        if (*s == '\x1b' && s[1] == '[') {
-            s += 2;
-            while (*s && !(*s >= '@' && *s <= '~'))
-                s++;
-            if (*s)
-                s++;
-            continue;
-        }
-        out[n++] = *s++;
-    }
-    out[n] = '\0';
-    return out;
-}
 
 static char *identity_rows(const struct provider *provider, const struct agent_session *session)
 {
@@ -39,7 +18,7 @@ static char *identity_rows(const struct provider *provider, const struct agent_s
     EXPECT(stream != NULL);
     banner_identity(stream, provider, session);
     fclose(stream);
-    char *plain = strip_sgr(raw);
+    char *plain = t_strip_sgr(raw);
     free(raw);
     return plain;
 }
@@ -134,31 +113,27 @@ static void test_identity_prefers_model_label(void)
     free(out);
 }
 
+struct banner_call {
+    const struct provider *provider;
+    const struct agent_session *session;
+};
+
+static void print_banner(void *data)
+{
+    const struct banner_call *call = data;
+    banner_print(call->provider, call->session);
+}
+
 static void test_print_adds_key_tips(void)
 {
     setenv("HAX_DISPLAY_WIDTH", "100", 1);
     struct provider provider = {.name = "mock"};
     struct agent_session session = {.model = (char *)"model-a"};
+    struct banner_call call = {.provider = &provider, .session = &session};
 
-    fflush(stdout);
-    int saved = dup(STDOUT_FILENO);
-    EXPECT(saved >= 0);
-    FILE *tmp = tmpfile();
-    EXPECT(tmp != NULL);
-    EXPECT(dup2(fileno(tmp), STDOUT_FILENO) >= 0);
-
-    banner_print(&provider, &session);
-
-    fflush(stdout);
-    EXPECT(dup2(saved, STDOUT_FILENO) >= 0);
-    close(saved);
-    EXPECT(fseek(tmp, 0, SEEK_SET) == 0);
-    char raw[512];
-    size_t got = fread(raw, 1, sizeof(raw) - 1, tmp);
-    raw[got] = '\0';
-    fclose(tmp);
-
-    char *out = strip_sgr(raw);
+    char *raw = t_capture_stdout(print_banner, &call);
+    char *out = t_strip_sgr(raw);
+    free(raw);
     EXPECT_STR_EQ(out, "▌ hax › mock · model-a\n"
                        "▌ ctrl-d quit · try /help\n");
     free(out);

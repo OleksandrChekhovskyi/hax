@@ -4,7 +4,7 @@
 
 #include "cred_store.h"
 #include "harness.h"
-#include "login.h"
+#include "commands/login.h"
 #include "text/completion.h"
 
 static void test_login_offers_every_flow(void)

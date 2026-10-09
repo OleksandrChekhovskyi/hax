@@ -90,7 +90,6 @@ sources = files(
     'src/effort.c',
     'src/file_mention.c',
     'src/history.c',
-    'src/login.c',
     'src/model_meta.c',
     'src/model_sort.c',
     'src/oneshot.c',
@@ -106,6 +105,10 @@ sources = files(
     'src/transcript.c',
     'src/turn.c',
     'src/xalloc.c',
+
+    'src/commands/login.c',
+    'src/commands/session_cmd.c',
+    'src/commands/tasks.c',
 
     'src/providers/anthropic_body.c',
     'src/providers/anthropic_events.c',

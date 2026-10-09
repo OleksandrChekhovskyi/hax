@@ -2,6 +2,7 @@
 test_support = static_library('test_support',
     'harness.c',
     'loopback.c',
+    'output.c',
     'tools/bash_fixtures.c',
     dependencies: [hax_dep],
 )
@@ -36,7 +37,6 @@ test_sources = [
     'test_effort.c',
     'test_file_mention.c',
     'test_history.c',
-    'test_login.c',
     'test_model_meta.c',
     'test_model_sort.c',
     'test_harness.c',
@@ -54,6 +54,10 @@ test_sources = [
     'test_transcript.c',
     'test_turn.c',
     'test_xalloc.c',
+
+    'commands/test_login.c',
+    'commands/test_session_cmd.c',
+    'commands/test_tasks.c',
 
     'providers/test_anthropic_body.c',
     'providers/test_anthropic_events.c',

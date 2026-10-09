@@ -10,39 +10,11 @@
 #include "effort.h"
 #include "harness.h"
 #include "model_meta.h"
+#include "output.h"
 #include "provider.h"
 #include "session.h"
 #include "xalloc.h"
 #include "render/render_ctx.h"
-
-/* Run `body` with captured stdout, restore stdout, and return owned output. */
-static char *capture_stdout(void (*body)(void *), void *user)
-{
-    fflush(stdout);
-    int saved = dup(STDOUT_FILENO);
-    EXPECT(saved >= 0);
-
-    FILE *tmp = tmpfile();
-    EXPECT(tmp != NULL);
-    int tmpfd = fileno(tmp);
-    EXPECT(dup2(tmpfd, STDOUT_FILENO) >= 0);
-
-    body(user);
-
-    fflush(stdout);
-    EXPECT(dup2(saved, STDOUT_FILENO) >= 0);
-    close(saved);
-
-    EXPECT(fseek(tmp, 0, SEEK_END) == 0);
-    long n = ftell(tmp);
-    EXPECT(n >= 0);
-    EXPECT(fseek(tmp, 0, SEEK_SET) == 0);
-    char *buf = xmalloc((size_t)n + 1);
-    size_t got = fread(buf, 1, (size_t)n, tmp);
-    buf[got] = '\0';
-    fclose(tmp);
-    return buf;
-}
 
 /* ---------- agent_apply_settings: banner / marker split ---------- */
 
@@ -115,7 +87,7 @@ static void test_apply_settings_empty_reprints_banner(void)
     fixture_init(&f);
     EXPECT(f.session.n_items == 0);
 
-    char *out = capture_stdout(do_apply, &f);
+    char *out = t_capture_stdout(do_apply, &f);
     EXPECT(strstr(out, "hax") != NULL);
     EXPECT(strstr(out, "prov-x · model-a") != NULL);
     EXPECT(strstr(out, "ctrl-d quit") != NULL);
@@ -134,7 +106,7 @@ static void test_apply_settings_nonempty_prints_marker(void)
     agent_session_add_user(&f.session, "hello");
     EXPECT(f.session.n_items > 0);
 
-    char *out = capture_stdout(do_apply, &f);
+    char *out = t_capture_stdout(do_apply, &f);
     EXPECT(strstr(out, "switched to prov-x · model-a") != NULL);
     EXPECT(strstr(out, "ctrl-d quit") == NULL);
     /* The marker uses disp, so its trailing newline remains pending. */
@@ -159,7 +131,7 @@ static void test_apply_settings_switch_line_skips_banner(void)
     fixture_init(&f);
     EXPECT(f.session.n_items == 0);
 
-    char *out = capture_stdout(do_apply_switch_line, &f);
+    char *out = t_capture_stdout(do_apply_switch_line, &f);
     EXPECT(strstr(out, "switched to prov-x · model-a") != NULL);
     EXPECT(strstr(out, "ctrl-d quit") == NULL);
 
@@ -186,7 +158,7 @@ static void test_apply_settings_quiet_prints_nothing(void)
     EXPECT(f.session.n_items > 0);
     setenv("HAX_MODEL", "model-b", 1); /* the change the silent apply resolves */
 
-    char *out = capture_stdout(do_apply_quiet, &f);
+    char *out = t_capture_stdout(do_apply_quiet, &f);
     EXPECT_STR_EQ(out, "");
     /* Silence is about output, not effect. */
     EXPECT_STR_EQ(f.session.model, "model-b");
@@ -234,7 +206,7 @@ static void test_apply_settings_switches_without_model(void)
     f.candidate = &next;
     provider_destroy_calls = 0;
 
-    char *out = capture_stdout(do_apply, &f);
+    char *out = t_capture_stdout(do_apply, &f);
     EXPECT(f.state.provider == &next);
     EXPECT(provider_destroy_calls == 1);
     EXPECT_STR_EQ(f.session.provider_id, "prov-y");
@@ -256,13 +228,13 @@ static void test_apply_settings_refreshes_on_model_or_provider_change(void)
     /* Same model re-applied (the /effort-tweak shape): the metadata fetch
      * must not re-run — re-probing on every apply would add a needless
      * network round-trip and cancel/join churn. */
-    char *out = capture_stdout(do_apply, &f);
+    char *out = t_capture_stdout(do_apply, &f);
     EXPECT(refresh_calls == 0);
     free(out);
 
     /* A real model change re-probes, with the new model. */
     setenv("HAX_MODEL", "model-b", 1);
-    out = capture_stdout(do_apply, &f);
+    out = t_capture_stdout(do_apply, &f);
     EXPECT(refresh_calls == 1);
     EXPECT_STR_EQ(refresh_last_model, "model-b");
     free(out);
@@ -279,7 +251,7 @@ static void test_apply_settings_refreshes_on_model_or_provider_change(void)
     f.candidate = &next;
     refresh_calls = 0;
     provider_destroy_calls = 0;
-    out = capture_stdout(do_apply, &f);
+    out = t_capture_stdout(do_apply, &f);
     EXPECT(f.state.provider == &next);
     EXPECT(provider_destroy_calls == 1);
     EXPECT(refresh_calls == 1);
@@ -360,7 +332,7 @@ static void test_new_conversation_resets_everything(void)
     agent_session_retire(&f.session, 2);
     agent_session_add_worked(&f.session, 1500);
 
-    char *out = capture_stdout(do_new_conversation, &f);
+    char *out = t_capture_stdout(do_new_conversation, &f);
     EXPECT(f.session.n_items == 0);
     EXPECT(f.session.n_retired == 0);
     EXPECT(f.session.worked_ms == 0);
@@ -466,7 +438,7 @@ static void test_undo_reverts_history_and_file(void)
 
     /* Revert to before turn 1: turn 0 survives, turns 1 and 2 drop. */
     struct history_mutation_call c = {.state = &f.state, .turn_index = 1};
-    char *out = capture_stdout(do_undo, &c);
+    char *out = t_capture_stdout(do_undo, &c);
 
     EXPECT(agent_user_turn_count(&f.session) == 1);
     EXPECT_STR_EQ(agent_user_turn_text(&f.session, 0), "first");
@@ -522,7 +494,7 @@ static void test_undo_with_continuation_cuts_disk_and_memory_alike(void)
     /* Revert to before "second": the whole first turn, continuation included,
      * survives in memory... */
     struct history_mutation_call c = {.state = &f.state, .turn_index = 1};
-    char *out = capture_stdout(do_undo, &c);
+    char *out = t_capture_stdout(do_undo, &c);
     EXPECT(agent_user_turn_count(&f.session) == 1);
     size_t kept = f.session.n_items;
 
@@ -572,7 +544,7 @@ static void test_fork_branches_and_switches_log(void)
     char *orig = xstrdup(session_log_path(f.state.session_log));
 
     struct history_mutation_call c = {.state = &f.state, .turn_index = 1};
-    char *out = capture_stdout(do_fork, &c);
+    char *out = t_capture_stdout(do_fork, &c);
 
     /* History cut to the branch point, discarded prompt staged. */
     EXPECT(agent_user_turn_count(&f.session) == 1);
@@ -628,7 +600,7 @@ static void test_fork_at_tip_clones_whole(void)
 
     /* turn == count: clone at the tip, nothing discarded. */
     struct history_mutation_call c = {.state = &f.state, .turn_index = 2};
-    char *out = capture_stdout(do_fork, &c);
+    char *out = t_capture_stdout(do_fork, &c);
 
     EXPECT(f.session.n_items == items_before);
     EXPECT(f.state.pending_recall == NULL); /* no prompt discarded */
@@ -662,7 +634,7 @@ static void test_fork_without_recording_leaves_state(void)
     size_t items_before = f.session.n_items;
 
     struct history_mutation_call c = {.state = &f.state, .turn_index = 1};
-    char *out = capture_stdout(do_fork, &c);
+    char *out = t_capture_stdout(do_fork, &c);
 
     /* Refused, conversation fully intact. */
     EXPECT(strstr(out, "session recording") != NULL);
@@ -698,7 +670,7 @@ static void test_fork_records_live_selection(void)
     char *orig = xstrdup(session_log_path(f.state.session_log));
 
     struct history_mutation_call c = {.state = &f.state, .turn_index = 1};
-    char *out = capture_stdout(do_fork, &c);
+    char *out = t_capture_stdout(do_fork, &c);
     char *branch = xstrdup(session_log_path(f.state.session_log));
 
     /* The branch's header carries the run's selection from the start, so resuming it before
@@ -778,7 +750,7 @@ static void test_apply_settings_records_switch(void)
     char *path = xstrdup(session_log_path(f.state.session_log));
 
     setenv("HAX_MODEL", "model-b", 1);
-    char *out = capture_stdout(do_apply, &f);
+    char *out = t_capture_stdout(do_apply, &f);
 
     /* A switch the user hasn't used yet stays out of the file. */
     struct session_meta m;

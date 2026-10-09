@@ -10,6 +10,7 @@
 #include "config.h"
 #include "harness.h"
 #include "history.h"
+#include "output.h"
 #include "provider.h"
 #include "tool.h"
 #include "xalloc.h"
@@ -47,30 +48,6 @@ static char *render(enum history_detail detail, const struct item *items, size_t
     vt_resolve(raw, raw_len, settled);
     fclose(settled);
     free(raw);
-    return out;
-}
-
-/* Drop SGR runs from settled rows. Needed wherever an assertion spans text
- * the renderer styled in pieces — a coalesced read line closes and reopens
- * dim around each appended name, so "a.h, b.h" is not a literal substring of
- * the output, and a check for "\n\n[read]" would never match (the tag is
- * preceded by its style escapes) whether or not the blank line is there.
- * Caller frees. */
-static char *strip_sgr(const char *s)
-{
-    char *out = xmalloc(strlen(s) + 1);
-    size_t w = 0;
-    for (size_t i = 0; s[i];) {
-        if (s[i] == 0x1b && s[i + 1] == '[') {
-            size_t j = i + 2;
-            while (s[j] && s[j] != 'm')
-                j++;
-            i = s[j] ? j + 1 : j;
-            continue;
-        }
-        out[w++] = s[i++];
-    }
-    out[w] = '\0';
     return out;
 }
 
@@ -190,7 +167,7 @@ static void test_collapsed_cluster_spans_turns_tightly(void)
     items[4].tool_arguments_json = (char *)"{\"path\":\"/tmp/bbb.h\",\"offset\":10,\"limit\":20}";
 
     char *out = render(HISTORY_FULL, items, 5, 0);
-    char *plain = strip_sgr(out);
+    char *plain = t_strip_sgr(out);
     EXPECT(strstr(plain, "/tmp/aaa.h") == NULL); /* basenames, not paths */
     /* Two reads share one line, and a requested range keeps its suffix. */
     EXPECT(strstr(plain, "aaa.h, bbb.h:10-29") != NULL);
@@ -268,7 +245,7 @@ static void test_consecutive_reasoning_items_are_separate_blocks(void)
     items[1].reasoning_text = (char *)"SECOND_THOUGHT";
 
     char *out = render(HISTORY_FULL, items, 2, 1);
-    char *plain = strip_sgr(out);
+    char *plain = t_strip_sgr(out);
     EXPECT(strstr(plain, "FIRST_THOUGHTSECOND_THOUGHT") == NULL);
     EXPECT(strstr(plain, "FIRST_THOUGHT\n\nSECOND_THOUGHT") != NULL);
     free(plain);
@@ -393,7 +370,7 @@ static void test_collapsed_row_keeps_suffix_under_truncation(void)
     items[0].tool_arguments_json = args;
 
     char *out = render(HISTORY_BRIEF, items, 1, 0);
-    char *plain = strip_sgr(out);
+    char *plain = t_strip_sgr(out);
     const char *ellipsis = strstr(plain, "...");
     const char *range = strstr(plain, ":10-29");
     EXPECT(ellipsis != NULL && range != NULL && ellipsis < range);
@@ -417,7 +394,7 @@ static void test_collapsed_row_stays_in_budget_at_narrow_width(void)
     char *out = render(HISTORY_BRIEF, items, 1, 0);
     config_set_override("display_width", NULL);
 
-    char *plain = strip_sgr(out);
+    char *plain = t_strip_sgr(out);
     char *row = strstr(plain, "[read]");
     EXPECT(row != NULL);
     if (row) {
@@ -455,7 +432,7 @@ static void test_replays_preprocessed_args(void)
     items[1].output = (char *)"LISTING_BODY\n";
 
     char *out = render(HISTORY_FULL, items, 2, 0);
-    char *plain = strip_sgr(out);
+    char *plain = t_strip_sgr(out);
     EXPECT(strstr(plain, "cd ") == NULL);           /* the stripped prefix stays gone */
     EXPECT(strstr(plain, "[bash] ls src") != NULL); /* quiet, as it was live */
     EXPECT(strstr(plain, "LISTING_BODY") == NULL);  /* exploration output stays hidden */
@@ -647,7 +624,7 @@ static void test_marker_separates_from_next_block(void)
     items[1].text = (char *)"FIRST_REAL_PROMPT";
 
     char *out = render(HISTORY_FULL, items, 2, 0);
-    char *plain = strip_sgr(out);
+    char *plain = t_strip_sgr(out);
     EXPECT(strstr(plain, "conversation compacted ──\n\n") != NULL);
     EXPECT(strstr(plain, "compacted ──\xE2\x96\x8C") == NULL);
     free(plain);
@@ -658,7 +635,7 @@ static void test_marker_separates_from_next_block(void)
     items[0].origin = ITEM_ORIGIN_INTERRUPTED;
 
     char *after_interrupt = render(HISTORY_FULL, items, 2, 0);
-    char *iplain = strip_sgr(after_interrupt);
+    char *iplain = t_strip_sgr(after_interrupt);
     EXPECT(strstr(iplain, "[interrupted]\n\n") != NULL);
     free(iplain);
     free(after_interrupt);
@@ -695,7 +672,7 @@ static void test_interrupt_marker_split_out(void)
     const char *marker = strstr(out, "[interrupted]");
     EXPECT(partial && marker && partial < marker);
     /* Dim out-of-band block, not part of the answer's own paragraph. */
-    char *plain = strip_sgr(out);
+    char *plain = t_strip_sgr(out);
     EXPECT(strstr(plain, "partial answer\n\n[interrupted]") != NULL);
     free(plain);
     free(out);
@@ -705,7 +682,7 @@ static void test_interrupt_marker_split_out(void)
      * spelling. */
     items[0].origin = ITEM_ORIGIN_NONE;
     char *genuine = render(HISTORY_FULL, items, 1, 0);
-    char *gplain = strip_sgr(genuine);
+    char *gplain = t_strip_sgr(genuine);
     EXPECT(strstr(gplain, "partial answer\n[interrupted]") != NULL);
     EXPECT(strstr(gplain, "partial answer\n\n[interrupted]") == NULL);
     free(gplain);

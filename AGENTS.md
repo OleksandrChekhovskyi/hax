@@ -127,6 +127,11 @@ Extension workflows:
   in `meson.build`; a user-visible endpoint variant should be config, not C.
 - A compiled-in tool needs its source in `meson.build`, an exported `const struct tool` declaration
   in `tool.h`, and an entry in `agent_core.c`'s `TOOLS[]`.
+- A slash command is an entry in `slash.c`'s `COMMANDS[]`. Code that serves only that command lives
+  in `src/commands/<name>.c`, exporting `<name>_command` and, when its arguments complete,
+  `<name>_choices`. A name another module in `src/` already uses takes a `_cmd` suffix
+  (`session_cmd.c`), since a same-named header there would shadow the other one. Logic other
+  callers share stays in its own module, as selection does in `select.c`.
 - Keep protocol translation and terminal-independent state machines pure and separately testable;
   do not require HTTP or a TTY to test parsing and state transitions.
 
