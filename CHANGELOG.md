@@ -9,82 +9,66 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Added
 
-- Shell-like Tab completion of `/` commands and their arguments, with a dim placeholder naming
-  the arguments a command takes.
-- `/provider`, `/model`, and `/effort` take an id or level and apply it without a picker:
-  `/model <id>` also switches models on providers that cannot list theirs, and `/provider <id>`
-  starts on that provider's default model, or on none until `/model` picks one.
-- The built-in pickers take fzf's keys: Ctrl-J/Ctrl-K move the selection, and Ctrl-W and
-  Alt-Backspace delete a word of the query.
-- A preset name right after `hax` starts with that preset: `hax review` is short for
-  `hax --preset review`, and `hax review -p "..."` works the same way in one-shot mode.
-- `/session` shows a token row per model when the conversation switched models, how many user
-  turns `/undo` removed, and what a fork inherited from its source.
-- DeepSeek provider (`deepseek`): set `DEEPSEEK_API_KEY`; `/usage` shows the account balance.
-- `reasoning_required` provider setting for Chat Completions servers that reject tool calls
-  without their reasoning, such as a proxy to DeepSeek.
+- DeepSeek provider (`deepseek`): set `DEEPSEEK_API_KEY`; `/usage` shows the account balance. See
+  [docs/providers.md](docs/providers.md#deepseek) for pricing and privacy caveats.
+- Shell-like Tab completion for `/` commands and their arguments, including model ids and config
+  keys and values. Press Tab again to list matches; a dim hint shows the next argument.
+- `/provider <id>`, `/model <id>`, and `/effort <level>` switch directly without a picker.
+  `/model <id>` also works when the provider cannot list models; `/provider <id>` uses its default
+  model, or leaves it unset until you choose one.
+- Preset shorthand: `hax review` means `hax --preset review`; it also works with `-p`.
+- Built-in pickers support Ctrl-J/Ctrl-K to move the selection and Ctrl-W or Alt-Backspace to
+  delete a query word, matching fzf.
+- `reasoning_required` provider setting for Chat Completions proxies that require a reasoning
+  field even when empty; `auto` follows the model catalog.
 
 ### Changed
 
-- `HAX_REASONING_ROUNDTRIP` is renamed `HAX_OPENAI_REASONING_ROUNDTRIP`, like the other variables
-  that configure `openai-compatible`; the old name is no longer read.
-- After a pause or interruption, "enter to continue" now appears as a placeholder in the prompt
-  instead of a separate hint line, and continuing leaves no empty prompt behind.
-- Prompt history (Up, Ctrl-R) is scoped to the working directory like sessions: each directory
-  keeps its own `history` file beside its session files, so a prompt typed in one project no
-  longer comes back in another. The old global `~/.local/state/hax/history` is no longer read and
-  can be deleted.
-- One-shot runs no longer stop after 100 model round-trips: `max_turns` defaults to `0`
-  (unlimited) in both modes, and `auto` is no longer accepted. Set a number to keep a limit;
-  signals and `--json` remain the way to observe and stop a long run.
-- Resuming a session restores its `/session` totals and shows the last user turn's stats line,
-  so a conversation looks the same wherever it is picked up. Totals now cover everything the
-  session spent on, including undone user turns and retried requests.
+- One-shot runs are now unlimited by default, rather than stopping after 100 model round-trips.
+  `max_turns` defaults to `0` in both modes; `auto` is no longer accepted. Set a positive number
+  to keep a limit.
+- Custom providers must now set `catalog_id` explicitly (for example `"catalog_id": "groq"`)
+  to retain models.dev pricing and context metadata. Local servers and proxies without one never
+  trigger a catalog download. See [docs/providers.md](docs/providers.md#custom-providers).
+- `HAX_REASONING_ROUNDTRIP` is renamed `HAX_OPENAI_REASONING_ROUNDTRIP` for consistency with the
+  other `openai-compatible` environment variables; the old name is no longer read.
+- `/session` totals survive resume and include undone user turns and retried requests. The report
+  shows tokens per model, undone turns, and inherited fork context separately from the fork's own
+  usage. Resume also restores the last user turn's stats line.
 - Session files are append-only: `/undo` records the cut instead of truncating the file. Scripts
-  reading session files should see [docs/sessions.md](docs/sessions.md) for the new records.
-- Tool-call headers split a long regex, path, or other long argument to fill the row, instead of
-  leaving it out of a truncated header.
-- Prompt and tool guidance favor native tools for ordinary file operations, and backgrounding when
-  there is useful work to overlap rather than an immediate wait.
-- Custom providers no longer take their models.dev catalog identity from their own name; set
-  `catalog_id` explicitly (for example `"catalog_id": "groq"`) to keep pricing and context
-  metadata. Local servers and proxies without one never contact models.dev. See
-  [docs/providers.md](docs/providers.md#custom-providers).
-- Chat Completions providers now send a model's reasoning back by default, in the same field the
-  server streamed it in, so thinking models on custom and local servers keep their earlier
-  reasoning without configuration. `reasoning_roundtrip` accepts `auto`, `off`, or a field name;
-  `on` now means `auto` rather than always `reasoning_content`.
-- `/model` and `/effort` wait briefly for the model catalog refresh, so pricing and context
-  columns appear even on a cold cache.
-- Model listings and the models.dev catalog download compressed, about a tenth of their former
-  size.
-- The collapsed preview for read-only bash commands now tolerates `echo`, `printf`, `true`, and
-  `false` between exploration commands, such as the `echo ---` separators some models place
-  between searches, and covers read-only git subcommands like `log`, `show`, `diff`, `status`,
-  and `blame`, including behind global options such as `-C`.
+  reading sessions should handle the new records described in [docs/sessions.md](docs/sessions.md).
+- Prompt history (Up, Ctrl-R) is now scoped to the working directory, beside its session files.
+  The old global `~/.local/state/hax/history` is no longer read; prompts from other projects no
+  longer appear in recall.
+- Chat Completions providers replay reasoning by default in the field the server streamed,
+  preserving thinking models' earlier reasoning on custom and local servers, including Ollama.
+  `reasoning_roundtrip` accepts `auto`, `off`, or a field name; `on` now means `auto`, not always
+  `reasoning_content`.
+- `/model` and `/effort` briefly wait for catalog refreshes to show pricing and context metadata
+  on a cold cache. Model listings and catalog downloads now use compression.
+- The "enter to continue" hint appears inside the prompt after a pause or interruption;
+  continuing no longer leaves an empty prompt row.
+- Tool headers wrap long arguments instead of dropping them. Collapsed rows preserve suffixes
+  such as line ranges and identify `task_wait` targets on resume.
+- Collapsed bash previews cover read-only git commands (`log`, `show`, `diff`, `status`, `blame`)
+  and tolerate separators such as `echo ---` between searches.
+- Model guidance favors native tools for ordinary file operations and reserves backgrounding for
+  useful concurrent work rather than an immediate wait.
 
 ### Fixed
 
-- DeepSeek models on OpenCode Go and Zen no longer fail mid-task with `The reasoning_content in
-  the thinking mode must be passed back to the API`. Any model whose catalog entry names a
-  reasoning field now gets that field on every assistant message, empty when there is none.
-- Ollama models now get their own earlier reasoning back in later requests. Thinking models could
-  otherwise degrade over a long session, especially across tool calls.
-- A turn that finishes almost at once, such as one that fails right away, no longer adds half a
-  second while hax waits for the keep-awake helper to stop. A bash command killed just after it
-  started now stops at its SIGTERM instead of running on until the SIGKILL after the grace period.
-- Theme colors are more readable and consistent, including quiet roles in the `light` theme and
-  the `rose` tint in the `dark` theme.
-- `config.json` and `state.json` are now written with a trailing newline, matching `auth.json`
-  and session files.
-- The brief history shown on resume now names the task a `task_wait` call waited on, as the
-  live header does, instead of a bare `[task_wait]` line. Collapsed tool rows that need
-  truncation now keep their suffix, such as a read's line range, like the full header does.
-- Background task completion notes say whether output is pending or there is nothing to
-  collect, and `task_wait` on an already collected task reports its final status instead of
-  `no such task`.
-- Skill descriptions written as YAML block scalars (`>`, `|`) or wrapped across lines are now
-  read in full, instead of being dropped or cut off at the first line.
+- DeepSeek models on OpenCode Go and Zen no longer fail mid-task with missing `reasoning_content`.
+  Models whose catalog entry names a reasoning field now receive it even when empty.
+- Multi-line YAML skill descriptions, including `>` and `|` block scalars, are read in full
+  instead of being dropped or cut off.
+- Background task completion notes distinguish "output pending" from "nothing to collect";
+  `task_wait` on a collected task returns its final status instead of `no such task`.
+- Quitting or switching conversations no longer adds a shutdown delay for each running background
+  task. Fast turns no longer wait half a second for the keep-awake helper, and bash commands
+  cancelled just after launch respond to SIGTERM without waiting for SIGKILL.
+- Credential updates preserve `auth.json` symlinks and no longer lose concurrent changes made
+  through different links to the same file.
+- Theme colors are more legible, especially quiet text in `light` and the `rose` tint in `dark`.
 
 ## [0.5.0] - 2026-09-04
 
