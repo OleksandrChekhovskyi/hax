@@ -175,6 +175,7 @@ endforeach
 # e2e/test_oneshot.py registers as e2e/oneshot, so `meson test 'e2e/*'` selects the group.
 e2e_scenarios = [
     'oneshot',
+    'repl_complete',
     'repl_interrupt',
     'repl_smoke',
 ]
