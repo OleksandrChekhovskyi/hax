@@ -26,6 +26,7 @@ keys in environment variables rather than command arguments or `config.json`.
 | `opencode-zen` | Curated pay-as-you-go models | `OPENCODE_API_KEY`; choose a model. |
 | `opencode-go` | OpenCode's model subscription | `OPENCODE_API_KEY`; choose a model. |
 | `deepseek` | Direct DeepSeek API | `DEEPSEEK_API_KEY`; choose a model. |
+| `mistral` | Direct Mistral API | `MISTRAL_API_KEY`; choose a model. |
 | `llama.cpp` | Local `llama-server` | Start the server; model is normally discovered. |
 | `ollama` | Local Ollama models | Start `ollama serve`; choose a pulled model. |
 | `openai-compatible` | OpenAI Chat Completions-compatible endpoint | Base URL; usually choose a model. |
@@ -171,6 +172,17 @@ hax --provider=deepseek --model=deepseek-flash
 DeepSeek may train on what you send, code included, and stores it in China. Review its
 [privacy policy](https://cdn.deepseek.com/policies/en-US/deepseek-privacy-policy.html) and training
 opt-out before sending proprietary code.
+
+## Mistral
+
+```sh
+export MISTRAL_API_KEY=...
+hax --provider=mistral --model=mistral-large-4
+```
+
+Mistral's unified models stream reasoning as typed thinking chunks inside `content` rather than a
+separate member, and hax replays the trace the same way: the endpoint rejects a reasoning member on
+assistant messages.
 
 ## llama.cpp
 
@@ -340,7 +352,8 @@ documents a need; selecting a provider warns about block members hax does not re
 
 Reasoning replay needs no setup: hax returns a model's reasoning in the field the server streamed it
 in. Set `reasoning_roundtrip` to a field name only for a server that reads reasoning from a
-different field, or to `off` for one that rejects it. Turn `reasoning_required` on for a server
+different field, to `content` for one that takes the trace back inside `content` as typed
+chunks, or to `off` for one that rejects it. Turn `reasoning_required` on for a server
 that rejects tool calls without their reasoning, such as a proxy to DeepSeek without a
 `catalog_id`; it takes effect once the field is known from `catalog_id` or `reasoning_roundtrip`.
 

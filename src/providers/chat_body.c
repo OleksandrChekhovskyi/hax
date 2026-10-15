@@ -67,6 +67,9 @@ static const char *replay_member(struct chat_reasoning_replay replay, const char
         return chat_reasoning_member(recorded);
     case CHAT_REPLAY_FIELD:
         return replay.field;
+    case CHAT_REPLAY_CONTENT:
+        /* The endpoint rejects the member; the trace rides in content. */
+        return NULL;
     }
     return NULL;
 }
@@ -83,6 +86,7 @@ static size_t append_assistant_message(json_t *messages, const struct item *item
     const char *recorded_field = NULL;
     json_t *tool_calls = NULL;
     json_t *details = NULL;
+    int content_parts = replay.mode == CHAT_REPLAY_CONTENT;
 
     while (index < n_items &&
            (items[index].kind == ITEM_ASSISTANT_MESSAGE || items[index].kind == ITEM_TOOL_CALL ||
@@ -103,7 +107,8 @@ static size_t append_assistant_message(json_t *messages, const struct item *item
                 if (!recorded_field)
                     recorded_field = item->reasoning_field;
             }
-            collect_reasoning_details(&details, item->reasoning_json);
+            if (!content_parts)
+                collect_reasoning_details(&details, item->reasoning_json);
             break;
         case ITEM_TOOL_CALL:
             if (!tool_calls)
@@ -120,7 +125,9 @@ static size_t append_assistant_message(json_t *messages, const struct item *item
      * the text only without it, or else stays empty where the endpoint requires it. */
     const char *plain_reasoning =
         reasoning_field && reasoning.len > 0 && !details ? reasoning.data : NULL;
-    if (text.len == 0 && !tool_calls && !plain_reasoning && !details)
+    /* Content mode keeps a reasoning-only message: its trace rides in `content`. */
+    if (text.len == 0 && !tool_calls && !plain_reasoning && !details &&
+        (!content_parts || reasoning.len == 0))
         goto out;
     if (!plain_reasoning && replay.required && reasoning_field)
         plain_reasoning = "";
@@ -128,10 +135,23 @@ static size_t append_assistant_message(json_t *messages, const struct item *item
     json_t *message = json_object();
     json_object_set_new(message, "role", json_string("assistant"));
     /* Content may be null only beside tool calls: ollama rejects a reasoning-only message with
-     * null content. */
-    json_t *content = text.len > 0 ? json_string(text.data)
-                      : tool_calls ? json_null()
-                                   : json_string("");
+     * null content. Only a reasoning-bearing message reads back as a typed chunk list — with
+     * reasoning off the endpoint sends and reads plain strings — so the rest keep the plain
+     * shapes. */
+    json_t *content;
+    if (content_parts && reasoning.len > 0) {
+        content = json_array();
+        json_array_append_new(content,
+                              json_pack("{s:s, s:b, s:[{s:s, s:s}]}", "type", "thinking", "closed",
+                                        1, "thinking", "type", "text", "text", reasoning.data));
+        if (text.len > 0)
+            json_array_append_new(content,
+                                  json_pack("{s:s, s:s}", "type", "text", "text", text.data));
+    } else {
+        content = text.len > 0 ? json_string(text.data)
+                  : tool_calls ? json_null()
+                               : json_string("");
+    }
     json_object_set_new(message, "content", content);
     if (tool_calls)
         json_object_set_new(message, "tool_calls", tool_calls);

@@ -18,6 +18,8 @@ enum chat_replay_mode {
     CHAT_REPLAY_OFF = 0,
     CHAT_REPLAY_RECORDED, /* under the member each item's reasoning streamed in */
     CHAT_REPLAY_FIELD,    /* under `field`, whatever the items recorded */
+    CHAT_REPLAY_CONTENT,  /* reasoning goes back inside `content` as a typed chunk list, never
+                             under a member */
 };
 
 /* How an assistant turn's own reasoning text returns to the model. */

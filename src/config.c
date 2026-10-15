@@ -177,7 +177,7 @@ static const struct config_setting REGISTRY[] = {
      .description = "Reasoning request dialect: flat or nested", .choices = "flat|nested"},
     {.key = "providers.openai-compatible.reasoning_roundtrip",
      .env_var = "HAX_OPENAI_REASONING_ROUNDTRIP", .keep_empty = 1,
-     .description = "Replay reasoning text to the model (auto, off, or a field name)"},
+     .description = "Replay reasoning text to the model (auto, off, content, or a field name)"},
     {.key = "providers.openai-compatible.reasoning_required",
      .env_var = "HAX_OPENAI_REASONING_REQUIRED", .choices = CONFIG_CHOICES_TRISTATE,
      .description = "Send the reasoning field on every assistant message, empty when there is "

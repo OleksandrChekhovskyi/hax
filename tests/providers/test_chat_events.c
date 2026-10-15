@@ -997,6 +997,104 @@ static void test_progress_missing_fields_default_zero(void)
     EVENTS_FIXTURE_FREE(capture, parser);
 }
 
+/* Mistral's unified encoding streams the reasoning phase as content: a list of thinking parts
+ * instead of a string. */
+static void test_unified_content_thinking_part(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"content\":[{\"type\":\"thinking\","
+                              "\"thinking\":[{\"type\":\"text\",\"text\":\"Think\"}]}]}}]}");
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_REASONING_DELTA);
+    EXPECT_STR_EQ(capture.events[0].text, "Think");
+    EXPECT(capture.events[0].field == NULL);
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+/* One transition delta closes the thinking and opens the answer in the same list. The turn seals
+ * its buffered reasoning at the first text delta, so the reasoning is emitted first whatever the
+ * order of the parts in the list — here the text part comes first. */
+static void test_unified_content_transition_emits_thinking_first(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"content\":["
+                              "{\"type\":\"text\",\"text\":\"Answer\"},"
+                              "{\"type\":\"thinking\",\"closed\":true,"
+                              "\"thinking\":[{\"type\":\"text\",\"text\":\"Why\"}]}]}}]}");
+    EXPECT(capture.n_events == 2);
+    EXPECT(capture.events[0].kind == EV_REASONING_DELTA);
+    EXPECT_STR_EQ(capture.events[0].text, "Why");
+    EXPECT(capture.events[0].field == NULL);
+    EXPECT(capture.events[1].kind == EV_TEXT_DELTA);
+    EXPECT_STR_EQ(capture.events[1].text, "Answer");
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+/* The answer phase streams a plain string content again. */
+static void test_unified_content_answer_phase_plain_string(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"content\":[{\"type\":\"thinking\","
+                              "\"thinking\":[{\"type\":\"text\",\"text\":\"hmm\"}]}]}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"content\":["
+                              "{\"type\":\"thinking\",\"closed\":true,"
+                              "\"thinking\":[{\"type\":\"text\",\"text\":\"He\"}]},"
+                              "{\"type\":\"text\",\"text\":\"llo\"}]}}]}");
+    feed_content(&parser, " world");
+    EXPECT(capture.n_events == 4);
+    EXPECT(capture.events[0].kind == EV_REASONING_DELTA);
+    EXPECT_STR_EQ(capture.events[0].text, "hmm");
+    EXPECT(capture.events[1].kind == EV_REASONING_DELTA);
+    EXPECT_STR_EQ(capture.events[1].text, "He");
+    EXPECT(capture.events[2].kind == EV_TEXT_DELTA);
+    EXPECT_STR_EQ(capture.events[2].text, "llo");
+    EXPECT(capture.events[3].kind == EV_TEXT_DELTA);
+    EXPECT_STR_EQ(capture.events[3].text, " world");
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+/* A list carrying any unrecognized part type is not this encoding and is dropped whole, so no
+ * other provider's payload is misread. */
+static void test_unified_content_unknown_part_dropped(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    chat_events_feed(&parser,
+                     "{\"choices\":[{\"delta\":{\"content\":["
+                     "{\"type\":\"text\",\"text\":\"seen\"},"
+                     "{\"type\":\"image_url\",\"image_url\":{\"url\":\"https://x/y.png\"}}]}}]}");
+    EXPECT(capture.n_events == 0);
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+/* Payload members tolerate the shapes the deployed normalization accepts: a bare string and a
+ * nested list of text parts. */
+static void test_unified_content_payload_shapes(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"content\":[{\"type\":\"thinking\","
+                              "\"thinking\":\"bare string\"}]}}]}");
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"content\":[{\"type\":\"text\",\"text\":["
+                              "{\"type\":\"text\",\"text\":\"ne\"},"
+                              "{\"type\":\"text\",\"text\":\"sted\"}]}]}}]}");
+    EXPECT(capture.n_events == 2);
+    EXPECT(capture.events[0].kind == EV_REASONING_DELTA);
+    EXPECT_STR_EQ(capture.events[0].text, "bare string");
+    EXPECT(capture.events[1].kind == EV_TEXT_DELTA);
+    EXPECT_STR_EQ(capture.events[1].text, "nested");
+    /* Several thinking parts fold to one reasoning event in list order, ahead of the text —
+     * wherever the text part sits in the list. */
+    chat_events_feed(&parser, "{\"choices\":[{\"delta\":{\"content\":["
+                              "{\"type\":\"thinking\",\"thinking\":\"a\"},"
+                              "{\"type\":\"text\",\"text\":\"x\"},"
+                              "{\"type\":\"thinking\",\"thinking\":\"b\"}]}}]}");
+    EXPECT(capture.n_events == 4);
+    EXPECT(capture.events[2].kind == EV_REASONING_DELTA);
+    EXPECT_STR_EQ(capture.events[2].text, "ab");
+    EXPECT(capture.events[3].kind == EV_TEXT_DELTA);
+    EXPECT_STR_EQ(capture.events[3].text, "x");
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
 int main(void)
 {
     test_text_delta();
@@ -1057,5 +1155,10 @@ int main(void)
     test_usage_cache_write_1h_needs_a_write();
     test_progress_emitted();
     test_progress_missing_fields_default_zero();
+    test_unified_content_thinking_part();
+    test_unified_content_transition_emits_thinking_first();
+    test_unified_content_answer_phase_plain_string();
+    test_unified_content_unknown_part_dropped();
+    test_unified_content_payload_shapes();
     T_REPORT();
 }
