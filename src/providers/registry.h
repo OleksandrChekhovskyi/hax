@@ -48,7 +48,9 @@ struct provider_def {
     int request_cost;             /* chat: request provider-reported per-response cost */
     const char *reasoning_format; /* "flat"/"nested"; NULL → flat */
     /* Chat message member that carries prior reasoning back, whichever member it streamed in;
-     * NULL reuses the streamed one. providers.<id>.reasoning_roundtrip overrides either way. */
+     * NULL reuses the streamed one. The special value "content" returns the trace inside
+     * `content` as a typed chunk list instead, for endpoints that reject the member.
+     * providers.<id>.reasoning_roundtrip overrides either way. */
     const char *reasoning_roundtrip;
     /* The endpoint rejects a thinking-mode tool loop whose assistant messages lack the replay
      * member, so each carries it, empty when there is no reasoning to replay. Needs a named

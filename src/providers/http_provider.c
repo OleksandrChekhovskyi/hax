@@ -324,7 +324,9 @@ static const struct wire *resolve_model_wire(struct http_provider *provider, con
 }
 
 /* Precedence: a pinned setting, the catalog's per-model hint, the def default, then each item's
- * recorded member. The field is borrowed from static storage or the provider.
+ * recorded member. The field is borrowed from static storage or the provider. Content replay is
+ * a wire constraint — the endpoint rejects a bare reasoning member — so no hint is consulted
+ * against it: a hint may only name the member replay uses.
  *
  * Unless configured otherwise, a hint naming the member also makes it required. Such a model's
  * chat template renders an empty member exactly like a missing one, so the empty member costs
@@ -335,7 +337,7 @@ resolve_model_reasoning_replay(const struct http_provider *provider, const char 
     struct chat_reasoning_replay replay = provider->reasoning_replay;
     struct catalog_entry entry;
     catalog_lookup(provider_stable_id(&provider->base), provider->catalog_id, model, &entry);
-    if (!provider->reasoning_replay_pinned) {
+    if (!provider->reasoning_replay_pinned && replay.mode != CHAT_REPLAY_CONTENT) {
         /* A per-model hint against replay cannot waive what the endpoint requires. */
         if (entry.interleaved_field)
             replay = (struct chat_reasoning_replay){.mode = CHAT_REPLAY_FIELD,
@@ -524,7 +526,8 @@ static enum chat_cache_mode resolve_cache_mode(const char *prefix, const char *d
 }
 
 /* An explicit setting pins the replay, so even "off" survives a catalog hint. "auto" and "on"
- * (the default always replays) ask for default resolution; anything else names a member. */
+ * (the default always replays) ask for default resolution; "content" returns the trace inside
+ * content as a typed chunk list; anything else names a member. */
 static void resolve_configured_reasoning_replay(struct http_provider *provider, const char *prefix,
                                                 const char *def_default)
 {
@@ -540,6 +543,10 @@ static void resolve_configured_reasoning_replay(struct http_provider *provider, 
         return;
     }
     const char *field = configured ? configured : def_default;
+    if (field && strcmp(field, "content") == 0) {
+        provider->reasoning_replay = (struct chat_reasoning_replay){.mode = CHAT_REPLAY_CONTENT};
+        return;
+    }
     if (!field) {
         provider->reasoning_replay = (struct chat_reasoning_replay){.mode = CHAT_REPLAY_RECORDED};
         return;

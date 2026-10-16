@@ -760,7 +760,7 @@ static void test_interleaved_reasoning_replay(void)
     catalog_shutdown(); /* drop lookups memoized against an earlier fixture */
     struct loopback server = {
         .response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
-        .n_requests = 9,
+        .n_requests = 11,
     };
     int port = loopback_start(&server);
     EXPECT(port > 0);
@@ -828,8 +828,29 @@ static void test_interleaved_reasoning_replay(void)
         provider->destroy(provider);
     }
 
+    /* A configured "content" beats the def default set above: the trace rides in content as a
+     * typed chunk list. */
+    EXPECT(config_load("{\"providers\": {\"zen\": {\"reasoning_roundtrip\": \"content\"}}}") == 0);
+    provider = http_provider_new(&def);
+    EXPECT(provider != NULL);
+    if (provider) {
+        stream_one_reasoned_turn(provider, "plain", &log);
+        provider->destroy(provider);
+    }
+
+    /* A def-default "content" replay stays content even where the catalog names a member: the
+     * encoding is a wire constraint, not a preference a hint may override. */
+    EXPECT(config_load(NULL) == 0);
+    def.reasoning_roundtrip = "content";
+    provider = http_provider_new(&def);
+    EXPECT(provider != NULL);
+    if (provider) {
+        stream_one_reasoned_turn(provider, "think-hint", &log);
+        provider->destroy(provider);
+    }
+
     loopback_stop(&server);
-    EXPECT(atomic_load(&server.served) == 9);
+    EXPECT(atomic_load(&server.served) == 11);
 
     EXPECT(strstr(server.requests[0], "\"reasoning_content\":\"thought\"") != NULL);
     EXPECT(strstr(server.requests[1], "\"reasoning\":\"thought\"") != NULL);
@@ -842,6 +863,17 @@ static void test_interleaved_reasoning_replay(void)
     EXPECT(strstr(server.requests[6], "\"reasoning\":\"thought\"") != NULL);
     EXPECT(strstr(server.requests[7], "thought") == NULL);
     EXPECT(strstr(server.requests[8], "\"reasoning_content\":\"thought\"") != NULL);
+    /* "content" replay: the trace returns inside content as a typed chunk list — thinking
+     * first, then the answer — and no reasoning member or details member goes out. */
+    EXPECT(strstr(server.requests[9], "\"content\":[{\"type\":\"thinking\",\"closed\":true,"
+                                      "\"thinking\":[{\"type\":\"text\",\"text\":\"thought\"}]},"
+                                      "{\"type\":\"text\",\"text\":\"hi\"}]") != NULL);
+    EXPECT(strstr(server.requests[9], "reasoning_content") == NULL);
+    EXPECT(strstr(server.requests[9], "reasoning_details") == NULL);
+    EXPECT(strstr(server.requests[10], "\"content\":[{\"type\":\"thinking\",\"closed\":true,"
+                                       "\"thinking\":[{\"type\":\"text\",\"text\":\"thought\"}]},"
+                                       "{\"type\":\"text\",\"text\":\"hi\"}]") != NULL);
+    EXPECT(strstr(server.requests[10], "reasoning_content") == NULL);
 
     EXPECT(config_load(NULL) == 0);
 }

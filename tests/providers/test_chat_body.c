@@ -10,6 +10,7 @@
 
 static const struct chat_reasoning_replay REPLAY_OFF = {.mode = CHAT_REPLAY_OFF};
 static const struct chat_reasoning_replay REPLAY_RECORDED = {.mode = CHAT_REPLAY_RECORDED};
+static const struct chat_reasoning_replay REPLAY_CONTENT = {.mode = CHAT_REPLAY_CONTENT};
 
 static struct chat_reasoning_replay replay_field(const char *field)
 {
@@ -140,6 +141,126 @@ static void test_reasoning_recorded_member_unknown(void)
     a = find_role(msgs, "assistant");
     EXPECT(a != NULL);
     EXPECT(json_object_size(a) == 2);
+    json_decref(msgs);
+}
+
+/* Content replay: Mistral-style endpoints take the reasoning trace back inside `content` as a
+ * typed chunk list — thinking first, then the answer — and reject a bare reasoning member or
+ * reasoning_details outright. */
+static void test_reasoning_replays_inside_content(void)
+{
+    struct item items[] = {
+        {.kind = ITEM_REASONING,
+         .reasoning_text = "why not",
+         .reasoning_json = "[{\"type\":\"reasoning.text\",\"text\":\"why not\"}]",
+         .provider = "mistral",
+         .model = "m1"},
+        {.kind = ITEM_ASSISTANT_MESSAGE, .text = "Because."},
+    };
+    json_t *msgs = chat_build_messages(NULL, items, 2, REPLAY_CONTENT, "mistral", "m1", -1);
+
+    EXPECT(json_array_size(msgs) == 1);
+    json_t *a = find_role(msgs, "assistant");
+    EXPECT(a != NULL);
+    json_t *content = json_object_get(a, "content");
+    EXPECT(json_is_array(content));
+    EXPECT(json_array_size(content) == 2);
+    if (json_is_array(content) && json_array_size(content) == 2) {
+        json_t *thinking = json_array_get(content, 0);
+        EXPECT_STR_EQ(json_string_value(json_object_get(thinking, "type")), "thinking");
+        EXPECT(json_is_true(json_object_get(thinking, "closed")));
+        json_t *chunks = json_object_get(thinking, "thinking");
+        EXPECT(json_array_size(chunks) == 1);
+        json_t *chunk = json_array_get(chunks, 0);
+        EXPECT_STR_EQ(json_string_value(json_object_get(chunk, "type")), "text");
+        EXPECT_STR_EQ(json_string_value(json_object_get(chunk, "text")), "why not");
+        json_t *text = json_array_get(content, 1);
+        EXPECT_STR_EQ(json_string_value(json_object_get(text, "type")), "text");
+        EXPECT_STR_EQ(json_string_value(json_object_get(text, "text")), "Because.");
+    }
+    EXPECT(json_object_get(a, "reasoning_details") == NULL);
+    EXPECT(json_object_get(a, "reasoning") == NULL);
+    EXPECT(json_object_get(a, "reasoning_content") == NULL);
+
+    json_decref(msgs);
+}
+
+/* Beside a tool call with no answer text, the typed trace is the message's whole content —
+ * reasoning_details stay off the message. */
+static void test_content_replay_tool_call_without_text(void)
+{
+    struct item items[] = {
+        {.kind = ITEM_REASONING, .reasoning_text = "read it", .provider = "mistral", .model = "m1"},
+        {.kind = ITEM_TOOL_CALL,
+         .call_id = "c1",
+         .tool_name = "read",
+         .tool_arguments_json = "{\"path\":\"x\"}"},
+    };
+    json_t *msgs = chat_build_messages(NULL, items, 2, REPLAY_CONTENT, "mistral", "m1", -1);
+
+    json_t *a = find_role(msgs, "assistant");
+    EXPECT(a != NULL);
+    json_t *content = json_object_get(a, "content");
+    EXPECT(json_is_array(content));
+    EXPECT(json_array_size(content) == 1);
+    json_t *thinking = json_is_array(content) ? json_array_get(content, 0) : NULL;
+    EXPECT_STR_EQ(json_string_value(json_object_get(thinking, "type")), "thinking");
+    json_t *chunks = json_object_get(thinking, "thinking");
+    EXPECT(json_array_size(chunks) == 1);
+    EXPECT_STR_EQ(json_string_value(json_object_get(json_array_get(chunks, 0), "text")), "read it");
+    EXPECT(json_array_size(json_object_get(a, "tool_calls")) == 1);
+    EXPECT(json_object_get(a, "reasoning_details") == NULL);
+
+    json_decref(msgs);
+}
+
+/* A reasoning-only turn is kept in content mode: its trace is the message's whole content. */
+static void test_content_replay_keeps_reasoning_only_turn(void)
+{
+    struct item items[] = {
+        {.kind = ITEM_REASONING, .reasoning_text = "only", .provider = "mistral", .model = "m1"},
+    };
+    json_t *msgs = chat_build_messages(NULL, items, 1, REPLAY_CONTENT, "mistral", "m1", -1);
+
+    EXPECT(json_array_size(msgs) == 1);
+    json_t *a = find_role(msgs, "assistant");
+    EXPECT(a != NULL);
+    json_t *content = json_object_get(a, "content");
+    EXPECT(json_is_array(content));
+    EXPECT(json_array_size(content) == 1);
+    json_t *thinking = json_is_array(content) ? json_array_get(content, 0) : NULL;
+    EXPECT_STR_EQ(json_string_value(json_object_get(thinking, "type")), "thinking");
+
+    json_decref(msgs);
+}
+
+/* Without reasoning to replay, a content-mode message keeps the plain shapes: the endpoint's
+ * reasoning-off replies are plain strings, and null stays beside tool calls. */
+static void test_content_replay_without_reasoning_keeps_plain_content(void)
+{
+    struct item items[] = {
+        {.kind = ITEM_ASSISTANT_MESSAGE, .text = "Plain."},
+    };
+    json_t *msgs = chat_build_messages(NULL, items, 1, REPLAY_CONTENT, "mistral", "m1", -1);
+
+    json_t *a = find_role(msgs, "assistant");
+    EXPECT(a != NULL);
+    json_t *content = json_object_get(a, "content");
+    EXPECT(json_is_string(content));
+    EXPECT_STR_EQ(json_string_value(content), "Plain.");
+    json_decref(msgs);
+
+    struct item tool_items[] = {
+        {.kind = ITEM_TOOL_CALL,
+         .call_id = "c1",
+         .tool_name = "read",
+         .tool_arguments_json = "{\"path\":\"x\"}"},
+    };
+    msgs = chat_build_messages(NULL, tool_items, 1, REPLAY_CONTENT, "mistral", "m1", -1);
+    a = find_role(msgs, "assistant");
+    EXPECT(a != NULL);
+    EXPECT(json_is_null(json_object_get(a, "content")));
+    EXPECT(json_array_size(json_object_get(a, "tool_calls")) == 1);
     json_decref(msgs);
 }
 
@@ -718,6 +839,10 @@ int main(void)
     test_reasoning_custom_field_name();
     test_reasoning_replays_recorded_member();
     test_reasoning_recorded_member_unknown();
+    test_reasoning_replays_inside_content();
+    test_content_replay_tool_call_without_text();
+    test_content_replay_keeps_reasoning_only_turn();
+    test_content_replay_without_reasoning_keeps_plain_content();
     test_codex_reasoning_json_ignored();
     test_reasoning_details_round_trip();
     test_reasoning_details_supersede_text();

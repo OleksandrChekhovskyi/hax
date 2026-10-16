@@ -128,6 +128,17 @@ static const struct provider_def DEFS[] = {
         .parse_model = deepseek_parse_model,
         .query_usage = deepseek_query_usage,
     },
+    {
+        .id = "mistral",
+        .base_url = "https://api.mistral.ai/v1",
+        .pinned = 1,
+        .api_key_env = "MISTRAL_API_KEY",
+        .catalog_id = "mistral",
+        /* An assistant message's content is a typed chunk list: reasoning arrives as thinking
+         * chunks and must return inside content, since the endpoint rejects a bare reasoning
+         * member. */
+        .reasoning_roundtrip = "content",
+    },
     /* Local servers. */
     {
         /* Dot-free so the id names its providers.llamacpp config block ('.' is the config key

@@ -7,6 +7,12 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
+### Added
+
+- Mistral provider (`mistral`): set `MISTRAL_API_KEY`. Its unified models stream reasoning as typed
+  thinking chunks inside `content`, and assistant turns replay the trace there too, since the
+  endpoint rejects a separate reasoning member.
+
 ## [0.6.1] - 2026-10-15
 
 ### Added

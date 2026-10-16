@@ -59,6 +59,24 @@ static void test_gateway_defs_registered(void)
     provider_availability_clear(&availability);
 }
 
+/* The shipped mistral def is user-facing, carries its models.dev identity, and names the key
+ * variable the picker shows when it is unset. */
+static void test_mistral_def_registered(void)
+{
+    const struct provider_def *def = provider_find("mistral");
+    EXPECT(def != NULL);
+    EXPECT(idx_of("mistral") >= 0);
+    EXPECT_STR_EQ(provider_catalog_id(def), "mistral");
+    EXPECT_STR_EQ(def->reasoning_roundtrip, "content");
+
+    unsetenv("MISTRAL_API_KEY");
+    struct provider_availability availability = {0};
+    provider_prepare_availability(def, &availability);
+    EXPECT(!availability.available);
+    EXPECT_STR_EQ(availability.reason, "MISTRAL_API_KEY not set");
+    provider_availability_clear(&availability);
+}
+
 /* Def JSON literals are C-escaped by hand; a malformed one is dropped with only a runtime warning,
  * silently losing headers or body members an endpoint may require. */
 static void test_def_json_literals_parse(void)
@@ -264,6 +282,7 @@ int main(void)
     test_default_is_highest_priority();
     test_internal_providers_hidden();
     test_gateway_defs_registered();
+    test_mistral_def_registered();
     test_def_json_literals_parse();
     test_autoselect_order();
     test_former_id_canonicalized();

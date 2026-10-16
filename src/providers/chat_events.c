@@ -178,6 +178,110 @@ static void handle_reasoning_delta(struct chat_events *parser, json_t *delta)
     emit_event(parser, &event);
 }
 
+/* Mistral's unified models stream assistant content as a JSON list of typed parts instead of a
+ * string: thinking parts carry the reasoning while it streams, text parts the answer. A part's
+ * payload member is a string or a nested list of the same parts. */
+static const char *const UNIFIED_TEXT_TYPES[] = {"text", "text_delta", "output_text"};
+#define N_UNIFIED_TEXT_TYPES (sizeof(UNIFIED_TEXT_TYPES) / sizeof(UNIFIED_TEXT_TYPES[0]))
+
+static int unified_type_is_text(const char *type)
+{
+    for (size_t i = 0; i < N_UNIFIED_TEXT_TYPES; i++)
+        if (strcmp(type, UNIFIED_TEXT_TYPES[i]) == 0)
+            return 1;
+    return 0;
+}
+
+/* A list is this unified shape only when every part is one we read; anything else is another
+ * provider's payload and stays ignored whole. */
+static int is_unified_content(json_t *parts)
+{
+    if (!json_is_array(parts) || json_array_size(parts) == 0)
+        return 0;
+
+    size_t index;
+    json_t *part;
+    json_array_foreach(parts, index, part)
+    {
+        const char *type = json_string_value(json_object_get(part, "type"));
+        if (!json_is_object(part) || !type ||
+            (strcmp(type, "thinking") != 0 && !unified_type_is_text(type)))
+            return 0;
+    }
+    return 1;
+}
+
+static void append_unified_text(struct buf *out, json_t *part)
+{
+    if (json_is_string(part)) {
+        buf_append_str(out, json_string_value(part));
+        return;
+    }
+    if (!json_is_object(part))
+        return;
+    json_t *value = json_object_get(part, "text");
+    if (json_is_string(value)) {
+        buf_append_str(out, json_string_value(value));
+        return;
+    }
+    if (!json_is_array(value))
+        return;
+    size_t index;
+    json_t *sub;
+    json_array_foreach(value, index, sub) append_unified_text(out, sub);
+}
+
+static void append_unified_thinking(struct buf *out, json_t *part)
+{
+    json_t *chunks = json_object_get(part, "thinking");
+    if (json_is_string(chunks)) {
+        buf_append_str(out, json_string_value(chunks));
+        return;
+    }
+    if (!json_is_array(chunks))
+        return;
+    size_t index;
+    json_t *sub;
+    json_array_foreach(chunks, index, sub) append_unified_text(out, sub);
+}
+
+/* The list folds into the events a plain string produces. Every part is pre-validated by
+ * is_unified_content(), which the caller consulted, so the type reads below cannot fail. Every
+ * thinking part is emitted before any text part regardless of their order in the list: the turn
+ * seals its buffered reasoning at the first text delta, so a text part streamed first would cut
+ * the trace short. */
+static void handle_unified_content(struct chat_events *parser, json_t *parts)
+{
+    struct buf thinking;
+    struct buf text;
+    buf_init(&thinking);
+    buf_init(&text);
+
+    size_t index;
+    json_t *part;
+    json_array_foreach(parts, index, part)
+    {
+        if (strcmp(json_string_value(json_object_get(part, "type")), "thinking") == 0)
+            append_unified_thinking(&thinking, part);
+        else
+            append_unified_text(&text, part);
+    }
+
+    if (thinking.len > 0) {
+        /* No member recorded it, so the trace cannot replay under a bare reasoning member. */
+        struct stream_event event = {
+            .kind = EV_REASONING_DELTA,
+            .u.reasoning_delta = {.text = thinking.data, .field = NULL},
+        };
+        emit_event(parser, &event);
+    }
+    if (text.len > 0)
+        handle_text_delta(parser, text.data);
+
+    buf_free(&thinking);
+    buf_free(&text);
+}
+
 static int is_reasoning_text(const json_t *detail)
 {
     const char *type = json_string_value(json_object_get(detail, "type"));
@@ -483,12 +587,17 @@ static void handle_choice_delta(struct chat_events *parser, json_t *choice)
         collect_reasoning_details(parser, delta);
         handle_reasoning_delta(parser, delta);
 
-        const char *content = json_string_value(json_object_get(delta, "content"));
+        json_t *content = json_object_get(delta, "content");
+        const char *text = json_string_value(content);
+        int unified = is_unified_content(content);
         json_t *tool_calls = json_object_get(delta, "tool_calls");
-        if ((content && *content) || json_is_array(tool_calls))
+        if ((text && *text) || unified || json_is_array(tool_calls))
             flush_reasoning_details(parser);
 
-        handle_text_delta(parser, content);
+        if (unified)
+            handle_unified_content(parser, content);
+        else
+            handle_text_delta(parser, text);
 
         if (json_is_array(tool_calls)) {
             size_t n_tool_calls = json_array_size(tool_calls);
