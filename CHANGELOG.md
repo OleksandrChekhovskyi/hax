@@ -29,6 +29,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   from the Google Cloud Monitoring API.
 - `/usage` for the `vertex-ai` provider also totals the tokens and the spend recorded in this
   project's sessions, beside the quota consumption of the project.
+- The `vertex-ai` `/usage` report estimates the token total from the spend so far when no token cap
+  is set.
 
 ## [0.6.1] - 2026-10-15
 

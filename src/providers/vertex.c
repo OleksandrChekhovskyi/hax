@@ -1,30 +1,32 @@
 /* SPDX-License-Identifier: MIT */
 #include "providers/vertex.h"
 
-#include <curl/curl.h>
 #include <jansson.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include <curl/curl.h>
+#include <curl/easy.h>
+#include <curl/typecheck-gcc.h>
+#include <sys/stat.h>
 
+#include "busy.h"
 #include "config.h"
-#include "providers/http_provider.h"
-#include "providers/registry.h"
 #include "diag.h"
 #include "provider.h"
 #include "session.h"
-#include "provider_config.h"
 #include "xalloc.h"
-#include "text/url.h"
-#include "busy.h"
+#include "providers/http_provider.h"
+#include "providers/provider_config.h"
+#include "providers/registry.h"
+#include "providers/usage_render.h"
 #include "render/progress.h"
 #include "terminal/ansi.h"
 #include "terminal/ui.h"
+#include "text/url.h"
 #include "transport/http.h"
-#include "providers/usage_render.h"
 
 struct vertex_auth_state {
     int static_token;
@@ -187,8 +189,9 @@ static int vertex_refresh_authorized_user(struct vertex_auth_state *state)
     if (!state->client_id || !state->client_secret || !state->refresh_token)
         return -1;
 
-    char *fields = xasprintf("client_id=%s&client_secret=%s&refresh_token=%s&grant_type=refresh_token",
-                             state->client_id, state->client_secret, state->refresh_token);
+    char *fields =
+        xasprintf("client_id=%s&client_secret=%s&refresh_token=%s&grant_type=refresh_token",
+                  state->client_id, state->client_secret, state->refresh_token);
 
     CURL *curl = curl_easy_init();
     if (!curl) {
@@ -310,7 +313,8 @@ static int vertex_auth_recover(void *auth, int *retried, http_tick_cb tick, void
 static char *vertex_auth_unauthorized_message(void *auth)
 {
     (void)auth;
-    return xstrdup("Vertex AI authentication failed (set HAX_VERTEX_API_KEY or configure gcloud ADC)");
+    return xstrdup(
+        "Vertex AI authentication failed (set HAX_VERTEX_API_KEY or configure gcloud ADC)");
 }
 
 static void vertex_auth_destroy(void *auth)
@@ -337,7 +341,8 @@ int vertex_auth_source(const struct provider_def *def, struct http_auth_source *
     struct vertex_auth_state *state = xcalloc(1, sizeof(*state));
 
     char *prefix = xasprintf("providers.%s", def->id);
-    const char *api_key_env = def->pinned ? def->api_key_env : config_scoped_str(prefix, "api_key_env");
+    const char *api_key_env =
+        def->pinned ? def->api_key_env : config_scoped_str(prefix, "api_key_env");
     if (!def->pinned && (!api_key_env || !*api_key_env))
         api_key_env = def->api_key_env;
     const char *api_key = provider_api_key(prefix, api_key_env);
@@ -365,7 +370,9 @@ struct provider *vertex_provider_new(const struct provider_def *def)
 {
     char *base_url = vertex_base_url();
     if (!base_url) {
-        hax_err("provider '%s': VERTEXAI_PROJECT not set (set HAX_VERTEX_PROJECT or VERTEXAI_PROJECT)", def->id);
+        hax_err(
+            "provider '%s': VERTEXAI_PROJECT not set (set HAX_VERTEX_PROJECT or VERTEXAI_PROJECT)",
+            def->id);
         return NULL;
     }
 
@@ -384,6 +391,7 @@ struct provider *vertex_provider_new(const struct provider_def *def)
 
 void vertex_prepare_availability(const struct provider_def *def, struct provider_availability *out)
 {
+    (void)def;
     memset(out, 0, sizeof(*out));
     char *base_url = vertex_base_url();
     if (!base_url) {
@@ -400,7 +408,8 @@ void vertex_prepare_availability(const struct provider_def *def, struct provider
     }
     /* Check ADC or gcloud. */
     const char *home = getenv("HOME");
-    char *adc_path = home ? xasprintf("%s/.config/gcloud/application_default_credentials.json", home) : NULL;
+    char *adc_path =
+        home ? xasprintf("%s/.config/gcloud/application_default_credentials.json", home) : NULL;
     struct stat st;
     int has_adc = adc_path && stat(adc_path, &st) == 0;
     free(adc_path);
@@ -419,7 +428,8 @@ void vertex_prepare_availability(const struct provider_def *def, struct provider
         out->available = 1;
     } else {
         out->available = 0;
-        out->reason = xstrdup("no Vertex AI credentials (set HAX_VERTEX_API_KEY or configure gcloud ADC)");
+        out->reason =
+            xstrdup("no Vertex AI credentials (set HAX_VERTEX_API_KEY or configure gcloud ADC)");
     }
 }
 
@@ -810,6 +820,14 @@ int vertex_query_usage(struct provider *provider)
         progress_bar_print(pct / 100.0, 20);
         printf(" " ANSI_DIM "%3d%% used | %ld / %ld tokens" ANSI_RESET "\n", (int)(pct + 0.5),
                total_tokens, quota_tokens);
+    } else if (quota_cost > 0 && total_tokens > 0 && local.spend > 0) {
+        double avg = local.spend / (double)total_tokens;
+        long inferred = (long)(quota_cost / avg);
+        double pct = inferred > 0 ? (double)total_tokens * 100.0 / (double)inferred : 0.0;
+        printf("  ");
+        progress_bar_print(pct / 100.0, 20);
+        printf(" " ANSI_DIM "%3d%% used | %ld / ~%ld tokens (est.)" ANSI_RESET "\n",
+               (int)(pct + 0.5), total_tokens, inferred);
     } else
         printf("  " ANSI_DIM "%-*s%ld tokens" ANSI_RESET "\n", USAGE_LABEL_WIDTH, "tokens",
                total_tokens);

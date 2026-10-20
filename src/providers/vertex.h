@@ -12,8 +12,7 @@ struct provider_def;
 struct provider *vertex_provider_new(const struct provider_def *def);
 
 /* Availability check (project + credentials). */
-void vertex_prepare_availability(const struct provider_def *def,
-                                struct provider_availability *out);
+void vertex_prepare_availability(const struct provider_def *def, struct provider_availability *out);
 
 /* Auth source for Vertex AI (static token or application default credentials). */
 int vertex_auth_source(const struct provider_def *def, struct http_auth_source *out);
@@ -24,4 +23,4 @@ char *vertex_rewrite_model(const char *model);
 /* /usage backend: Cloud Monitoring quota usage for the project. */
 int vertex_query_usage(struct provider *provider);
 
-#endif
+#endif /* HAX_PROVIDERS_VERTEX_H */
