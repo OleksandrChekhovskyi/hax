@@ -27,6 +27,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   runs, so the elapsed time and the current state, such as a requested pause, are always in view.
 - `/usage` is now supported by the `vertex-ai` provider, reporting project quota consumption
   from the Google Cloud Monitoring API.
+- `/usage` for the `vertex-ai` provider also totals the tokens and the spend recorded in this
+  project's sessions, beside the quota consumption of the project.
 
 ## [0.6.1] - 2026-10-15
 

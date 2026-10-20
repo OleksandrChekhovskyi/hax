@@ -1438,3 +1438,71 @@ void session_list_free(struct session_entry *entries, size_t count)
     }
     free(entries);
 }
+
+void session_aggregate_usage(const char *provider, struct session_local_totals *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (!provider || !*provider)
+        return;
+
+    char *cwd = getcwd(NULL, 0);
+    char *dir = session_directory(cwd ? cwd : ".");
+    free(cwd);
+
+    DIR *d = opendir(dir);
+    if (!d) {
+        free(dir);
+        return;
+    }
+
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (!session_id_from_path(ent->d_name))
+            continue;
+        char *path = xasprintf("%s/%s", dir, ent->d_name);
+        FILE *fp = fopen(path, "r");
+        free(path);
+        if (!fp)
+            continue;
+
+        char *line = NULL;
+        size_t cap = 0;
+        ssize_t nread;
+        while ((nread = getline(&line, &cap, fp)) != -1) {
+            (void)nread;
+            json_error_t error;
+            json_t *object = json_loads(line, 0, &error);
+            if (!object)
+                continue;
+            const char *kind = json_string_value(json_object_get(object, "kind"));
+            if (kind && strcmp(kind, "turn_usage") == 0) {
+                const char *item_provider = json_string_value(json_object_get(object, "provider"));
+                if (item_provider && strcmp(item_provider, provider) == 0) {
+                    json_t *usage = json_object_get(object, "usage");
+                    if (json_is_object(usage)) {
+                        long input = json_get_integer_or_negative(usage, "input");
+                        long output = json_get_integer_or_negative(usage, "output");
+                        if (input < 0)
+                            input = 0;
+                        if (output < 0)
+                            output = 0;
+                        out->input_tokens += input;
+                        out->output_tokens += output;
+                        out->requests++;
+
+                        double cost = json_get_real_or_negative(usage, "cost_total");
+                        if (cost < 0)
+                            cost = json_get_real_or_negative(usage, "cost");
+                        if (cost >= 0)
+                            out->spend += cost;
+                    }
+                }
+            }
+            json_decref(object);
+        }
+        free(line);
+        fclose(fp);
+    }
+    closedir(d);
+    free(dir);
+}

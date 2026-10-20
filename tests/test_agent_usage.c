@@ -119,7 +119,7 @@ static void test_turn_usage_with_reported_cost(void)
     EXPECT(turn_usage->cost_cache_read == 200 * 2.0 / 1e6);
     EXPECT(turn_usage->cost_output == 50 * 8.0 / 1e6);
     EXPECT(turn_usage->elapsed_ms == 1500);
-    free(turn_usage);
+    turn_usage_free(turn_usage);
 }
 
 static void test_turn_usage_with_duration_only(void)
@@ -134,7 +134,7 @@ static void test_turn_usage_with_duration_only(void)
         EXPECT(turn_usage->cost_total < 0);
         EXPECT(!turn_usage->cost_estimated);
         EXPECT(turn_usage->cost_input < 0 && turn_usage->cost_output < 0);
-        free(turn_usage);
+        turn_usage_free(turn_usage);
     }
     EXPECT(agent_turn_usage_new(&empty, -1, &CATALOG_PROVIDER, "m") == NULL);
 }
@@ -150,7 +150,7 @@ static void test_turn_usage_with_cost_but_no_tokens(void)
     EXPECT(turn_usage->cost_total == 0.02);
     EXPECT(!turn_usage->cost_estimated);
     EXPECT(turn_usage->cost_input < 0 && turn_usage->cost_output < 0);
-    free(turn_usage);
+    turn_usage_free(turn_usage);
 }
 
 static void test_turn_usage_with_estimated_cost(void)
@@ -167,7 +167,7 @@ static void test_turn_usage_with_estimated_cost(void)
     EXPECT(turn_usage->cost_cache_read == 1.0);
     EXPECT(turn_usage->cost_cache_write == 0);
     EXPECT(turn_usage->cost_output == 8.0);
-    free(turn_usage);
+    turn_usage_free(turn_usage);
 }
 
 static void test_turn_usage_without_rates(void)
@@ -181,7 +181,7 @@ static void test_turn_usage_without_rates(void)
     EXPECT(turn_usage->cost_total < 0);
     EXPECT(!turn_usage->cost_estimated);
     EXPECT(turn_usage->usage.input_tokens == 1000000);
-    free(turn_usage);
+    turn_usage_free(turn_usage);
 }
 
 static void test_usage_add_keeps_unreported_sentinels(void)

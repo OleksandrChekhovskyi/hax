@@ -15,10 +15,12 @@
 #include "providers/registry.h"
 #include "diag.h"
 #include "provider.h"
+#include "session.h"
 #include "provider_config.h"
 #include "xalloc.h"
 #include "text/url.h"
 #include "busy.h"
+#include "render/progress.h"
 #include "terminal/ansi.h"
 #include "terminal/ui.h"
 #include "transport/http.h"
@@ -789,5 +791,36 @@ int vertex_query_usage(struct provider *provider)
     free(project);
     for (size_t i = 0; i < n_rows; i++)
         free(rows[i].metric);
+
+    /* Local aggregate across this project's sessions. */
+    struct session_local_totals local;
+    session_aggregate_usage("vertex-ai", &local);
+    /* The registered rows carry the grammar: quota_tokens takes the k/m suffixes the
+     * /config picker advertises, and both rows resolve their environment variable through
+     * the config registry. */
+    long quota_tokens = config_tokens("providers.vertex-ai.quota_tokens");
+    const char *quota_cost_str = config_str("providers.vertex-ai.quota_cost");
+    double quota_cost = quota_cost_str ? strtod(quota_cost_str, NULL) : 0.0;
+
+    printf(ANSI_DIM "local" ANSI_RESET "\n");
+    long total_tokens = local.input_tokens + local.output_tokens;
+    if (quota_tokens > 0) {
+        double pct = (double)total_tokens * 100.0 / (double)quota_tokens;
+        printf("  ");
+        progress_bar_print(pct / 100.0, 20);
+        printf(" " ANSI_DIM "%3d%% used | %ld / %ld tokens" ANSI_RESET "\n", (int)(pct + 0.5),
+               total_tokens, quota_tokens);
+    } else
+        printf("  " ANSI_DIM "%-*s%ld tokens" ANSI_RESET "\n", USAGE_LABEL_WIDTH, "tokens",
+               total_tokens);
+    if (quota_cost > 0) {
+        double pct = local.spend * 100.0 / quota_cost;
+        printf("  ");
+        progress_bar_print(pct / 100.0, 20);
+        printf(" " ANSI_DIM "%3d%% used | $%.4f / $%.4f" ANSI_RESET "\n", (int)(pct + 0.5),
+               local.spend, quota_cost);
+    } else if (local.spend > 0)
+        printf("  " ANSI_DIM "%-*s$%.4f" ANSI_RESET "\n", USAGE_LABEL_WIDTH, "spend", local.spend);
+
     return 0;
 }
