@@ -96,6 +96,7 @@ struct http_provider {
     const char **owned_efforts; /* owned array of borrowed strings; NULL when not narrowed */
     size_t n_efforts;
     http_parse_model_cb parse_model;
+    char *(*rewrite_model)(const char *model);
 };
 
 /* `out` is always set: an unset value is auto, and an unrecognized one is auto with -1. */
@@ -365,6 +366,13 @@ static int http_provider_stream(struct provider *base, const struct context *con
     struct http_provider *provider = (struct http_provider *)base;
     /* Bounded: a router-autoload probe can take minutes, and the request waits for that model
      * anyway. */
+    char *rewritten_model = NULL;
+    const char *request_model = model;
+    if (provider->rewrite_model) {
+        rewritten_model = provider->rewrite_model(model);
+        if (rewritten_model)
+            request_model = rewritten_model;
+    }
     if (request_reads_metadata(provider))
         model_meta_wait_ms(base, MODEL_META_WAIT_MS, NULL, NULL);
     const struct wire *wire = resolve_model_wire(provider, model);
@@ -373,6 +381,7 @@ static int http_provider_stream(struct provider *base, const struct context *con
         struct stream_event error = {.kind = EV_ERROR, .u.error = {.message = message}};
         callback(&error, callback_user);
         free(message);
+        free(rewritten_model);
         return -1;
     }
 
@@ -425,7 +434,7 @@ static int http_provider_stream(struct provider *base, const struct context *con
         opts.request_cost = provider->request_cost;
     }
 
-    char *body = wire_build_body(wire, context, provider_stable_id(base), model, &opts);
+    char *body = wire_build_body(wire, context, provider_stable_id(base), request_model, &opts);
     if (!body)
         return -1;
 
@@ -890,6 +899,8 @@ struct provider *http_provider_new(const struct provider_def *def)
         classes |= PROVIDER_FIELD_OPENAI | PROVIDER_FIELD_ANTHROPIC;
     if (!def->auth_source)
         classes |= PROVIDER_FIELD_KEYED | (def->pinned ? 0 : PROVIDER_FIELD_UNPINNED);
+    else if (def->api_key_env)
+        classes |= PROVIDER_FIELD_KEYED;
     if (def_base_url_port_templated(def))
         classes |= PROVIDER_FIELD_PORT_TEMPLATED;
     provider_warn_unused_fields(name, wire->id, classes,
@@ -1007,6 +1018,7 @@ struct provider *http_provider_new(const struct provider_def *def)
     }
     narrow_messages_efforts(provider);
     provider->parse_model = def->parse_model;
+    provider->rewrite_model = def->rewrite_model;
 
     if (def->load_defaults)
         def->load_defaults(&provider->default_model, &provider->default_effort);

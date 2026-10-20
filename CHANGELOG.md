@@ -7,6 +7,14 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
+### Added
+
+- A `vertex-ai` provider for Google Cloud Vertex AI, serving Gemini models through Vertex's
+  OpenAI-compatible endpoint. It authenticates with application default credentials, or with
+  `HAX_VERTEX_API_KEY` for a static bearer token, and reads the project from `VERTEXAI_PROJECT`
+  and the location from `VERTEXAI_LOCATION`. Model ids may omit the `google/` publisher prefix,
+  which hax adds.
+
 ### Changed
 
 - Prompts are sent without leading blank lines or trailing whitespace, so a paste or Ctrl+G edit

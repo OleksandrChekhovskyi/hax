@@ -21,6 +21,7 @@
 #include "providers/mock.h"
 #include "providers/opencode.h"
 #include "providers/openrouter.h"
+#include "providers/vertex.h"
 
 /* The OpenCode gateway pins a conversation to one upstream by its session header — Go rejects
  * requests without one — and attributes usage by client. */
@@ -181,6 +182,17 @@ static const struct provider_def DEFS[] = {
         .id = "anthropic-compatible",
         .api = "anthropic-messages",
         .unconfigured_reason = "HAX_ANTHROPIC_BASE_URL not set",
+    },
+    {
+        .id = "vertex-ai",
+        .display_name = "Vertex AI",
+        .api = "openai-completions",
+        .catalog_id = "google-vertex",
+        .api_key_env = "HAX_VERTEX_API_KEY",
+        .auth_source = vertex_auth_source,
+        .construct = vertex_provider_new,
+        .prepare_availability = vertex_prepare_availability,
+        .rewrite_model = vertex_rewrite_model,
     },
     {
         .id = "mock",

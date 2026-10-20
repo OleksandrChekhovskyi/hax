@@ -22,6 +22,7 @@ keys in environment variables rather than command arguments or `config.json`.
 | `codex` | Existing ChatGPT/Codex subscription | Run `/login`. |
 | `openai` | Direct OpenAI API | `OPENAI_API_KEY`; choose a model. |
 | `anthropic` | Direct Anthropic API | `ANTHROPIC_API_KEY`; choose a model. |
+| `vertex-ai` | Google Cloud Vertex AI (Gemini) | `VERTEXAI_PROJECT` (or `HAX_VERTEX_PROJECT`); uses application default credentials or `HAX_VERTEX_API_KEY`. |
 | `openrouter` | Many vendors through one API | `OPENROUTER_API_KEY`; choose a model. |
 | `opencode-zen` | Curated pay-as-you-go models | `OPENCODE_API_KEY`; choose a model. |
 | `opencode-go` | OpenCode's model subscription | `OPENCODE_API_KEY`; choose a model. |
@@ -270,6 +271,21 @@ thinking. Override `thinking_mode` or `cache` when an endpoint needs it.
 
 For a static endpoint you use regularly, prefer a named custom provider instead of repeatedly
 exporting the generic base URL.
+
+## Vertex AI
+
+`vertex-ai` uses Vertex AI's OpenAI-compatible endpoint for Gemini models:
+
+```sh
+export VERTEXAI_PROJECT=my-gcp-project
+export VERTEXAI_LOCATION=us-central1   # or global
+hax --provider=vertex-ai --model=gemini-2.5-flash
+```
+
+Authentication uses application default credentials by default; set `HAX_VERTEX_API_KEY` for a
+static bearer token. Model ids may omit the `google/` publisher prefix, which hax adds
+automatically. The `/model` picker is unavailable because Vertex does not expose a model list;
+choose a model with `--model` or `HAX_MODEL`.
 
 ## Custom providers
 

@@ -104,6 +104,10 @@ struct provider_def {
 
     /* Whole-provider overrides for providers the data path cannot express. */
     struct provider *(*construct)(const struct provider_def *def);
+    /* Optional: rewrite a model id before it is sent on the wire. Returns an owned string,
+     * or NULL to keep the original. Metadata lookups still use the original id. */
+    char *(*rewrite_model)(const char *model);
+
     /* Prepare an immediate verdict or an owned GET request on the foreground thread. NULL uses
      * the generic data-driven check — or, with a construct override, immediate availability. */
     void (*prepare_availability)(const struct provider_def *def, struct provider_availability *out);
