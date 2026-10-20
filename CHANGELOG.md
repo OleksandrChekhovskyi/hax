@@ -25,6 +25,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   `providers.llamacpp.port`.
 - The status line stays visible for the whole turn, including while an answer streams or a tool
   runs, so the elapsed time and the current state, such as a requested pause, are always in view.
+- `/usage` is now supported by the `vertex-ai` provider, reporting project quota consumption
+  from the Google Cloud Monitoring API.
 
 ## [0.6.1] - 2026-10-15
 

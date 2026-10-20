@@ -193,6 +193,7 @@ static const struct provider_def DEFS[] = {
         .construct = vertex_provider_new,
         .prepare_availability = vertex_prepare_availability,
         .rewrite_model = vertex_rewrite_model,
+        .query_usage = vertex_query_usage,
     },
     {
         .id = "mock",

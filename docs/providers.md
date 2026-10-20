@@ -287,6 +287,9 @@ static bearer token. Model ids may omit the `google/` publisher prefix, which ha
 automatically. The `/model` picker is unavailable because Vertex does not expose a model list;
 choose a model with `--model` or `HAX_MODEL`.
 
+On `vertex-ai`, `/usage` reports the project's Vertex AI quota consumption from the
+Cloud Monitoring API.
+
 ## Custom providers
 
 Add any static OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages endpoint under

@@ -18,6 +18,11 @@
 #include "provider_config.h"
 #include "xalloc.h"
 #include "text/url.h"
+#include "busy.h"
+#include "terminal/ansi.h"
+#include "terminal/ui.h"
+#include "transport/http.h"
+#include "providers/usage_render.h"
 
 struct vertex_auth_state {
     int static_token;
@@ -414,4 +419,375 @@ void vertex_prepare_availability(const struct provider_def *def, struct provider
         out->available = 0;
         out->reason = xstrdup("no Vertex AI credentials (set HAX_VERTEX_API_KEY or configure gcloud ADC)");
     }
+}
+
+/* ---------- /usage (Cloud Monitoring) ---------- */
+
+#define VERTEX_USAGE_TIMEOUT_S 30
+#define VERTEX_USAGE_ROWS_MAX  32
+
+struct vertex_quota_row {
+    char *metric;
+    long usage;
+    long limit;
+    time_t reset_at;
+    int has_limit;
+    int has_usage;
+};
+
+static char *vertex_monitoring_base_url(void)
+{
+    const char *envs[] = {"HAX_VERTEX_MONITORING_URL", "HAX_VERTEX_MONITORING_BASE_URL",
+                          "HAX_VERTEX_USAGE_URL", "HAX_VERTEX_MONITORING_ENDPOINT", NULL};
+    const char *keys[] = {"monitoring_url", "monitoring_base_url", "usage_url",
+                          "monitoring_endpoint", NULL};
+    for (size_t i = 0; envs[i]; i++) {
+        const char *value = getenv(envs[i]);
+        if (value && *value)
+            return xstrdup(value);
+    }
+    if (keys[0]) {
+        for (size_t i = 0; keys[i]; i++) {
+            char *key = xasprintf("providers.vertex-ai.%s", keys[i]);
+            const char *configured = config_scoped_str("providers.vertex-ai", keys[i]);
+            free(key);
+            if (configured && *configured)
+                return xstrdup(configured);
+        }
+    }
+    return NULL;
+}
+
+static time_t vertex_parse_rfc3339(const char *text)
+{
+    if (!text || !*text)
+        return (time_t)-1;
+    struct tm tm;
+    memset(&tm, 0, sizeof(tm));
+    /* Accept "2026-08-21T21:14:51Z" or with fractional seconds. */
+    if (sscanf(text, "%4d-%2d-%2dT%2d:%2d:%2d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday, &tm.tm_hour,
+               &tm.tm_min, &tm.tm_sec) != 6)
+        return (time_t)-1;
+    tm.tm_year -= 1900;
+    tm.tm_mon -= 1;
+    /* Skip fractional seconds if present. */
+    const char *p = text + 19;
+    if (*p == '.') {
+        if (p[1] < '0' || p[1] > '9')
+            return (time_t)-1;
+        for (p++; *p >= '0' && *p <= '9'; p++)
+            ;
+    }
+    if (*p != 'Z')
+        return (time_t)-1;
+
+    int year = tm.tm_year + 1900;
+    int month = tm.tm_mon + 1;
+    int day = tm.tm_mday;
+    int hour = tm.tm_hour;
+    int minute = tm.tm_min;
+    int second = tm.tm_sec;
+
+    int shifted_year = year - (month <= 2);
+    int era = shifted_year / 400;
+    int year_of_era = shifted_year - era * 400;
+    int day_of_year = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+    int day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    long long days = (long long)era * 146097 + day_of_era - 719468;
+    return (time_t)(days * 86400 + hour * 3600 + minute * 60 + second);
+}
+
+static long vertex_json_int_value(const json_t *value)
+{
+    if (!value)
+        return 0;
+    if (json_is_integer(value))
+        return (long)json_integer_value(value);
+    if (json_is_string(value)) {
+        char *end = NULL;
+        long result = strtol(json_string_value(value), &end, 10);
+        if (end && *end == '\0')
+            return result;
+    }
+    if (json_is_real(value))
+        return (long)json_real_value(value);
+    /* Jansson object with int64Value/doubleValue. */
+    if (json_is_object(value)) {
+        json_t *iv = json_object_get(value, "int64Value");
+        if (iv)
+            return vertex_json_int_value(iv);
+        json_t *dv = json_object_get(value, "doubleValue");
+        if (dv)
+            return vertex_json_int_value(dv);
+    }
+    return 0;
+}
+
+static const char *vertex_time_series_metric(const json_t *series)
+{
+    json_t *metric = json_object_get(series, "metric");
+    if (!json_is_object(metric))
+        return NULL;
+    json_t *labels = json_object_get(metric, "labels");
+    if (json_is_object(labels)) {
+        const char *value = json_string_value(json_object_get(labels, "quota_metric"));
+        if (value && *value)
+            return value;
+    }
+    return json_string_value(json_object_get(metric, "type"));
+}
+
+static time_t vertex_time_series_end(const json_t *series)
+{
+    json_t *points = json_object_get(series, "points");
+    if (!json_is_array(points) || json_array_size(points) == 0)
+        return time(NULL) + 60;
+    json_t *point = json_array_get(points, 0);
+    json_t *interval = json_object_get(point, "interval");
+    const char *end = interval ? json_string_value(json_object_get(interval, "endTime")) : NULL;
+    time_t parsed = vertex_parse_rfc3339(end);
+    if (parsed < 0)
+        return time(NULL) + 60;
+    return parsed;
+}
+
+static long vertex_time_series_value(const json_t *series)
+{
+    json_t *points = json_object_get(series, "points");
+    if (!json_is_array(points) || json_array_size(points) == 0)
+        return 0;
+    json_t *point = json_array_get(points, 0);
+    return vertex_json_int_value(json_object_get(point, "value"));
+}
+
+static void vertex_collect_rows(json_t *root, int is_limit, struct vertex_quota_row *rows,
+                                size_t *n_rows)
+{
+    if (!json_is_object(root))
+        return;
+    json_t *series_list = json_object_get(root, "timeSeries");
+    if (!json_is_array(series_list))
+        return;
+    size_t i;
+    for (i = 0; i < json_array_size(series_list); i++) {
+        json_t *series = json_array_get(series_list, i);
+        if (!json_is_object(series))
+            continue;
+        const char *metric_name = vertex_time_series_metric(series);
+        if (!metric_name || !*metric_name)
+            continue;
+
+        /* Find existing row. */
+        size_t r;
+        struct vertex_quota_row *row = NULL;
+        for (r = 0; r < *n_rows; r++) {
+            if (rows[r].metric && strcmp(rows[r].metric, metric_name) == 0) {
+                row = &rows[r];
+                break;
+            }
+        }
+        if (!row) {
+            if (*n_rows >= VERTEX_USAGE_ROWS_MAX)
+                continue;
+            row = &rows[*n_rows];
+            memset(row, 0, sizeof(*row));
+            row->metric = xstrdup(metric_name);
+            row->reset_at = vertex_time_series_end(series);
+            (*n_rows)++;
+        }
+        long value = vertex_time_series_value(series);
+        if (is_limit) {
+            row->limit = value;
+            row->has_limit = 1;
+        } else {
+            row->usage = value;
+            row->has_usage = 1;
+            if (row->reset_at == 0)
+                row->reset_at = vertex_time_series_end(series);
+        }
+    }
+}
+
+static char *vertex_build_url(const char *base_or_full, const char *project, int is_limit)
+{
+    if (base_or_full && strstr(base_or_full, "timeSeries"))
+        return xstrdup(base_or_full);
+
+    const char *metric = is_limit ? "serviceruntime.googleapis.com/quota/limit"
+                                  : "serviceruntime.googleapis.com/quota/rate/net_usage";
+    time_t now = time(NULL);
+    char start[64], end[64];
+    struct tm stm, etm;
+    gmtime_r(&now, &etm);
+    strftime(end, sizeof(end), "%Y-%m-%dT%H:%M:%SZ", &etm);
+    time_t start_time = now - 300;
+    gmtime_r(&start_time, &stm);
+    strftime(start, sizeof(start), "%Y-%m-%dT%H:%M:%SZ", &stm);
+
+    char *filter = NULL;
+    if (is_limit)
+        filter = xasprintf(
+            "metric.type=\"%s\"%%20AND%%20resource.labels.service=\"aiplatform.googleapis.com\"",
+            metric);
+    else
+        filter = xasprintf(
+            "metric.type=\"%s\"%%20AND%%20resource.labels.service=\"aiplatform.googleapis.com\"",
+            metric);
+
+    if (base_or_full && *base_or_full) {
+        /* Treat as base URL: append path if it doesn't already end with timeSeries. */
+        char *trimmed = url_trim_trailing_slashes(base_or_full);
+        char *url =
+            xasprintf("%s/v3/projects/%s/"
+                      "timeSeries?filter=%s&interval.startTime=%s&interval.endTime=%s&aggregation."
+                      "alignmentPeriod=60s&aggregation.perSeriesAligner=ALIGN_SUM",
+                      trimmed, project, filter, start, end);
+        free(trimmed);
+        free(filter);
+        return url;
+    }
+
+    char *url = xasprintf("https://monitoring.googleapis.com/v3/projects/%s/"
+                          "timeSeries?filter=%s&interval.startTime=%s&interval.endTime=%s&"
+                          "aggregation.alignmentPeriod=60s&aggregation.perSeriesAligner=ALIGN_SUM",
+                          project, filter, start, end);
+    free(filter);
+    return url;
+}
+
+int vertex_query_usage(struct provider *provider)
+{
+    const struct http_auth_source *auth = http_provider_auth(provider);
+    struct busy *busy = busy_begin("fetching usage...");
+    if (auth->ops->prepare(auth->state, 1, busy_tick, NULL) != 0) {
+        if (!busy_end(busy)) {
+            char *message = auth->ops->unauthorized_message(auth->state);
+            ui_error("%s", message);
+            free(message);
+        }
+        return -1;
+    }
+
+    char *project = vertex_project_id();
+    if (!project || !*project) {
+        busy_end(busy);
+        ui_error("Vertex AI project not set (set HAX_VERTEX_PROJECT or VERTEXAI_PROJECT)");
+        free(project);
+        return -1;
+    }
+
+    char *base_or_full = vertex_monitoring_base_url();
+
+    struct vertex_quota_row rows[VERTEX_USAGE_ROWS_MAX];
+    memset(rows, 0, sizeof(rows));
+    size_t n_rows = 0;
+
+    /* Usage request. */
+    char *usage_url = vertex_build_url(base_or_full, project, 0);
+    char *limit_url = vertex_build_url(base_or_full, project, 1);
+
+    char **headers = NULL;
+    /* Reuse vertex auth token. */
+    /* auth->state is vertex_auth_state; call headers? Use http_provider? We'll build manually. */
+    /* Get token by refreshing through auth ops not exposing token. Instead call prepare and use
+     * auth headers via vertex_auth_headers? Not accessible. Use http_provider_auth and cast? */
+    /* We'll call auth->ops->headers to get headers. */
+    char **auth_headers = auth->ops->headers(auth->state, NULL, 0);
+    /* auth_headers includes Authorization. Build full header list. */
+    const char *fixed[] = {"Accept: application/json", NULL};
+    headers = string_array_concat((const char *const *)auth_headers, fixed);
+    string_array_free(auth_headers);
+
+    char *usage_body = NULL, *limit_body = NULL;
+    long usage_status = 0, limit_status = 0;
+    int request_result = http_get(usage_url, (const char *const *)headers, VERTEX_USAGE_TIMEOUT_S,
+                                  0, busy_tick, NULL, &usage_body, &usage_status);
+    if (request_result == 0 && usage_body)
+        http_get(limit_url, (const char *const *)headers, VERTEX_USAGE_TIMEOUT_S, 0, busy_tick,
+                 NULL, &limit_body, &limit_status);
+
+    int cancelled = busy_end(busy);
+    string_array_free(headers);
+
+    if (cancelled) {
+        free(usage_body);
+        free(limit_body);
+        free(usage_url);
+        free(limit_url);
+        free(base_or_full);
+        free(project);
+        for (size_t i = 0; i < n_rows; i++)
+            free(rows[i].metric);
+        return -1;
+    }
+
+    if (request_result != 0 || !usage_body) {
+        if (usage_status == 401) {
+            char *message = auth->ops->unauthorized_message(auth->state);
+            ui_error("%s", message);
+            free(message);
+        } else {
+            ui_error("failed to fetch usage from %s", usage_url);
+        }
+        free(usage_body);
+        free(limit_body);
+        free(usage_url);
+        free(limit_url);
+        free(base_or_full);
+        free(project);
+        for (size_t i = 0; i < n_rows; i++)
+            free(rows[i].metric);
+        return -1;
+    }
+
+    json_error_t error;
+    json_t *usage_root = json_loads(usage_body, 0, &error);
+    if (usage_root)
+        vertex_collect_rows(usage_root, 0, rows, &n_rows);
+    json_t *limit_root = limit_body ? json_loads(limit_body, 0, &error) : NULL;
+    if (limit_root)
+        vertex_collect_rows(limit_root, 1, rows, &n_rows);
+
+    printf(ANSI_DIM "vertex-ai");
+    /* Try to show project. */
+    printf(" | %s", project);
+    printf(ANSI_RESET "\n");
+
+    int printed = 0;
+    for (size_t i = 0; i < n_rows; i++) {
+        if (!rows[i].has_usage && !rows[i].has_limit)
+            continue;
+        const char *raw = rows[i].metric;
+        const char *display = raw;
+        const char *slash = strrchr(raw, '/');
+        if (slash && slash[1])
+            display = slash + 1;
+        char *label = xstrdup(display);
+        struct usage_window window;
+        window.label = label;
+        if (rows[i].has_limit && rows[i].limit > 0)
+            window.used_percent = (double)rows[i].usage * 100.0 / (double)rows[i].limit;
+        else
+            window.used_percent = 0;
+        window.reset_at = rows[i].reset_at ? rows[i].reset_at : time(NULL) + 60;
+        window.note = rows[i].has_limit ? NULL : "no limit reported";
+        usage_window_print(&window);
+        free(label);
+        printed = 1;
+    }
+    if (!printed) {
+        printf("  " ANSI_DIM "no usage data reported" ANSI_RESET "\n");
+    }
+
+    json_decref(usage_root);
+    json_decref(limit_root);
+    free(usage_body);
+    free(limit_body);
+    free(usage_url);
+    free(limit_url);
+    free(base_or_full);
+    free(project);
+    for (size_t i = 0; i < n_rows; i++)
+        free(rows[i].metric);
+    return 0;
 }

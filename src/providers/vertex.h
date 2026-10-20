@@ -21,4 +21,7 @@ int vertex_auth_source(const struct provider_def *def, struct http_auth_source *
 /* Rewrite a bare Gemini model id to its publisher-prefixed form. */
 char *vertex_rewrite_model(const char *model);
 
+/* /usage backend: Cloud Monitoring quota usage for the project. */
+int vertex_query_usage(struct provider *provider);
+
 #endif
