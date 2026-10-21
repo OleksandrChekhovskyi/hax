@@ -22,7 +22,7 @@ keys in environment variables rather than command arguments or `config.json`.
 | `codex` | Existing ChatGPT/Codex subscription | Run `/login`. |
 | `openai` | Direct OpenAI API | `OPENAI_API_KEY`; choose a model. |
 | `anthropic` | Direct Anthropic API | `ANTHROPIC_API_KEY`; choose a model. |
-| `vertex-ai` | Google Cloud Vertex AI (Gemini) | `VERTEXAI_PROJECT` (or `HAX_VERTEX_PROJECT`); uses application default credentials or `HAX_VERTEX_API_KEY`. |
+| `vertex-ai` | Google Cloud Vertex AI (Gemini) | `VERTEXAI_PROJECT`; uses application default credentials or `HAX_VERTEX_API_KEY`. |
 | `openrouter` | Many vendors through one API | `OPENROUTER_API_KEY`; choose a model. |
 | `opencode-zen` | Curated pay-as-you-go models | `OPENCODE_API_KEY`; choose a model. |
 | `opencode-go` | OpenCode's model subscription | `OPENCODE_API_KEY`; choose a model. |

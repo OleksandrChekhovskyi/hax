@@ -83,14 +83,10 @@ static char *vertex_setting(const char *key)
 /* The project the calls bill and belong to. */
 static char *vertex_project_id(void)
 {
-    /* The registry does not carry the project yet, so its names are read here. */
-    const char *alias = getenv("HAX_VERTEX_PROJECT");
-    if (alias && *alias)
-        return xstrdup(alias);
     char *project = vertex_setting("project");
     if (!project) {
-        const char *fallbacks[] = {"VERTEXAI_PROJECT", "GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT",
-                                   "GOOGLE_PROJECT_ID", NULL};
+        const char *fallbacks[] = {"GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT", "GOOGLE_PROJECT_ID",
+                                   NULL};
         for (size_t i = 0; fallbacks[i]; i++) {
             const char *value = getenv(fallbacks[i]);
             if (value && *value) {
@@ -105,14 +101,9 @@ static char *vertex_project_id(void)
 /* The configured location, defaulted to the one Google defaults to. */
 static char *vertex_location(void)
 {
-    /* The registry does not carry the location yet, so its names are read here. */
-    const char *alias = getenv("HAX_VERTEX_LOCATION");
-    if (alias && *alias)
-        return xstrdup(alias);
     char *location = vertex_setting("location");
     if (!location) {
-        const char *fallbacks[] = {"VERTEXAI_LOCATION", "GOOGLE_CLOUD_REGION",
-                                   "CLOUDSDK_COMPUTE_REGION", NULL};
+        const char *fallbacks[] = {"GOOGLE_CLOUD_REGION", "CLOUDSDK_COMPUTE_REGION", NULL};
         for (size_t i = 0; fallbacks[i]; i++) {
             const char *value = getenv(fallbacks[i]);
             if (value && *value) {
@@ -436,9 +427,7 @@ struct provider *vertex_provider_new(const struct provider_def *def)
 {
     char *base_url = vertex_base_url();
     if (!base_url) {
-        hax_err(
-            "provider '%s': VERTEXAI_PROJECT not set (set HAX_VERTEX_PROJECT or VERTEXAI_PROJECT)",
-            def->id);
+        hax_err("provider '%s': VERTEXAI_PROJECT not set", def->id);
         return NULL;
     }
 
@@ -761,7 +750,7 @@ int vertex_query_usage(struct provider *provider)
     char *project = vertex_project_id();
     if (!project || !*project) {
         busy_end(busy);
-        ui_error("Vertex AI project not set (set HAX_VERTEX_PROJECT or VERTEXAI_PROJECT)");
+        ui_error("Vertex AI project not set (set VERTEXAI_PROJECT)");
         free(project);
         return -1;
     }

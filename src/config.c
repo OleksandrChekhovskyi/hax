@@ -235,6 +235,10 @@ static const struct config_setting REGISTRY[] = {
      .description = "anthropic-version request header value (default: 2023-06-01)"},
 
     /* vertex-ai */
+    {.key = "providers.vertex-ai.project", .env_var = "VERTEXAI_PROJECT",
+     .description = "Google Cloud project that owns the Vertex AI models"},
+    {.key = "providers.vertex-ai.location", .env_var = "VERTEXAI_LOCATION",
+     .description = "Vertex AI location (region) or 'global'"},
     {.key = "providers.vertex-ai.base_url", .env_var = "HAX_VERTEX_BASE_URL",
      .description = "Full Vertex AI OpenAI-compatible base URL; overrides project/location"},
     {.key = "providers.vertex-ai.api_key", .env_var = "HAX_VERTEX_API_KEY", .secret = 1,
