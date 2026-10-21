@@ -4,7 +4,6 @@ only by a dim prompt placeholder; a hard interrupt (Esc twice) ends the user tur
 [interrupted] line above the stats line. Either way, an empty Enter continues."""
 
 import os
-import time
 
 import harness
 
@@ -37,9 +36,8 @@ def paused() -> harness.Terminal:
     )
     term.wait_for("[bash] cat fifo")
     term.send("Escape")
-    # Nothing on screen acknowledges an Esc during a tool run, and it must land before the tool
-    # finishes, or the turn completes instead of pausing.
-    time.sleep(0.3)
+    # The pause must land before the tool finishes, or the turn completes instead of pausing.
+    term.wait_for("pausing... (esc again to interrupt)")
     term.write_fifo(term.workdir / "fifo", "unblocked\n")
     term.expect_screen(
         """

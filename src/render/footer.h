@@ -53,10 +53,19 @@ void footer_hide(struct footer *footer);
 
 /* Change the status label as spinner_label_set() and spinner_label_request(), repainting a
  * visible status row when its text changes. Request states of unknown length. Since a set label
- * holds until the next set, set only to reset, to answer user input, or for a state known to last
- * seconds while nothing else requests a label. */
+ * holds until the next set, set only to reset or for a state known to last seconds while nothing
+ * else requests a label. */
 void footer_set_label(struct footer *footer, const char *key, const char *label);
 void footer_request_label(struct footer *footer, const char *key, const char *label);
+
+/* Returns a label to show in place of the label state, or NULL to show that state. */
+typedef const char *(*footer_label_override_fn)(void *user);
+
+/* Consult override, which may be NULL, on every paint, for state that changes outside the
+ * footer's control. It runs with the footer locked on any thread, so it must be thread-safe and
+ * must not call back into the footer. */
+void footer_set_label_override(struct footer *footer, footer_label_override_fn override,
+                               void *user);
 
 /* Set the status row's elapsed-time origin to a positive monotonic_ms() value, or disable the
  * counter with zero. The counter appears only for long waits. */

@@ -36,6 +36,8 @@ struct footer {
     int stop_requested;
 
     struct spinner_label label;
+    footer_label_override_fn label_override; /* NULL when unset */
+    void *label_override_user;
     long timer_started_at_ms;
     int parked_rows; /* from where output ends to the footer */
     int parked_cols; /* the terminal width when the footer moved below the output */
@@ -98,9 +100,11 @@ static int format_status_locked(const struct footer *footer, struct buf *out)
 {
     long elapsed_ms =
         footer->timer_started_at_ms > 0 ? monotonic_ms() - footer->timer_started_at_ms : 0;
+    const char *label =
+        footer->label_override ? footer->label_override(footer->label_override_user) : NULL;
     /* Reserve the last terminal column because filling it can trigger deferred autowrap. */
-    return spinner_format_status(out, spinner_glyph_now(), footer->label.text, elapsed_ms,
-                                 term_width() - 1);
+    return spinner_format_status(out, spinner_glyph_now(), label ? label : footer->label.text,
+                                 elapsed_ms, term_width() - 1);
 }
 
 int footer_rows_that_fit(int row_count, int terminal_rows)
@@ -332,6 +336,17 @@ void footer_request_label(struct footer *footer, const char *key, const char *la
     if (spinner_label_request(&footer->label, key, label, monotonic_ms()) &&
         footer->mode != FOOTER_HIDDEN && !footer->suspended)
         draw_frame_locked(footer);
+    pthread_mutex_unlock(&footer->mutex);
+}
+
+void footer_set_label_override(struct footer *footer, footer_label_override_fn override, void *user)
+{
+    if (!footer)
+        return;
+
+    pthread_mutex_lock(&footer->mutex);
+    footer->label_override = override;
+    footer->label_override_user = user;
     pthread_mutex_unlock(&footer->mutex);
 }
 

@@ -136,18 +136,22 @@ static void display_stats_line(struct render_ctx *render, const struct provider 
     disp_flush(disp);
 }
 
+/* Read on every paint, so Esc shows at once in every phase of a turn, tool runs included, and no
+ * label change hides it. An abort implies a pause and ends the turn moments later. */
+static const char *pause_label(void *user)
+{
+    (void)user;
+    return interrupt_pause_requested() ? "pausing... (esc again to interrupt)" : NULL;
+}
+
 /* Curl wait/chunk hook for cancellation and the timer-driven retry label. */
 static int agent_stream_tick(void *user)
 {
     struct render_ctx *render = user;
-    /* Held, so output streaming until the pause takes effect cannot replace it. */
-    if (interrupt_pause_requested() && !interrupt_abort_requested()) {
-        footer_set_label(render->footer, "pausing", "pausing... (esc again to interrupt)");
-        /* Before first content, cancel immediately; the loop maps the empty turn to a resumable
-         * pause. */
-        if (!render->stream.content_seen)
-            return 1;
-    }
+    /* Before first content, a pause cancels at once; the loop maps the empty turn to a resumable
+     * pause. */
+    if (interrupt_pause_requested() && !render->stream.content_seen)
+        return 1;
     render_update_retry_label(render);
     return interrupt_abort_requested();
 }
@@ -834,8 +838,11 @@ static int compact_conversation(struct agent_state *state, const char *instructi
     }
 
     render_set_mode(render, RENDER_IDLE);
-    /* Set before the status row shows, so it never paints another label first. */
+    /* Before the status row shows, so it never paints another label first, nor a pause left from
+     * an earlier turn. */
     footer_set_label(render->footer, "compacting", "compacting...");
+    interrupt_clear_requests();
+    interrupt_arm();
     render_stream_begin(render);
     struct compact_params params = {
         .session = session,
@@ -851,8 +858,6 @@ static int compact_conversation(struct agent_state *state, const char *instructi
             },
     };
 
-    interrupt_clear_requests();
-    interrupt_arm();
     struct compact_result result;
     compact_run(&params, &result);
     interrupt_disarm();
@@ -1059,6 +1064,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
                                 .show_reasoning = reasoning_visible()};
     render.footer = footer_new("working...");
     footer_attach(render.footer, &render.disp);
+    footer_set_label_override(render.footer, pause_label, NULL);
     render.md = markdown_enabled() ? md_new(md_emit_to_disp, &render.disp, md_cols()) : NULL;
     /* Transcript logging is optional; its API is NULL-safe. */
     struct transcript_log *transcript =
