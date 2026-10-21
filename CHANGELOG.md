@@ -37,6 +37,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   `providers.vertex-ai.gcloud_host` (or `HAX_VERTEX_GCLOUD_HOST`) and hax asks that host for the
   token over SSH instead of running gcloud locally.
 
+### Fixed
+
 ## [0.6.1] - 2026-10-15
 
 ### Added

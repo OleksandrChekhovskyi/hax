@@ -715,6 +715,19 @@ static char *def_base_url(const struct provider_def *def)
     return trimmed;
 }
 
+/* Whether two base URLs name the same endpoint, trailing slashes aside. */
+static int base_url_matches(const char *base, const char *other)
+{
+    if (!base || !other)
+        return 0;
+    char *trimmed_base = url_trim_trailing_slashes(base);
+    char *trimmed_other = url_trim_trailing_slashes(other);
+    int same = strcmp(trimmed_base, trimmed_other) == 0;
+    free(trimmed_base);
+    free(trimmed_other);
+    return same;
+}
+
 void http_provider_availability(const struct provider_def *def, struct provider_availability *out)
 {
     char *base = def_base_url(def);
@@ -907,8 +920,10 @@ struct provider *http_provider_new(const struct provider_def *def)
                                 metadata_api == HTTP_METADATA_ANTHROPIC ? METADATA_FIELDS : NULL);
 
     const char *configured_base = config_scoped_str(prefix, "base_url");
-    /* Silently accepting the key would fake a redirect the pin just refused. */
-    if (def->pinned && configured_base && *configured_base)
+    /* Silently accepting the key would fake a redirect the pin just refused. A def whose own
+     * endpoint already is the configured one (a construct that resolves it) is no redirect. */
+    if (def->pinned && configured_base && *configured_base &&
+        !base_url_matches(def->base_url, configured_base))
         hax_warn("provider '%s': base_url is pinned to %s — use a custom provider for "
                  "another endpoint",
                  name, def->base_url);
