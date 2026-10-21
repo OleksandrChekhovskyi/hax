@@ -18,7 +18,7 @@ struct busy *busy_begin(const char *label)
 {
     struct busy *b = xmalloc(sizeof(*b));
     b->footer = footer_new(label);
-    footer_show(b->footer);
+    footer_show_deferred(b->footer);
     interrupt_clear_requests();
     interrupt_arm();
     return b;

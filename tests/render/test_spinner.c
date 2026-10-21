@@ -51,19 +51,35 @@ static void test_status_fits_its_budget(void)
     buf_free(&row);
 }
 
-static void test_label_set_replaces_at_once(void)
+/* Settles "thinking" so that it appears at SHOWN_AT_MS. */
+#define SHOWN_AT_MS (1000 + SPINNER_LABEL_SETTLE_MS)
+
+static void settle_thinking(struct spinner_label *label)
+{
+    spinner_label_init(label, NULL);
+    spinner_label_request(label, "thinking", "thinking...", 1000);
+    spinner_label_settle(label, SHOWN_AT_MS);
+}
+
+static void test_label_set_holds_until_the_next_set(void)
 {
     struct spinner_label label;
     spinner_label_init(&label, NULL);
     EXPECT_STR_EQ(label.text, "working...");
     spinner_label_request(&label, "thinking", "thinking...", 1000);
 
-    EXPECT(spinner_label_set(&label, "compose", "[bash] composing..."));
-    EXPECT_STR_EQ(label.text, "[bash] composing...");
+    EXPECT(spinner_label_set(&label, "compacting", "compacting..."));
     EXPECT(label.pending_key == NULL);
+    EXPECT(!spinner_label_request(&label, "working", "working...", 1000));
+    spinner_label_request(&label, "thinking", "thinking...", 1000);
     spinner_label_settle(&label, 1000 + SPINNER_LABEL_SETTLE_MS);
-    EXPECT_STR_EQ(label.text, "[bash] composing...");
-    EXPECT(!spinner_label_set(&label, "compose", "[bash] composing..."));
+    EXPECT_STR_EQ(label.text, "compacting...");
+    EXPECT(!spinner_label_set(&label, "compacting", "compacting..."));
+
+    EXPECT(spinner_label_set(&label, "working", "working..."));
+    spinner_label_request(&label, "thinking", "thinking...", 5000);
+    spinner_label_settle(&label, 5000 + SPINNER_LABEL_SETTLE_MS);
+    EXPECT_STR_EQ(label.text, "thinking...");
     spinner_label_free(&label);
 }
 
@@ -96,33 +112,42 @@ static void test_label_repeats_update_text_but_keep_settling_time(void)
     spinner_label_free(&label);
 }
 
-static void test_label_churn_returns_to_default(void)
+static void test_label_churn_shows_nothing_until_a_request_holds(void)
 {
     struct spinner_label label;
     spinner_label_init(&label, NULL);
-    spinner_label_set(&label, "thinking", "thinking...");
 
-    /* No candidate stays stable long enough to settle, so the stale label gives way. */
     spinner_label_request(&label, "a", "a...", 1000);
     spinner_label_request(&label, "b", "b...", 1500);
     spinner_label_request(&label, "a", "a...", 2500);
-    spinner_label_settle(&label, 1000 + SPINNER_LABEL_SETTLE_MS - 1);
-    EXPECT_STR_EQ(label.text, "thinking...");
-    spinner_label_settle(&label, 1000 + SPINNER_LABEL_SETTLE_MS);
+    spinner_label_settle(&label, 2500 + SPINNER_LABEL_SETTLE_MS - 1);
+    EXPECT_STR_EQ(label.text, "working...");
+    spinner_label_settle(&label, 2500 + SPINNER_LABEL_SETTLE_MS);
+    EXPECT_STR_EQ(label.text, "a...");
+    spinner_label_free(&label);
+}
+
+static void test_label_gives_way_at_once(void)
+{
+    struct spinner_label label;
+    settle_thinking(&label);
+
+    EXPECT(spinner_label_request(&label, "working", "working...", SHOWN_AT_MS + 1));
     EXPECT_STR_EQ(label.text, "working...");
     spinner_label_free(&label);
 }
 
-static void test_label_displayed_key_ends_contradiction(void)
+static void test_label_gives_way_to_another_request_through_default(void)
 {
     struct spinner_label label;
-    spinner_label_init(&label, NULL);
-    spinner_label_set(&label, "thinking", "thinking...");
+    settle_thinking(&label);
 
-    spinner_label_request(&label, "a", "a...", 1000);
-    spinner_label_request(&label, "thinking", "thinking...", 1500);
-    spinner_label_settle(&label, 1000 + 2 * SPINNER_LABEL_SETTLE_MS);
-    EXPECT_STR_EQ(label.text, "thinking...");
+    EXPECT(spinner_label_request(&label, "compose", "[bash] composing...", SHOWN_AT_MS + 1));
+    EXPECT_STR_EQ(label.text, "working...");
+    spinner_label_settle(&label, SHOWN_AT_MS + SPINNER_LABEL_SETTLE_MS);
+    EXPECT_STR_EQ(label.text, "working...");
+    spinner_label_settle(&label, SHOWN_AT_MS + 1 + SPINNER_LABEL_SETTLE_MS);
+    EXPECT_STR_EQ(label.text, "[bash] composing...");
     spinner_label_free(&label);
 }
 
@@ -133,10 +158,11 @@ int main(void)
     test_status_shows_glyph_and_label();
     test_status_shows_elapsed_time_only_for_long_waits();
     test_status_fits_its_budget();
-    test_label_set_replaces_at_once();
+    test_label_set_holds_until_the_next_set();
     test_label_request_waits_until_stable();
     test_label_repeats_update_text_but_keep_settling_time();
-    test_label_churn_returns_to_default();
-    test_label_displayed_key_ends_contradiction();
+    test_label_churn_shows_nothing_until_a_request_holds();
+    test_label_gives_way_at_once();
+    test_label_gives_way_to_another_request_through_default();
     T_REPORT();
 }

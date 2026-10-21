@@ -27,11 +27,14 @@ void footer_attach(struct footer *footer, struct disp *disp);
 int footer_status_gap(const struct disp *disp);
 
 /* Show the status row where the next block of the attached output starts, or at column zero of the
- * current empty row when unattached, in place of any prepared rows. A first appearance from hidden
- * is deferred briefly; any show or hide within the grace period cancels it. Made while attached
- * output is stepping around the footer, as by footer_set_rows() too, the change paints with that
- * output in one synchronized frame. */
+ * current empty row when unattached, in place of any prepared rows. Made while attached output is
+ * stepping around the footer, as by footer_set_rows() too, the change paints with that output in
+ * one synchronized frame. */
 void footer_show(struct footer *footer);
+
+/* Show a hidden, unattached footer's status row after a brief grace period, so a wait of unknown
+ * length that ends quickly never blinks. Any show or hide within the grace period cancels it. */
+void footer_show_deferred(struct footer *footer);
 
 /* One prepared row: fully styled bytes for a single physical row without a line ending, and its
  * painted cell width. Rows wider than the terminal, as after a resize, are clipped when painted. */
@@ -49,7 +52,9 @@ void footer_set_rows(struct footer *footer, const struct footer_row *rows, int c
 void footer_hide(struct footer *footer);
 
 /* Change the status label as spinner_label_set() and spinner_label_request(), repainting a
- * visible status row when its text changes. */
+ * visible status row when its text changes. Request states of unknown length. Since a set label
+ * holds until the next set, set only to reset, to answer user input, or for a state known to last
+ * seconds while nothing else requests a label. */
 void footer_set_label(struct footer *footer, const char *key, const char *label);
 void footer_request_label(struct footer *footer, const char *key, const char *label);
 

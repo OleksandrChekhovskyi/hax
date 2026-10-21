@@ -42,7 +42,6 @@ struct footer {
     /* A deferred status show waiting out its grace period on the animation thread. */
     int status_show_pending;
     long status_show_at_ms;
-    int pending_parked_rows;
     /* Prepared rows, newest last, painted above a blank row and the status row. */
     char *row_bytes[FOOTER_ROWS_MAX];
     int row_cells[FOOTER_ROWS_MAX];
@@ -234,20 +233,6 @@ static void show_locked(struct footer *footer, enum footer_mode mode, int parked
         pthread_cond_signal(&footer->wake);
 }
 
-/* A first appearance from hidden waits out a grace period on the animation thread, so a status
- * whose wait ends quickly never blinks. Transitions from a visible mode stay immediate. */
-static void request_status_show_locked(struct footer *footer, int parked_rows)
-{
-    if (footer->mode != FOOTER_HIDDEN) {
-        show_locked(footer, FOOTER_STATUS, parked_rows);
-        return;
-    }
-    footer->status_show_pending = 1;
-    footer->status_show_at_ms = monotonic_ms() + STATUS_SHOW_GRACE_MS;
-    footer->pending_parked_rows = parked_rows;
-    pthread_cond_signal(&footer->wake);
-}
-
 /* A change made while output is stepping around the footer is only recorded; closing the batch
  * paints it, in the same synchronized frame as the output. */
 static void finish_output(struct footer *footer)
@@ -262,9 +247,23 @@ void footer_show(struct footer *footer)
         return;
 
     pthread_mutex_lock(&footer->mutex);
-    request_status_show_locked(footer, footer->disp ? footer_status_gap(footer->disp) : 0);
+    show_locked(footer, FOOTER_STATUS, footer->disp ? footer_status_gap(footer->disp) : 0);
     pthread_mutex_unlock(&footer->mutex);
     finish_output(footer);
+}
+
+void footer_show_deferred(struct footer *footer)
+{
+    if (!footer)
+        return;
+
+    pthread_mutex_lock(&footer->mutex);
+    if (footer->mode == FOOTER_HIDDEN) {
+        footer->status_show_pending = 1;
+        footer->status_show_at_ms = monotonic_ms() + STATUS_SHOW_GRACE_MS;
+        pthread_cond_signal(&footer->wake);
+    }
+    pthread_mutex_unlock(&footer->mutex);
 }
 
 static void free_rows_locked(struct footer *footer)
@@ -405,7 +404,7 @@ static void *footer_thread(void *arg)
             }
             long wait_ms = footer->status_show_at_ms - monotonic_ms();
             if (wait_ms <= 0) {
-                show_locked(footer, FOOTER_STATUS, footer->pending_parked_rows);
+                show_locked(footer, FOOTER_STATUS, 0);
                 continue;
             }
             struct timespec show_deadline = deadline_after_ms(wait_ms);
@@ -467,8 +466,6 @@ static int resume_after_output(void *user)
     footer->suspended = 0;
     int gap =
         footer->mode == FOOTER_ROWS ? rows_gap(footer->disp) : footer_status_gap(footer->disp);
-    if (footer->status_show_pending)
-        footer->pending_parked_rows = gap;
     if (footer->mode != FOOTER_HIDDEN) {
         park_locked(footer, gap);
         draw_frame_locked(footer);
@@ -496,6 +493,14 @@ void footer_attach(struct footer *footer, struct disp *disp)
     disp->live = &footer->live;
 }
 
+/* Test seam: e2e scenarios shorten the label's settle time, which would otherwise dominate their
+ * run time. Env-only on purpose — not a user tunable. */
+static long label_settle_ms(void)
+{
+    const char *value = getenv("HAX_LABEL_SETTLE_MS");
+    return value ? strtol(value, NULL, 10) : SPINNER_LABEL_SETTLE_MS;
+}
+
 struct footer *footer_new(const char *label)
 {
     if (!isatty(fileno(stdout)))
@@ -503,6 +508,7 @@ struct footer *footer_new(const char *label)
 
     struct footer *footer = xcalloc(1, sizeof(*footer));
     spinner_label_init(&footer->label, label);
+    footer->label.settle_ms = label_settle_ms();
     pthread_mutex_init(&footer->mutex, NULL);
     pthread_cond_init(&footer->wake, NULL);
 

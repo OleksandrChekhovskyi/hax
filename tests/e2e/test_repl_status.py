@@ -36,7 +36,7 @@ def test_stays_below_streaming_text():
 def test_full_width_row_keeps_its_place():
     """Text that exactly fills a row leaves the next write to wrap below it, not over it."""
     term = harness.Terminal(
-        "text ```\\n" + "A" * 80 + "\ndelay 400\ntext MARKER\\n```\\n\nend-turn\n"
+        "text ```\\n" + "A" * 80 + "\ndelay 200\ntext MARKER\\n```\\n\nend-turn\n"
     )
     term.wait_for("❯")
     term.type("go")
@@ -62,13 +62,10 @@ def test_full_width_row_keeps_its_place():
 
 def test_output_keeps_its_style_across_chunks():
     """Styling open when the status row repaints carries on into the next chunk."""
-    # The status row repaints after every chunk once it is up, past its show delay. A mock delay
-    # paces every chunk after it, so only the first waits.
+    # The status row is up from the start of the stream and repaints after every chunk.
     term = harness.Terminal(
         """
-        delay 400
         text Here is **bold
-        delay 0
         text , and its end** after.
         reasoning First thought
         reasoning , then a second.

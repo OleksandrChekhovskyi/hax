@@ -111,7 +111,7 @@ def test_coalesces_reads_around_the_status_row():
         """
         tool read {"path":"a.txt"}
         end-turn
-        delay 500
+        delay 250
         tool read {"path":"b.txt"}
         delay 0
         end-turn

@@ -68,6 +68,7 @@ void spinner_label_init(struct spinner_label *label, const char *text)
     memset(label, 0, sizeof(*label));
     label->text = xstrdup(text && *text ? text : DEFAULT_LABEL);
     label->key = xstrdup(DEFAULT_LABEL_KEY);
+    label->settle_ms = SPINNER_LABEL_SETTLE_MS;
 }
 
 static void clear_pending(struct spinner_label *label)
@@ -87,6 +88,11 @@ void spinner_label_free(struct spinner_label *label)
     label->key = NULL;
 }
 
+static int is_default_key(const char *key)
+{
+    return strcmp(key, DEFAULT_LABEL_KEY) == 0;
+}
+
 static int display(struct spinner_label *label, const char *key, const char *text)
 {
     if (strcmp(label->key, key) != 0) {
@@ -103,61 +109,48 @@ static int display(struct spinner_label *label, const char *key, const char *tex
 
 int spinner_label_set(struct spinner_label *label, const char *key, const char *text)
 {
+    const char *set_key = key && *key ? key : DEFAULT_LABEL_KEY;
     clear_pending(label);
-    label->contradicted_since_ms = 0;
-    return display(label, key && *key ? key : DEFAULT_LABEL_KEY,
-                   text && *text ? text : DEFAULT_LABEL);
+    label->held = !is_default_key(set_key);
+    return display(label, set_key, text && *text ? text : DEFAULT_LABEL);
 }
 
 int spinner_label_request(struct spinner_label *label, const char *key, const char *text,
                           long now_ms)
 {
+    if (label->held)
+        return 0;
+
     const char *requested_key = key && *key ? key : DEFAULT_LABEL_KEY;
     const char *requested_text = text && *text ? text : DEFAULT_LABEL;
 
     if (strcmp(label->key, requested_key) == 0) {
         clear_pending(label);
-        label->contradicted_since_ms = 0;
         return display(label, requested_key, requested_text);
     }
-    if (label->pending_key && strcmp(label->pending_key, requested_key) == 0) {
+
+    int changed = display(label, DEFAULT_LABEL_KEY, DEFAULT_LABEL);
+    if (is_default_key(requested_key)) {
+        clear_pending(label);
+    } else if (label->pending_key && strcmp(label->pending_key, requested_key) == 0) {
         if (strcmp(label->pending_text, requested_text) != 0) {
             free(label->pending_text);
             label->pending_text = xstrdup(requested_text);
         }
-        return 0;
+    } else {
+        clear_pending(label);
+        label->pending_text = xstrdup(requested_text);
+        label->pending_key = xstrdup(requested_key);
+        label->pending_since_ms = now_ms;
     }
-
-    clear_pending(label);
-    label->pending_text = xstrdup(requested_text);
-    label->pending_key = xstrdup(requested_key);
-    label->pending_since_ms = now_ms;
-    /* Keep the first contradiction time across changing candidates so churn can demote. */
-    if (!label->contradicted_since_ms)
-        label->contradicted_since_ms = now_ms;
-    return 0;
+    return changed;
 }
 
 void spinner_label_settle(struct spinner_label *label, long now_ms)
 {
-    if (label->pending_key && now_ms - label->pending_since_ms >= SPINNER_LABEL_SETTLE_MS) {
-        free(label->text);
-        free(label->key);
-        label->text = label->pending_text;
-        label->key = label->pending_key;
-        label->pending_text = NULL;
-        label->pending_key = NULL;
-        label->contradicted_since_ms = 0;
-        return;
-    }
-
-    if (!label->contradicted_since_ms ||
-        now_ms - label->contradicted_since_ms < SPINNER_LABEL_SETTLE_MS ||
-        strcmp(label->key, DEFAULT_LABEL_KEY) == 0)
+    if (!label->pending_key || now_ms - label->pending_since_ms < label->settle_ms)
         return;
 
-    display(label, DEFAULT_LABEL_KEY, DEFAULT_LABEL);
-    label->contradicted_since_ms = 0;
-    if (label->pending_key && strcmp(label->pending_key, DEFAULT_LABEL_KEY) == 0)
-        clear_pending(label);
+    display(label, label->pending_key, label->pending_text);
+    clear_pending(label);
 }

@@ -2,6 +2,7 @@
 #include "render/render_ctx.h"
 
 #include <stdio.h>
+#include <string.h>
 
 #include "render/disp.h"
 #include "render/footer.h"
@@ -42,18 +43,14 @@ static void open_mode(struct render_ctx *render, enum render_mode mode)
 {
     switch (mode) {
     case RENDER_IDLE:
-        footer_hide(render->footer);
+    case RENDER_TOOL:
         break;
     case RENDER_WAITING:
+    case RENDER_TOOL_CLUSTER:
         disp_block_separator(&render->disp);
-        footer_set_label(render->footer, "working", "working...");
-        footer_show(render->footer);
         break;
     case RENDER_REASONING:
         disp_block_separator(&render->disp);
-        /* Output on screen settles the state, so the label follows it without hysteresis. */
-        footer_set_label(render->footer, "thinking", "thinking...");
-        footer_show(render->footer);
         disp_write_ansi(&render->disp, ANSI_DIM ANSI_ITALIC);
         /* Markdown styling would override the surrounding reasoning style. */
         if (render->md)
@@ -61,21 +58,9 @@ static void open_mode(struct render_ctx *render, enum render_mode mode)
         break;
     case RENDER_TEXT:
         disp_block_separator(&render->disp);
-        footer_set_label(render->footer, "working", "working...");
-        footer_show(render->footer);
         render->stream.answer_started = 1;
         if (render->md)
             md_set_styled(render->md, 1);
-        break;
-    case RENDER_TOOL_CLUSTER:
-        disp_block_separator(&render->disp);
-        /* The status row must not keep a label from the previous mode. */
-        footer_set_label(render->footer, "working", "working...");
-        footer_show(render->footer);
-        break;
-    case RENDER_TOOL:
-        footer_set_label(render->footer, "working", "working...");
-        footer_show(render->footer);
         break;
     }
 }
@@ -91,41 +76,45 @@ void render_set_mode(struct render_ctx *render, enum render_mode target)
     disp_flush(&render->disp);
 }
 
-static void render_wait_for_stream(struct render_ctx *render)
+static void request_working(struct render_ctx *render)
 {
-    render->stream.in_table = 0;
-    render_set_mode(render, RENDER_WAITING);
-    /* Deferred labels prevent rapid item boundaries from flickering. */
     footer_request_label(render->footer, "working", "working...");
-    footer_show(render->footer);
 }
 
 void render_stream_boundary(struct render_ctx *render)
 {
-    if (render->mode == RENDER_TOOL_CLUSTER) {
-        footer_request_label(render->footer, "working", "working...");
-        return;
-    }
-    render_wait_for_stream(render);
+    if (render->mode != RENDER_TOOL_CLUSTER)
+        render_set_mode(render, RENDER_WAITING);
 }
 
 void render_stream_begin(struct render_ctx *render)
 {
-    render->stream.in_table = 0;
-    render->retry.deadline_ms = 0;
+    render_retry_end(render);
     render->retry.next_attempt = 0;
     render->retry.max_attempts = 0;
     render->stream.content_seen = 0;
     render->stream.answer_started = 0;
     render->stream.output_rendered = 0;
 
-    if (render->mode != RENDER_TOOL_CLUSTER)
-        render_wait_for_stream(render);
+    render_stream_boundary(render);
     if (render->md)
         md_reset(render->md, md_cols());
+    /* A new request makes any earlier label stale. */
+    request_working(render);
+    footer_show(render->footer);
 }
 
-void render_stream_retry(struct render_ctx *render)
+void render_finish(struct render_ctx *render)
+{
+    render_set_mode(render, RENDER_IDLE);
+    footer_hide(render->footer);
+    /* Hidden first, so the reset never paints. A held label must not outlive its work. */
+    render->retry.deadline_ms = 0;
+    footer_set_label(render->footer, "working", "working...");
+}
+
+void render_stream_retry(struct render_ctx *render, int failed_attempt, int max_attempts,
+                         long delay_ms)
 {
     if (render->stream.output_rendered) {
         render_open_block(render);
@@ -135,19 +124,29 @@ void render_stream_retry(struct render_ctx *render)
         disp_putc(&render->disp, '\n');
         render_set_mode(render, RENDER_WAITING);
     }
-    render->stream.in_table = 0;
     render->stream.content_seen = 0;
     render->stream.answer_started = 0;
     render->stream.output_rendered = 0;
     if (render->md)
         md_reset(render->md, md_cols());
+
+    render->retry.deadline_ms = monotonic_ms() + delay_ms;
+    render->retry.next_attempt = failed_attempt + 1;
+    render->retry.max_attempts = max_attempts;
+    render_update_retry_label(render);
+}
+
+void render_retry_end(struct render_ctx *render)
+{
+    if (!render->retry.deadline_ms)
+        return;
+    render->retry.deadline_ms = 0;
+    footer_set_label(render->footer, "working", "working...");
 }
 
 void render_open_block(struct render_ctx *render)
 {
     render_set_mode(render, RENDER_IDLE);
-    /* Tool-status rows are footer-owned but are not represented by render_mode. */
-    footer_hide(render->footer);
     disp_block_separator(&render->disp);
 }
 
@@ -166,6 +165,12 @@ static void write_expanding_tabs(struct disp *disp, const char *bytes, size_t le
     disp_write(disp, bytes + start, len - start);
 }
 
+/* Markdown is buffering a table, so nothing appears for a while. */
+static int in_table(const struct render_ctx *render)
+{
+    return render->md && md_in_table(render->md);
+}
+
 void render_write_text(struct render_ctx *render, const char *bytes, size_t len)
 {
     render->stream.output_rendered = 1;
@@ -177,13 +182,8 @@ void render_write_text(struct render_ctx *render, const char *bytes, size_t len)
 
     /* A table shows only once complete; the label explains the wait, and its settle time keeps a
      * quick table from flashing it. */
-    if (render->md && md_in_table(render->md)) {
+    if (in_table(render))
         footer_request_label(render->footer, "composing", "composing...");
-        render->stream.in_table = 1;
-    } else if (render->stream.in_table) {
-        footer_set_label(render->footer, "working", "working...");
-        render->stream.in_table = 0;
-    }
 }
 
 void render_text_delta(struct render_ctx *render, const char *bytes, size_t len)
@@ -199,6 +199,69 @@ void render_text_delta(struct render_ctx *render, const char *bytes, size_t len)
 
     render_set_mode(render, RENDER_TEXT);
     render_write_text(render, bytes, len);
+    /* Streaming text shows its own progress; no other label still holds. */
+    if (!in_table(render))
+        request_working(render);
+}
+
+void render_reasoning_delta(struct render_ctx *render, const char *text)
+{
+    footer_request_label(render->footer, "thinking", "thinking...");
+    if (!render->show_reasoning || !text || !*text)
+        return;
+    render_set_mode(render, RENDER_REASONING);
+    render_write_text(render, text, strlen(text));
+}
+
+void render_reasoning_end(struct render_ctx *render)
+{
+    render_stream_boundary(render);
+    request_working(render);
+}
+
+void render_tool_call_start(struct render_ctx *render, const char *tool_name)
+{
+    render_stream_boundary(render);
+    if (!tool_name || !*tool_name) {
+        request_working(render);
+        return;
+    }
+    /* One key for every call keeps the label up across a batch, which supported providers stream
+     * sequentially. */
+    char label[64];
+    snprintf(label, sizeof(label), "[%s] composing...", tool_name);
+    footer_request_label(render->footer, "compose", label);
+}
+
+void render_tool_running(struct render_ctx *render, const char *tool_name)
+{
+    /* Keyed by tool, so a batch of calls to one tool keeps the label up. */
+    char label[64];
+    char key[32];
+    snprintf(label, sizeof(label), "[%s] running...", tool_name);
+    snprintf(key, sizeof(key), "run:%s", tool_name);
+    footer_request_label(render->footer, key, label);
+}
+
+void render_progress(struct render_ctx *render, long processed, long total, long cached)
+{
+    /* Report uncached prefill work so progress starts at zero despite cache reuse. A fully cached
+     * prompt has no work to report. */
+    long uncached_total = total - cached;
+    if (uncached_total <= 0)
+        return;
+    long uncached_processed = processed - cached;
+    if (uncached_processed < 0)
+        uncached_processed = 0;
+    int percentage = (int)((uncached_processed * 100) / uncached_total);
+    if (percentage < 0)
+        percentage = 0;
+    if (percentage > 100)
+        percentage = 100;
+    char label[32];
+    snprintf(label, sizeof(label), "processing... %d%%", percentage);
+    /* One key keeps the settling time while percentages refresh. */
+    footer_request_label(render->footer, "processing", label);
 }
 
 void render_retry_label(const struct render_ctx *render, long now_ms, char *out, size_t size)
@@ -221,6 +284,8 @@ void render_retry_label(const struct render_ctx *render, long now_ms, char *out,
 
 void render_update_retry_label(struct render_ctx *render)
 {
+    if (!render->retry.deadline_ms)
+        return;
     char label[64];
     render_retry_label(render, monotonic_ms(), label, sizeof(label));
     footer_set_label(render->footer, "retry", label);

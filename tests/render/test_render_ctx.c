@@ -138,34 +138,12 @@ static void test_reasoning_reopened_wraps_from_column_zero(void)
     fixture_destroy(&fixture);
 }
 
-static void test_buffered_table_is_tracked_until_it_renders(void)
-{
-    struct fixture fixture;
-    if (!fixture_init(&fixture))
-        return;
-    fixture_enable_markdown(&fixture);
-
-    const char *header = "| A |\n|---|\n";
-    render_text_delta(&fixture.render, header, strlen(header));
-    EXPECT(fixture.render.stream.in_table);
-
-    const char *row = "| x |\n";
-    render_write_text(&fixture.render, row, strlen(row));
-    EXPECT(fixture.render.stream.in_table);
-
-    const char *after = "after\n";
-    render_write_text(&fixture.render, after, strlen(after));
-    EXPECT(!fixture.render.stream.in_table);
-    fixture_destroy(&fixture);
-}
-
 static void test_stream_begin_resets_per_stream_state(void)
 {
     struct fixture fixture;
     if (!fixture_init(&fixture))
         return;
 
-    fixture.render.stream.in_table = 1;
     fixture.render.retry.deadline_ms = 20;
     fixture.render.retry.next_attempt = 2;
     fixture.render.retry.max_attempts = 3;
@@ -174,7 +152,6 @@ static void test_stream_begin_resets_per_stream_state(void)
     render_stream_begin(&fixture.render);
 
     EXPECT(fixture.render.mode == RENDER_WAITING);
-    EXPECT(!fixture.render.stream.in_table);
     EXPECT(fixture.render.retry.deadline_ms == 0);
     EXPECT(fixture.render.retry.next_attempt == 0);
     EXPECT(fixture.render.retry.max_attempts == 0);
@@ -210,7 +187,7 @@ static void test_stream_retry_marks_rendered_output(void)
 
     render_text_delta(&fixture.render, "partial", strlen("partial"));
     EXPECT(fixture.render.stream.output_rendered);
-    render_stream_retry(&fixture.render);
+    render_stream_retry(&fixture.render, 1, 3, 1000);
 
     EXPECT(strstr(fixture_output(&fixture), "[unexpected end]") != NULL);
     EXPECT(fixture.render.mode == RENDER_WAITING);
@@ -227,11 +204,40 @@ static void test_stream_retry_silent_without_output(void)
         return;
 
     fixture.render.stream.content_seen = 1;
-    render_stream_retry(&fixture.render);
+    render_stream_retry(&fixture.render, 1, 3, 1000);
 
     EXPECT_STR_EQ(fixture_output(&fixture), "");
     EXPECT(fixture.render.mode == RENDER_IDLE);
     EXPECT(!fixture.render.stream.content_seen);
+    fixture_destroy(&fixture);
+}
+
+static void test_retry_lasts_until_the_retried_attempt_streams(void)
+{
+    struct fixture fixture;
+    if (!fixture_init(&fixture))
+        return;
+
+    render_stream_retry(&fixture.render, 1, 3, 1000);
+    EXPECT(fixture.render.retry.deadline_ms > 0);
+    EXPECT(fixture.render.retry.next_attempt == 2);
+    EXPECT(fixture.render.retry.max_attempts == 3);
+
+    render_retry_end(&fixture.render);
+    EXPECT(fixture.render.retry.deadline_ms == 0);
+    fixture_destroy(&fixture);
+}
+
+static void test_finish_ends_a_pending_retry(void)
+{
+    struct fixture fixture;
+    if (!fixture_init(&fixture))
+        return;
+
+    render_stream_retry(&fixture.render, 1, 3, 1000);
+    render_finish(&fixture.render);
+    EXPECT(fixture.render.mode == RENDER_IDLE);
+    EXPECT(fixture.render.retry.deadline_ms == 0);
     fixture_destroy(&fixture);
 }
 
@@ -280,11 +286,12 @@ int main(void)
     test_plain_text_expands_tabs();
     test_closing_reasoning_resets_style();
     test_reasoning_reopened_wraps_from_column_zero();
-    test_buffered_table_is_tracked_until_it_renders();
     test_stream_begin_resets_per_stream_state();
     test_stream_begin_preserves_tool_cluster();
     test_stream_retry_marks_rendered_output();
     test_stream_retry_silent_without_output();
+    test_retry_lasts_until_the_retried_attempt_streams();
+    test_finish_ends_a_pending_retry();
     test_retry_label_counts_down_then_marks_in_flight();
     test_closing_tool_cluster_resets_substate();
 
