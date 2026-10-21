@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "providers/vertex.h"
 
+#include <ctype.h>
 #include <jansson.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,6 +24,7 @@
 #include "providers/registry.h"
 #include "providers/usage_render.h"
 #include "render/progress.h"
+#include "system/spawn.h"
 #include "terminal/ansi.h"
 #include "terminal/ui.h"
 #include "text/url.h"
@@ -38,6 +40,7 @@ struct vertex_auth_state {
     char *refresh_token;
 
     char *adc_type;
+    char *gcloud_host; /* owned; the host holding the gcloud credentials, NULL for this machine */
 };
 
 struct vertex_buf {
@@ -45,6 +48,12 @@ struct vertex_buf {
     size_t len;
     size_t cap;
 };
+
+/* A gcloud token is a bearer string of a few hundred bytes; the probe answers the picker, which
+ * waits on the foreground thread, so it gets the shorter budget. */
+#define VERTEX_TOKEN_MAX_BYTES         8192
+#define VERTEX_GCLOUD_TIMEOUT_MS       30000
+#define VERTEX_GCLOUD_PROBE_TIMEOUT_MS 10000
 
 static size_t vertex_write_cb(char *ptr, size_t size, size_t nmemb, void *user)
 {
@@ -232,24 +241,62 @@ static int vertex_refresh_authorized_user(struct vertex_auth_state *state)
     return ok ? 0 : -1;
 }
 
+/* Where gcloud runs: NULL for this machine, otherwise the host that holds the credentials. */
+static const char *vertex_gcloud_host(void)
+{
+    const char *host = config_scoped_str("providers.vertex-ai", "gcloud_host");
+    return host && *host ? host : NULL;
+}
+
+/* Ask gcloud for an access token, here or on `host` over SSH. Returns the token text, or NULL
+ * when the command failed. The caller frees. */
+static char *vertex_gcloud_token(const char *host, int timeout_ms)
+{
+    /* No terminal and no X11 forwarding: the command prints one line, and a forwarding channel
+     * the remote cannot set up only risks stalling the client that waits for it. */
+    const char *const remote[] = {
+        "ssh",
+        "-T",
+        "-x",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=5",
+        host,
+        "gcloud",
+        "auth",
+        "print-access-token",
+        NULL,
+    };
+
+    /* The gcloud command is the tail of the ssh command, so a local run is that same tail. */
+    const char *const *cmd = remote;
+    if (!host) {
+        while (*++cmd)
+            ;
+        ++cmd;
+    }
+
+    size_t len = 0;
+    char *output = spawn_capture_stdout(cmd, VERTEX_TOKEN_MAX_BYTES, timeout_ms, &len);
+    if (!output)
+        return NULL;
+    while (len > 0 && isspace((unsigned char)output[len - 1]))
+        output[--len] = '\0';
+    if (len == 0) {
+        free(output);
+        return NULL;
+    }
+    return output;
+}
+
 static int vertex_refresh_gcloud(struct vertex_auth_state *state)
 {
-    FILE *fp = popen("gcloud auth print-access-token 2>/dev/null", "r");
-    if (!fp)
-        return -1;
-    char buffer[512];
-    size_t n = fread(buffer, 1, sizeof(buffer) - 1, fp);
-    pclose(fp);
-    if (n == 0)
-        return -1;
-    buffer[n] = '\0';
-    /* Trim trailing whitespace. */
-    while (n > 0 && (buffer[n - 1] == '\n' || buffer[n - 1] == '\r' || buffer[n - 1] == ' '))
-        buffer[--n] = '\0';
-    if (n == 0)
+    char *token = vertex_gcloud_token(state->gcloud_host, VERTEX_GCLOUD_TIMEOUT_MS);
+    if (!token)
         return -1;
     free(state->token);
-    state->token = xstrdup(buffer);
+    state->token = token;
     state->expiry = time(NULL) + 3000;
     return 0;
 }
@@ -260,6 +307,9 @@ static int vertex_auth_refresh(struct vertex_auth_state *state)
         return state->token ? 0 : -1;
     if (state->token && time(NULL) < state->expiry)
         return 0;
+    /* A configured host owns the credentials, so the local ones do not apply. */
+    if (state->gcloud_host)
+        return vertex_refresh_gcloud(state) == 0 ? 0 : -1;
     if (state->client_id && state->refresh_token) {
         if (vertex_refresh_authorized_user(state) == 0)
             return 0;
@@ -312,7 +362,16 @@ static int vertex_auth_recover(void *auth, int *retried, http_tick_cb tick, void
 
 static char *vertex_auth_unauthorized_message(void *auth)
 {
-    (void)auth;
+    struct vertex_auth_state *state = auth;
+    if (state->gcloud_host) {
+        if (state->token)
+            return xasprintf("Vertex AI authentication failed (the token from gcloud on '%s' was "
+                             "rejected)",
+                             state->gcloud_host);
+        return xasprintf("Vertex AI authentication failed (no token from gcloud on '%s', check "
+                         "SSH access)",
+                         state->gcloud_host);
+    }
     return xstrdup(
         "Vertex AI authentication failed (set HAX_VERTEX_API_KEY or configure gcloud ADC)");
 }
@@ -325,6 +384,7 @@ static void vertex_auth_destroy(void *auth)
     free(state->client_secret);
     free(state->refresh_token);
     free(state->adc_type);
+    free(state->gcloud_host);
     free(state);
 }
 
@@ -350,7 +410,13 @@ int vertex_auth_source(const struct provider_def *def, struct http_auth_source *
         state->static_token = 1;
         state->token = xstrdup(api_key);
     } else {
-        vertex_load_adc(state);
+        const char *host = vertex_gcloud_host();
+        if (host) {
+            /* The credentials live on the other machine, so the local ones do not apply. */
+            state->gcloud_host = xstrdup(host);
+        } else {
+            vertex_load_adc(state);
+        }
     }
     free(prefix);
 
@@ -406,6 +472,18 @@ void vertex_prepare_availability(const struct provider_def *def, struct provider
         out->available = 1;
         return;
     }
+
+    const char *host = vertex_gcloud_host();
+    if (host) {
+        /* The credentials live on the other machine; the local files say nothing about them. */
+        int has_gcloud = vertex_gcloud_token(host, VERTEX_GCLOUD_PROBE_TIMEOUT_MS) != NULL;
+        free(base_url);
+        out->available = has_gcloud;
+        if (!has_gcloud)
+            out->reason = xasprintf("no token from gcloud on '%s' (check SSH access)", host);
+        return;
+    }
+
     /* Check ADC or gcloud. */
     const char *home = getenv("HOME");
     char *adc_path =
@@ -421,7 +499,7 @@ void vertex_prepare_availability(const struct provider_def *def, struct provider
             has_adc = 1;
     }
 
-    int has_gcloud = (system("gcloud auth print-access-token >/dev/null 2>&1") == 0);
+    int has_gcloud = vertex_gcloud_token(NULL, VERTEX_GCLOUD_PROBE_TIMEOUT_MS) != NULL;
 
     free(base_url);
     if (has_adc || has_gcloud) {

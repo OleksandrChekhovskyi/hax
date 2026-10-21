@@ -241,6 +241,9 @@ static const struct config_setting REGISTRY[] = {
      .description = "Bearer token for Vertex AI (otherwise uses gcloud application default credentials)"},
     {.key = "providers.vertex-ai.display_name", .env_var = "HAX_VERTEX_DISPLAY_NAME",
      .description = "Display name for the provider in the banner and picker"},
+    {.key = "providers.vertex-ai.gcloud_host", .env_var = "HAX_VERTEX_GCLOUD_HOST",
+     .description = "SSH host holding the gcloud credentials; hax asks it for the token instead "
+                    "of running gcloud locally"},
     {.key = "providers.vertex-ai.quota_tokens", .env_var = "HAX_VERTEX_QUOTA_TOKENS",
      .description = "Local monthly token quota for Vertex AI usage tracking", .kind = CONFIG_KIND_TOKENS},
     {.key = "providers.vertex-ai.quota_cost", .env_var = "HAX_VERTEX_QUOTA_COST",

@@ -31,6 +31,9 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   project's sessions, beside the quota consumption of the project.
 - The `vertex-ai` `/usage` report estimates the token total from the spend so far when no token cap
   is set.
+- The `vertex-ai` provider can take its credentials from another machine: set
+  `providers.vertex-ai.gcloud_host` (or `HAX_VERTEX_GCLOUD_HOST`) and hax asks that host for the
+  token over SSH instead of running gcloud locally.
 
 ## [0.6.1] - 2026-10-15
 

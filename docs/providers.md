@@ -287,6 +287,16 @@ static bearer token. Model ids may omit the `google/` publisher prefix, which ha
 automatically. The `/model` picker is unavailable because Vertex does not expose a model list;
 choose a model with `--model` or `HAX_MODEL`.
 
+When the gcloud credentials live on another machine, point hax at the host that holds them:
+
+```sh
+export HAX_VERTEX_GCLOUD_HOST=gcp-host
+```
+
+hax then asks that host for the token over SSH (`ssh gcp-host gcloud auth print-access-token`)
+instead of running gcloud here, and the local credentials are not used. The host needs a key-based
+SSH login: hax never asks for a password, so a login that prompts fails instead of hanging.
+
 On `vertex-ai`, `/usage` reports the project's Vertex AI quota consumption from the
 Cloud Monitoring API.
 
