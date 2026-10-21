@@ -81,7 +81,7 @@ static char *vertex_setting(const char *key)
 }
 
 /* The project the calls bill and belong to. */
-static char *vertex_project_id(void)
+char *vertex_project_id(void)
 {
     char *project = vertex_setting("project");
     if (!project) {
@@ -125,6 +125,39 @@ static char *vertex_api_host(const char *location)
     if (strcmp(location, "global") == 0)
         return xstrdup("aiplatform.googleapis.com");
     return xasprintf("%s-aiplatform.googleapis.com", location);
+}
+
+/* The scheme, host, and port of a base URL, without its path. */
+static char *vertex_origin_of(const char *base_url)
+{
+    const char *scheme_end = strstr(base_url, "://");
+    if (!scheme_end)
+        return NULL;
+    const char *host = scheme_end + 3;
+    const char *slash = strchr(host, '/');
+    int host_len = slash ? (int)(slash - host) : (int)strlen(host);
+    /* The scheme and its separator are part of the origin. */
+    int scheme_len = (int)(scheme_end - base_url) + 3;
+    return xasprintf("%.*s%.*s", scheme_len, base_url, host_len, host);
+}
+
+char *vertex_api_origin(void)
+{
+    char *override = vertex_setting("base_url");
+    if (override) {
+        char *trimmed = url_trim_trailing_slashes(override);
+        free(override);
+        char *origin = vertex_origin_of(trimmed);
+        free(trimmed);
+        return origin;
+    }
+
+    char *location = vertex_location();
+    char *host = vertex_api_host(location);
+    char *origin = xasprintf("https://%s", host);
+    free(host);
+    free(location);
+    return origin;
 }
 
 static char *vertex_base_url(void)
@@ -440,7 +473,9 @@ struct provider *vertex_provider_new(const struct provider_def *def)
     if (!provider)
         return NULL;
 
-    provider->list_models = NULL;
+    /* The OpenAI-compatible surface serves no model metadata either, so the generic probe
+     * would only ask a path that does not exist: the catalog supplies the metadata. */
+    provider->probe_model = NULL;
     return provider;
 }
 

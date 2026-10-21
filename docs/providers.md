@@ -284,8 +284,18 @@ hax --provider=vertex-ai --model=gemini-2.5-flash
 
 Authentication uses application default credentials by default; set `HAX_VERTEX_API_KEY` for a
 static bearer token. Model ids may omit the `google/` publisher prefix, which hax adds
-automatically. The `/model` picker is unavailable because Vertex does not expose a model list;
-choose a model with `--model` or `HAX_MODEL`.
+automatically.
+
+The `/model` picker lists the Gemini chat models of the project's Model Garden. Vertex's
+OpenAI-compatible endpoint serves no model list, so hax asks the native publisher API
+(`/v1beta1/publishers/google/models`) instead. Models from other families (embeddings, live
+sessions, text-to-speech, transcription) and the experimental and private-preview stages, which
+few projects can call, are left out; name one with `--model` or `HAX_MODEL` to use it anyway.
+
+That publisher API names no project in its path, so hax sends the project as the request's
+quota project. Without it, Google refuses the call with "the aiplatform.googleapis.com API
+requires a quota project" (the usual reason being a token from `gcloud auth print-access-token`
+on a machine with no active project).
 
 When the gcloud credentials live on another machine, point hax at the host that holds them:
 

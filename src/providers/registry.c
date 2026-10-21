@@ -22,6 +22,7 @@
 #include "providers/opencode.h"
 #include "providers/openrouter.h"
 #include "providers/vertex.h"
+#include "providers/vertex_models.h"
 
 /* The OpenCode gateway pins a conversation to one upstream by its session header — Go rejects
  * requests without one — and attributes usage by client. */
@@ -194,6 +195,7 @@ static const struct provider_def DEFS[] = {
         .prepare_availability = vertex_prepare_availability,
         .rewrite_model = vertex_rewrite_model,
         .query_usage = vertex_query_usage,
+        .list_models = vertex_list_models,
     },
     {
         .id = "mock",

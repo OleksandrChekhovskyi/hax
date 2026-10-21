@@ -20,6 +20,13 @@ int vertex_auth_source(const struct provider_def *def, struct http_auth_source *
 /* Rewrite a bare Gemini model id to its publisher-prefixed form. */
 char *vertex_rewrite_model(const char *model);
 
+/* The scheme, host, and port of the configured Vertex endpoint. The native publisher API lives
+ * on it, not on the OpenAI-compatible path. */
+char *vertex_api_origin(void);
+
+/* The project the calls belong to. */
+char *vertex_project_id(void);
+
 /* /usage backend: Cloud Monitoring quota usage for the project. */
 int vertex_query_usage(struct provider *provider);
 

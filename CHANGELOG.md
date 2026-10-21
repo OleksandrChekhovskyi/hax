@@ -14,6 +14,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   `HAX_VERTEX_API_KEY` for a static bearer token, and reads the project from `VERTEXAI_PROJECT`
   and the location from `VERTEXAI_LOCATION`. Model ids may omit the `google/` publisher prefix,
   which hax adds.
+- The `vertex-ai` provider can list models: `/model` offers the Gemini chat models of the
+  project's Model Garden, read from Vertex's native publisher API.
 
 ### Changed
 

@@ -134,6 +134,7 @@ sources = files(
     'src/providers/usage_fetch.c',
     'src/providers/usage_render.c',
     'src/providers/vertex.c',
+    'src/providers/vertex_models.c',
     'src/providers/wire.c',
 
     'src/render/ctrl_strip.c',
