@@ -63,4 +63,8 @@ int compact_over_threshold(long context_tokens, long context_limit, int threshol
 /* Apply compact.auto and compact.threshold to the latest context usage. */
 int compact_should_auto(long context_tokens, long context_limit);
 
+/* Whether a provider error reports that the request exceeded the model's context capacity. The
+ * wording comes from the provider, so the match is on the phrases such errors carry. */
+int compact_error_is_overflow(const char *message);
+
 #endif /* HAX_COMPACT_H */

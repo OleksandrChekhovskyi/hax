@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "compact.h"
 
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -62,6 +63,50 @@ static const char COMPACT_SEED_PREAMBLE[] =
     "below captures everything that happened before this point — treat it as established "
     "context and continue the work from here.";
 
+/* The wordings providers use for a request the model cannot take. A request over the limit is
+ * rejected outright, so the phrase is what tells hax to summarize instead of failing. */
+static const char *const OVERFLOW_PHRASES[] = {
+    "context length exceeded",
+    "context_length_exceeded",
+    "maximum context length",
+    "context window exceeded",
+    "exceeds the context window",
+    "context size exceeded",
+    "exceeds the available context size",
+    "prompt is too long",
+    "input is too long",
+    "too many tokens",
+    "exceeds the maximum number of tokens",
+    "reduce the length of the messages",
+    NULL,
+};
+
+static int contains_fold(const char *haystack, const char *needle)
+{
+    size_t needle_len = strlen(needle);
+
+    for (const char *cursor = haystack; *cursor; cursor++) {
+        size_t i = 0;
+        while (i < needle_len && cursor[i] &&
+               tolower((unsigned char)cursor[i]) == tolower((unsigned char)needle[i]))
+            i++;
+        if (i == needle_len)
+            return 1;
+    }
+    return 0;
+}
+
+int compact_error_is_overflow(const char *message)
+{
+    if (!message || !*message)
+        return 0;
+
+    for (size_t i = 0; OVERFLOW_PHRASES[i]; i++)
+        if (contains_fold(message, OVERFLOW_PHRASES[i]))
+            return 1;
+    return 0;
+}
+
 int compact_auto_enabled(void)
 {
     return config_bool("compact.auto");
@@ -106,6 +151,8 @@ struct compact_sink {
     struct attempt_log attempt_log;
     const struct compact_hooks *hooks;
     char *error_message;
+    /* The last attempt was rejected for size, so a smaller request may still fit. */
+    int overflow;
 };
 
 struct summary_request {
@@ -113,7 +160,8 @@ struct summary_request {
     struct item *items;
     size_t count;
     size_t capacity;
-    size_t borrowed_count;
+    /* Items before this index copy borrowed items; the ones from it on own their fields. */
+    size_t owned_from;
 };
 
 static int compact_sink_on_event(const struct stream_event *event, void *user)
@@ -129,6 +177,8 @@ static int compact_sink_on_event(const struct stream_event *event, void *user)
         if (!sink->error_message)
             sink->error_message =
                 xstrdup(event->u.error.message ? event->u.error.message : "stream failed");
+        if (compact_error_is_overflow(event->u.error.message))
+            sink->overflow = 1;
         usage = event->u.error.usage;
         response = event->u.error.response;
     } else if (event->kind == EV_RETRY) {
@@ -152,21 +202,29 @@ static void summary_request_append(struct summary_request *request, struct item 
     request->items[request->count++] = item;
 }
 
+/* `carried` is the item standing in for an already-summarized older prefix, or NULL. The caller
+ * owns it and keeps it alive for the request; `items` are borrowed from the session. */
 static void summary_request_init(struct summary_request *request,
-                                 const struct compact_params *params)
+                                 const struct compact_params *params, const struct item *carried,
+                                 const struct item *items, size_t n_items)
 {
     memset(request, 0, sizeof(*request));
     request->base_context = agent_session_context(params->session);
     request->base_context.image_input =
         model_meta_image_input(params->provider, params->session->model);
     request->base_context.session_id = session_log_id(params->session_log);
-    request->borrowed_count = request->base_context.n_items;
-    request->capacity = request->borrowed_count + 1;
+    request->capacity = (carried ? 1 : 0) + n_items + 1;
     request->items = xmalloc(request->capacity * sizeof(*request->items));
-    if (request->borrowed_count > 0)
-        memcpy(request->items, request->base_context.items,
-               request->borrowed_count * sizeof(*request->items));
-    request->count = request->borrowed_count;
+
+    size_t count = 0;
+    if (carried)
+        request->items[count++] = *carried;
+    if (n_items) {
+        memcpy(request->items + count, items, n_items * sizeof(*request->items));
+        count += n_items;
+    }
+    request->count = count;
+    request->owned_from = count;
     summary_request_append(request, (struct item){
                                         .kind = ITEM_USER_MESSAGE,
                                         .text = build_summary_prompt(params->instructions),
@@ -175,7 +233,7 @@ static void summary_request_init(struct summary_request *request,
 
 static void summary_request_destroy(struct summary_request *request)
 {
-    for (size_t i = request->borrowed_count; i < request->count; i++)
+    for (size_t i = request->owned_from; i < request->count; i++)
         item_free(&request->items[i]);
     free(request->items);
 }
@@ -231,20 +289,30 @@ static void append_rejected_response(struct summary_request *request, struct ite
     }
 }
 
+/* The provider requests one compaction may spend. A history too large for the model is
+ * summarized in pieces, and the pieces must not become an unbounded series of requests. */
+#define COMPACT_MAX_REQUESTS 16
+
 static char *generate_summary(const struct compact_params *params, struct compact_sink *sink,
+                              const struct item *items, size_t n_items, const struct item *carried,
                               int *attempt_count)
 {
     struct summary_request request;
-    summary_request_init(&request, params);
+    summary_request_init(&request, params, carried, items, n_items);
     char *summary = NULL;
+    /* Each chunk starts from an empty assembly: the previous one left a terminal state behind. */
+    turn_reset(&sink->turn);
 
     /* Advertising the normal tools preserves the provider's cached request prefix. Calls are
      * rejected rather than executed because compaction must not mutate task state. */
     for (int attempt = 0; attempt < COMPACT_MAX_ATTEMPTS; attempt++) {
+        if (*attempt_count >= COMPACT_MAX_REQUESTS)
+            break;
         struct context context = request.base_context;
         context.items = request.items;
         context.n_items = request.count;
         (*attempt_count)++;
+        sink->overflow = 0;
         params->provider->stream(params->provider, &context, params->session->model,
                                  compact_sink_on_event, sink, params->hooks.tick,
                                  params->hooks.user);
@@ -270,6 +338,73 @@ static char *generate_summary(const struct compact_params *params, struct compac
 
     summary_request_destroy(&request);
     return summary;
+}
+
+/* The split lands where a turn starts, so both halves hold whole turns and neither carries a
+ * tool call away from its result. */
+static int is_turn_start(const struct item *item)
+{
+    return item->kind == ITEM_TURN_BOUNDARY || item->kind == ITEM_USER_MESSAGE;
+}
+
+/* The index where the range splits, closest to its middle. Zero when the range has no turn
+ * boundary to split at. */
+static size_t split_index(const struct item *items, size_t n_items)
+{
+    size_t middle = n_items / 2;
+    size_t best = 0;
+    size_t best_distance = 0;
+
+    for (size_t i = 1; i < n_items; i++) {
+        if (!is_turn_start(&items[i]))
+            continue;
+        size_t distance = i > middle ? i - middle : middle - i;
+        if (!best || distance < best_distance) {
+            best = i;
+            best_distance = distance;
+        }
+    }
+    return best;
+}
+
+/* Summarize the range, with `carried` standing in for an already-summarized older prefix. When
+ * the model rejects the request for size, the range splits: the older part is summarized first
+ * and its summary then stands in for that part, so every request stays within the model's
+ * capacity and the result still covers the whole range. */
+static char *summarize_range(const struct compact_params *params, struct compact_sink *sink,
+                             const struct item *items, size_t n_items, const char *carried,
+                             int *attempt_count)
+{
+    if (*attempt_count >= COMPACT_MAX_REQUESTS)
+        return NULL;
+
+    struct item carried_item = {0};
+    if (carried) {
+        carried_item.kind = ITEM_USER_MESSAGE;
+        carried_item.text = build_summary_seed(carried);
+        carried_item.origin = ITEM_ORIGIN_COMPACT_SEED;
+    }
+
+    char *summary = generate_summary(params, sink, items, n_items, carried ? &carried_item : NULL,
+                                     attempt_count);
+    item_free(&carried_item);
+    if (summary)
+        return summary;
+    if (!sink->overflow)
+        return NULL;
+
+    size_t split = split_index(items, n_items);
+    if (split == 0 || split >= n_items)
+        return NULL;
+
+    char *older = summarize_range(params, sink, items, split, carried, attempt_count);
+    if (!older)
+        return NULL;
+
+    char *result =
+        summarize_range(params, sink, items + split, n_items - split, older, attempt_count);
+    free(older);
+    return result;
 }
 
 /* The boundary prevents the seed from rendering as part of the preceding assistant turn. */
@@ -329,7 +464,9 @@ void compact_run(const struct compact_params *params, struct compact_result *res
     struct compact_sink sink = {.hooks = &params->hooks};
     turn_init(&sink.turn);
     attempt_log_init(&sink.attempt_log);
-    char *summary = generate_summary(params, &sink, &result->attempts);
+    struct context window = agent_session_context(params->session);
+    char *summary =
+        summarize_range(params, &sink, window.items, window.n_items, NULL, &result->attempts);
     int cancelled = params->hooks.is_cancelled && params->hooks.is_cancelled(params->hooks.user);
     if (cancelled) {
         free(summary);

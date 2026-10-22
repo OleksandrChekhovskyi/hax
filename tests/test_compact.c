@@ -63,6 +63,9 @@ enum mock_script {
     MOCK_INCOMPLETE,
     MOCK_STREAM_RETRY,
     MOCK_STREAM_RETRY_INCOMPLETE,
+    /* Rejects requests that carry more than `overflow_above` items, the way a model refuses a
+     * prompt over its context window. */
+    MOCK_OVERFLOW_WHEN_LARGE,
 };
 
 struct mock_state {
@@ -71,6 +74,12 @@ struct mock_state {
     int cancel_requested;
     int observed_events;
     size_t last_request_items;
+    /* MOCK_OVERFLOW_WHEN_LARGE: the request size the model refuses. */
+    size_t overflow_above;
+    /* The largest request the model accepted. */
+    size_t largest_accepted;
+    /* The requests that carried a summary of an already-summarized prefix. */
+    int carried_requests;
 };
 
 static struct mock_state mock;
@@ -142,6 +151,19 @@ static int mock_stream(struct provider *provider, const struct context *ctx, con
     mock.last_request_items = ctx->n_items;
     mock.stream_calls++;
 
+    if (ctx->n_items > 0 && ctx->items[0].origin == ITEM_ORIGIN_COMPACT_SEED)
+        mock.carried_requests++;
+
+    if (mock.script == MOCK_OVERFLOW_WHEN_LARGE && ctx->n_items > mock.overflow_above) {
+        emit_error(cb, user,
+                   "HTTP 400: This model's maximum context length is 8192 tokens. Please reduce "
+                   "the length of the messages.",
+                   NULL);
+        return 0;
+    }
+    if (ctx->n_items > mock.largest_accepted)
+        mock.largest_accepted = ctx->n_items;
+
     if ((mock.script == MOCK_RETRY_ONCE && mock.stream_calls == 1) ||
         mock.script == MOCK_ALWAYS_TOOL_CALL) {
         emit_text(cb, user, "I'll inspect the files");
@@ -162,8 +184,11 @@ static int mock_stream(struct provider *provider, const struct context *ctx, con
         if (mock.script == MOCK_STREAM_RETRY_INCOMPLETE)
             return 0;
     }
-    if (mock.script != MOCK_NO_SUMMARY)
-        emit_text(cb, user, "## Goal\n- continue");
+    if (mock.script != MOCK_NO_SUMMARY) {
+        char *summary = xasprintf("## Goal\n- continue (summary %d)", mock.stream_calls);
+        emit_text(cb, user, summary);
+        free(summary);
+    }
     if (mock.script == MOCK_INCOMPLETE)
         return 0;
     emit_done(cb, user, mock.stream_calls == 1 ? 100 : 200);
@@ -499,6 +524,90 @@ static void test_discards_cancelled_summary(void)
     agent_session_free(&session);
 }
 
+static void test_detects_overflow_errors(void)
+{
+    EXPECT(compact_error_is_overflow("HTTP 400: This model's maximum context length is 8192 "
+                                     "tokens."));
+    EXPECT(compact_error_is_overflow("HTTP 400: prompt is too long: 234858 tokens > 200000 "
+                                     "maximum"));
+    EXPECT(compact_error_is_overflow("the request exceeds the available context size"));
+    EXPECT(compact_error_is_overflow("Context length exceeded"));
+    EXPECT(compact_error_is_overflow("context_length_exceeded"));
+    EXPECT(compact_error_is_overflow("The input token count (2000) exceeds the maximum number of "
+                                     "tokens allowed (1024)."));
+
+    EXPECT(!compact_error_is_overflow(NULL));
+    EXPECT(!compact_error_is_overflow(""));
+    EXPECT(!compact_error_is_overflow("HTTP 401: invalid api key"));
+    EXPECT(!compact_error_is_overflow("HTTP 500: the model is overloaded"));
+}
+
+/* One turn is a boundary, a prompt, and the answer it got. */
+static void add_turn(struct agent_session *session, const char *prompt, const char *answer)
+{
+    agent_session_add_user(session, prompt);
+    agent_session_append(session,
+                         (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup(answer)});
+}
+
+/* A history too large for the model is summarized in pieces: the older part first, its summary
+ * carried into the request for the newer part, so every request the model accepts fits. */
+static void test_splits_a_history_the_model_cannot_take(void)
+{
+    struct agent_session session;
+    memset(&session, 0, sizeof(session));
+    session.model = xstrdup("model");
+    session.provider_id = "test";
+    for (int i = 0; i < 6; i++) {
+        char prompt[32];
+        char answer[32];
+        snprintf(prompt, sizeof(prompt), "prompt %d", i);
+        snprintf(answer, sizeof(answer), "answer %d", i);
+        add_turn(&session, prompt, answer);
+    }
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_OVERFLOW_WHEN_LARGE);
+    mock.overflow_above = 7;
+
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    EXPECT(result.outcome == COMPACT_COMPLETE);
+    /* The whole history did not fit, so it took more than one request. */
+    EXPECT(mock.stream_calls > 1);
+    /* Every request the model accepted stayed within its capacity. */
+    EXPECT(mock.largest_accepted <= mock.overflow_above);
+    /* The pieces were carried forward as a summary of the already-summarized prefix. */
+    EXPECT(mock.carried_requests > 0);
+
+    /* The seed replaces the whole window the model could not take. */
+    struct context window = agent_session_context(&session);
+    EXPECT(window.n_items == 2);
+    EXPECT(window.items[0].origin == ITEM_ORIGIN_COMPACT_SEED);
+
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+/* A history that cannot be split — no turn to split at — fails instead of sending a request the
+ * model would reject again. */
+static void test_reports_an_unsplittable_history(void)
+{
+    struct agent_session session;
+    init_session(&session);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_OVERFLOW_WHEN_LARGE);
+    mock.overflow_above = 1;
+
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    EXPECT(result.outcome == COMPACT_PROVIDER_ERROR);
+    EXPECT(mock.stream_calls == 1);
+    EXPECT_STR_EQ(result.error_message,
+                  "HTTP 400: This model's maximum context length is 8192 tokens. Please reduce the "
+                  "length of the messages.");
+
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
 int main(void)
 {
     /* Outside any repository, so recorded sessions neither run git nor depend on the checkout. */
@@ -517,5 +626,8 @@ int main(void)
     test_rejects_empty_summary();
     test_rejects_incomplete_response();
     test_discards_cancelled_summary();
+    test_detects_overflow_errors();
+    test_splits_a_history_the_model_cannot_take();
+    test_reports_an_unsplittable_history();
     T_REPORT();
 }
