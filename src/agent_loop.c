@@ -277,6 +277,8 @@ static void loop_run_active(const struct agent_loop_params *params,
      * returns from its branch below. */
     result->outcome = AGENT_LOOP_MAX_TURNS;
     result->last_context_tokens = -1;
+    /* One recovery per user turn: a second refusal means the compaction did not free enough. */
+    int overflow_recovery = 1;
 
     for (int turn_n = 0; params->max_turns <= 0 || turn_n < params->max_turns; turn_n++) {
         /* The first boundary arrived with the user message — except on a continued run, whose
@@ -335,9 +337,35 @@ static void loop_run_active(const struct agent_loop_params *params,
             result->abort_marker_placed = abort.marker_placed;
             result->error_message =
                 loop_turn.error_message ? xstrdup(loop_turn.error_message) : NULL;
+            /* The model refused the request for size: a compacted history answers it, so
+             * summarize and re-issue rather than fail the turn. */
+            int overflow = compact_error_is_overflow(loop_turn.error_message);
             loop_add_usage(params, &loop_turn, 1);
             loop_flush(params);
             agent_loop_turn_destroy(&loop_turn);
+            if (overflow && overflow_recovery && hooks->compact && compact_auto_enabled()) {
+                int compacted = hooks->compact(hooks->user);
+                int after_compact = loop_checkpoint(hooks);
+                if (after_compact == AGENT_LOOP_SIG_ABORT) {
+                    agent_session_mark_interrupt(session);
+                    loop_flush(params);
+                    result->outcome = AGENT_LOOP_INTERRUPTED;
+                    result->abort_marker_placed = 1;
+                    return;
+                }
+                if (after_compact == AGENT_LOOP_SIG_PAUSE) {
+                    result->outcome = AGENT_LOOP_PAUSED;
+                    return;
+                }
+                if (compacted) {
+                    overflow_recovery = 0;
+                    /* The retry re-issues the same turn, so it keeps the turn's boundary debt. */
+                    turn_n--;
+                    free(result->error_message);
+                    result->error_message = NULL;
+                    continue;
+                }
+            }
             result->outcome = AGENT_LOOP_PROVIDER_ERROR;
             return;
         }

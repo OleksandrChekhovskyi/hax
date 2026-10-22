@@ -263,6 +263,14 @@ window. Use `/compact` earlier when the conversation has accumulated obsolete ex
 optionally naming what the summary must preserve. Manual compaction works even when the model's
 context limit is unknown.
 
+When the model refuses a request because the conversation no longer fits its context window, hax
+compacts the history and sends the request again, so the turn continues instead of failing. The
+refusal is recognized from the provider's wording, so a provider that reports the overflow in
+another way needs a `/compact` by hand. A history too large to summarize in one request is
+summarized in pieces: the older part first, its summary standing in for it in the request for the
+newer part. Automatic compaction covers this recovery too, so `compact.auto=off` leaves the
+refusal to the user.
+
 For local servers, configure a context window large enough for the system prompt, project context,
 conversation, and response. A small server-side context often appears as truncated answers rather
 than a hax error; see the provider-specific notes in [providers.md](./providers.md).

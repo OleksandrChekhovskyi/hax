@@ -70,14 +70,16 @@ static int compact_context(struct oneshot_state *state)
     return completed;
 }
 
-static void auto_compact(void *user)
+static int auto_compact(void *user)
 {
     struct oneshot_state *state = user;
 
-    if (!compact_context(state) || state->json)
-        return;
+    int compacted = compact_context(state);
+    if (!compacted || state->json)
+        return compacted;
     int tty = isatty(fileno(stderr));
     fprintf(stderr, "%s[compacted context]%s\n", tty ? ANSI_DIM : "", tty ? ANSI_RESET : "");
+    return compacted;
 }
 
 /* The --json stream on stdout; docs/sessions.md is the record contract. On a write failure

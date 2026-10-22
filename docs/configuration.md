@@ -242,7 +242,7 @@ provider-dependent.
 | `theme` | `HAX_THEME` | `auto` | `auto`, `dark`, `light`, `ansi`, or `off`. |
 | `tint` | `HAX_TINT` | `teal` | Model-output tint: `teal`, `violet`, `rose`, or `sage`. |
 | `keep_awake` | `HAX_KEEP_AWAKE` | on | Best-effort idle-sleep inhibition while a turn runs. |
-| `compact.auto` | `HAX_COMPACT_AUTO` | on | Automatically summarize the conversation near the context limit. |
+| `compact.auto` | `HAX_COMPACT_AUTO` | on | Automatically summarize the conversation near the context limit, and after a request the model rejects for size. |
 | `compact.threshold` | `HAX_COMPACT_THRESHOLD` | `85` | Context percentage that triggers automatic compaction. |
 | `max_turns` | `HAX_MAX_TURNS` | `0` | Model round-trips per user turn before hax pauses (interactive) or aborts (one-shot). `0` is unlimited. |
 

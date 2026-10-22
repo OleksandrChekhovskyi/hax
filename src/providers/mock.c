@@ -29,6 +29,7 @@ struct mock_provider {
 
 enum script_result {
     SCRIPT_TURN_COMPLETE,
+    SCRIPT_TURN_FAILED,
     SCRIPT_EXHAUSTED,
     SCRIPT_ABORTED,
 };
@@ -292,6 +293,15 @@ static char *decode_escapes(const char *text)
     return decoded;
 }
 
+/* A directive's argument, with the escapes and the working-directory token resolved. */
+static char *decode_script_argument(const char *text)
+{
+    char *decoded = decode_escapes(text);
+    char *expanded = expand_cwd(decoded);
+    free(decoded);
+    return expanded;
+}
+
 static int emit_script_text(const char *text, enum delta_kind kind, long delay_ms,
                             stream_cb callback, void *callback_user, http_tick_cb tick,
                             void *tick_user)
@@ -299,9 +309,7 @@ static int emit_script_text(const char *text, enum delta_kind kind, long delay_m
     if (msleep(delay_ms, tick, tick_user))
         return -1;
 
-    char *decoded = decode_escapes(text);
-    char *expanded = expand_cwd(decoded);
-    free(decoded);
+    char *expanded = decode_script_argument(text);
     int rc = emit_chunked(callback, callback_user, expanded, delay_ms, tick, tick_user, kind);
     free(expanded);
     return rc;
@@ -384,6 +392,15 @@ static enum script_result play_script_turn(FILE *script, stream_cb callback, voi
                                   tick_user);
         } else if (match_directive(directive, "usage", &argument)) {
             usage = parse_usage(argument);
+        } else if (match_directive(directive, "error", &argument)) {
+            /* A refusal the provider would send instead of a response. */
+            char *message = decode_script_argument(argument);
+            struct stream_event event = {.kind = EV_ERROR,
+                                         .u.error = {.message = message, .http_status = 400}};
+            rc = callback(&event, callback_user);
+            free(message);
+            if (!rc)
+                return SCRIPT_TURN_FAILED;
         } else {
             fprintf(stderr, "hax mock: unknown directive: %s\n", line);
         }
