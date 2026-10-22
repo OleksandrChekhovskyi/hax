@@ -97,6 +97,10 @@ struct http_provider {
     size_t n_efforts;
     http_parse_model_cb parse_model;
     char *(*rewrite_model)(const char *model);
+    /* The dialect a model speaks when the endpoint serves more than one. */
+    const struct wire *(*wire_for_model)(const struct provider *provider, const char *model);
+    /* The request's base URL when the endpoint names the model in its path. */
+    char *(*request_base)(const struct provider *provider, const char *model);
 };
 
 /* `out` is always set: an unset value is auto, and an unrecognized one is auto with -1. */
@@ -203,7 +207,7 @@ static char **build_headers(const struct http_provider *provider, const struct w
 
     char *auth = NULL;
     char *version = NULL;
-    if (wire == &WIRE_ANTHROPIC_MESSAGES) {
+    if (wire->messages) {
         if (provider->api_key)
             auth = xasprintf("x-api-key: %s", provider->api_key);
         version = xasprintf("anthropic-version: %s", provider->version);
@@ -305,14 +309,21 @@ static char *stream_auth_error_message(void *ctx, long http_status, const char *
     return stream->provider->auth.ops->unauthorized_message(stream->provider->auth.state);
 }
 
-/* The wire `model` speaks: the first matching model_apis rule, else the catalog hint on a
- * catalog-routed provider, else the provider default. NULL means the catalog knows the model
- * needs a protocol hax does not implement; the caller reports it instead of guessing. */
+/* The wire `model` speaks: the first matching model_apis rule, else the provider's own answer,
+ * else the catalog hint on a catalog-routed provider, else the provider default. NULL means the
+ * catalog knows the model needs a protocol hax does not implement; the caller reports it instead
+ * of guessing. */
 static const struct wire *resolve_model_wire(struct http_provider *provider, const char *model)
 {
     for (size_t i = 0; i < provider->n_wire_rules; i++)
         if (fnmatch(provider->wire_rules[i].pattern, model, 0) == 0)
             return provider->wire_rules[i].wire;
+
+    if (provider->wire_for_model) {
+        const struct wire *wire = provider->wire_for_model(&provider->base, model);
+        if (wire)
+            return wire;
+    }
 
     if (provider->catalog_wires) {
         const char *provider_id = provider_stable_id(&provider->base);
@@ -355,7 +366,7 @@ resolve_model_reasoning_replay(const struct http_provider *provider, const char 
  * consults none. */
 static int request_reads_metadata(const struct http_provider *provider)
 {
-    return provider->catalog_wires || provider->n_wire_rules > 0 ||
+    return provider->catalog_wires || provider->n_wire_rules > 0 || provider->wire_for_model ||
            provider->wire != &WIRE_OPENAI_RESPONSES;
 }
 
@@ -414,7 +425,7 @@ static int http_provider_stream(struct provider *base, const struct context *con
         .cache_ttl = provider->cache_ttl,
     };
 
-    if (wire == &WIRE_ANTHROPIC_MESSAGES) {
+    if (wire->messages) {
         /* Messages endpoints cache only at explicit breakpoints, so only a configured off
          * omits them. */
         opts.cache_markers = config_scoped_bool_or(provider->config_prefix, "cache", 1);
@@ -438,10 +449,21 @@ static int http_provider_stream(struct provider *base, const struct context *con
     if (!body)
         return -1;
 
-    char *endpoint =
-        wire == provider->wire ? NULL : xasprintf("%s%s", provider->base_url, wire->path);
+    /* The endpoint of one request: the provider's own base, unless the model names itself in
+     * the path, in which case the provider answers with the base that carries the model. */
+    char *request_base = NULL;
+    if (provider->request_base)
+        request_base = provider->request_base(base, request_model);
+    char *endpoint = NULL;
+    if (request_base)
+        endpoint = xasprintf("%s%s", request_base, wire->path);
+    else if (wire != provider->wire)
+        endpoint = xasprintf("%s%s", provider->base_url, wire->path);
+    else
+        endpoint = xstrdup(provider->endpoint);
+    free(request_base);
     struct stream_retry request = {
-        .endpoint = endpoint ? endpoint : provider->endpoint,
+        .endpoint = endpoint,
         .body = body,
         .body_len = strlen(body),
         .ctx = &stream,
@@ -908,7 +930,7 @@ struct provider *http_provider_new(const struct provider_def *def)
     unsigned classes = wire == &WIRE_ANTHROPIC_MESSAGES ? PROVIDER_FIELD_ANTHROPIC
                        : wire == &WIRE_OPENAI_RESPONSES ? PROVIDER_FIELD_OPENAI_RESPONSES
                                                         : PROVIDER_FIELD_OPENAI_CHAT;
-    if (routes_wires)
+    if (routes_wires || def->wire_for_model)
         classes |= PROVIDER_FIELD_OPENAI | PROVIDER_FIELD_ANTHROPIC;
     if (!def->auth_source)
         classes |= PROVIDER_FIELD_KEYED | (def->pinned ? 0 : PROVIDER_FIELD_UNPINNED);
@@ -1034,6 +1056,8 @@ struct provider *http_provider_new(const struct provider_def *def)
     narrow_messages_efforts(provider);
     provider->parse_model = def->parse_model;
     provider->rewrite_model = def->rewrite_model;
+    provider->wire_for_model = def->wire_for_model;
+    provider->request_base = def->request_base;
 
     if (def->load_defaults)
         def->load_defaults(&provider->default_model, &provider->default_effort);

@@ -194,6 +194,8 @@ static const struct provider_def DEFS[] = {
         .construct = vertex_provider_new,
         .prepare_availability = vertex_prepare_availability,
         .rewrite_model = vertex_rewrite_model,
+        .wire_for_model = vertex_wire_for_model,
+        .request_base = vertex_request_base,
         .query_usage = vertex_query_usage,
         .list_models = vertex_list_models,
     },

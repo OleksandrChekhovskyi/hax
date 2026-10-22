@@ -16,6 +16,10 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   which hax adds.
 - The `vertex-ai` provider can list models: `/model` offers the Gemini chat models of the
   project's Model Garden, read from Vertex's native publisher API.
+- The `vertex-ai` provider lists Anthropic's Claude models too, and serves them: Vertex answers
+  Claude with the Anthropic Messages protocol on a path that names the model, so hax speaks that
+  protocol for a `claude-` model id and names the model the way Vertex does, with its version
+  (`claude-sonnet-4-6@default`).
 
 ### Changed
 

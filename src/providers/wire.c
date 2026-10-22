@@ -148,6 +148,7 @@ static const struct stream_usage *anthropic_usage(const union wire_events *event
 const struct wire WIRE_ANTHROPIC_MESSAGES = {
     .id = "anthropic-messages",
     .path = "/messages",
+    .messages = 1,
     .build_body = anthropic_build_body,
     .events_init = anthropic_init,
     .events_feed = anthropic_feed,

@@ -23,6 +23,7 @@
 #include "providers/provider_config.h"
 #include "providers/registry.h"
 #include "providers/usage_render.h"
+#include "providers/vertex_wire.h"
 #include "render/progress.h"
 #include "system/spawn.h"
 #include "terminal/ansi.h"
@@ -453,7 +454,81 @@ char *vertex_rewrite_model(const char *model)
 {
     if (!model || !*model || strchr(model, '/'))
         return NULL;
+    /* A Claude model keeps its bare id: the Anthropic endpoint names it in the path. */
+    if (vertex_model_is_anthropic(model))
+        return NULL;
     return xasprintf("google/%s", model);
+}
+
+/* The publishers whose chat models the catalog lists. Model Garden serves more publishers (the
+ * MaaS families of Llama, gpt-oss, Qwen, DeepSeek, GLM, and Kimi among them), but the catalog
+ * lists none of them, and their ids name their publisher already. */
+const struct vertex_publisher VERTEX_PUBLISHERS[] = {
+    {"google", "gemini-", 0},
+    {"anthropic", "claude-", 1},
+};
+const size_t VERTEX_N_PUBLISHERS = sizeof(VERTEX_PUBLISHERS) / sizeof(VERTEX_PUBLISHERS[0]);
+
+/* The publisher whose chat models the id names, or NULL when none claims it. */
+const struct vertex_publisher *vertex_publisher_for_id(const char *model)
+{
+    if (!model || !*model)
+        return NULL;
+    for (size_t i = 0; i < VERTEX_N_PUBLISHERS; i++) {
+        const char *prefix = VERTEX_PUBLISHERS[i].chat_prefix;
+        size_t len = strlen(prefix);
+        if (strncmp(model, prefix, len) == 0)
+            return &VERTEX_PUBLISHERS[i];
+    }
+    return NULL;
+}
+
+/* The model id without its publisher prefix. The Claude endpoint names the model alone, so a
+ * user who writes the publisher gets the same path. */
+static const char *vertex_bare_model(const char *model)
+{
+    if (strncmp(model, "anthropic/", strlen("anthropic/")) == 0)
+        return model + strlen("anthropic/");
+    return model;
+}
+
+int vertex_model_is_anthropic(const char *model)
+{
+    if (!model || !*model)
+        return 0;
+    const struct vertex_publisher *publisher = vertex_publisher_for_id(vertex_bare_model(model));
+    return publisher && strcmp(publisher->publisher, "anthropic") == 0;
+}
+
+const struct wire *vertex_wire_for_model(const struct provider *provider, const char *model)
+{
+    (void)provider;
+    /* The OpenAI-compatible endpoint serves no Claude model: Vertex speaks the Anthropic
+     * Messages dialect to those. */
+    if (vertex_model_is_anthropic(model))
+        return &WIRE_ANTHROPIC_MESSAGES_VERTEX;
+    return NULL;
+}
+
+char *vertex_request_base(const struct provider *provider, const char *model)
+{
+    (void)provider;
+    if (!vertex_model_is_anthropic(model))
+        return NULL;
+
+    char *origin = vertex_api_origin();
+    if (!origin)
+        return NULL;
+    char *project = vertex_project_id();
+    char *location = vertex_location();
+    char *base = NULL;
+    if (project && *project)
+        base = xasprintf("%s/v1/projects/%s/locations/%s/publishers/anthropic/models/%s", origin,
+                         project, location, vertex_bare_model(model));
+    free(origin);
+    free(project);
+    free(location);
+    return base;
 }
 
 struct provider *vertex_provider_new(const struct provider_def *def)

@@ -73,6 +73,11 @@ static void test_lists_chat_models(void)
                       "\"launchStage\":\"GA\"},"
                       "{\"name\":\"publishers/google/models/gemini-3-flash-preview\","
                       "\"launchStage\":\"PUBLIC_PREVIEW\"}]}");
+    loopback_reply_ok(&server, 1,
+                      "{\"publisherModels\":["
+                      "{\"name\":\"publishers/anthropic/models/claude-sonnet-4-6\","
+                      "\"versionId\":\"default\",\"launchStage\":\"GA\"}]}");
+    server.n_requests = 2;
 
     struct model_info *models = NULL;
     size_t n_models = 0;
@@ -82,18 +87,24 @@ static void test_lists_chat_models(void)
         T_SKIP("cannot run a loopback server here");
     EXPECT(result == 0);
     EXPECT(error == NULL);
-    EXPECT(n_models == 2);
-    if (n_models == 2) {
+    EXPECT(n_models == 3);
+    if (n_models == 3) {
         EXPECT_STR_EQ(models[0].id, "gemini-3.1-flash-lite");
         EXPECT(models[0].description == NULL);
         EXPECT_STR_EQ(models[1].id, "gemini-3-flash-preview");
         EXPECT_STR_EQ(models[1].description, "public preview");
+        /* A Claude model carries its version, the way its endpoint names it. */
+        EXPECT_STR_EQ(models[2].id, "claude-sonnet-4-6@default");
+        EXPECT(models[2].description == NULL);
     }
     EXPECT(strstr(server.requests[0], "GET /v1beta1/publishers/google/models ") != NULL ||
            strstr(server.requests[0], "GET /v1beta1/publishers/google/models\r\n") != NULL);
     EXPECT(strstr(server.requests[0], "Authorization: Bearer test-token\r\n") != NULL);
     /* The publisher API names no project in its path, so the request must name the quota one. */
     EXPECT(strstr(server.requests[0], "x-goog-user-project: test-project\r\n") != NULL);
+    /* Every publisher keeps its own catalog. */
+    EXPECT(strstr(server.requests[1], "GET /v1beta1/publishers/anthropic/models ") != NULL ||
+           strstr(server.requests[1], "GET /v1beta1/publishers/anthropic/models\r\n") != NULL);
     model_info_free(models, n_models);
     free(error);
 }
@@ -110,7 +121,8 @@ static void test_follows_the_next_page(void)
     loopback_reply_ok(&server, 1,
                       "{\"publisherModels\":["
                       "{\"name\":\"publishers/google/models/gemini-3.8-flash\"}]}");
-    server.n_requests = 2;
+    loopback_reply_ok(&server, 2, "{\"publisherModels\":[]}");
+    server.n_requests = 3;
 
     struct model_info *models = NULL;
     size_t n_models = 0;
@@ -151,11 +163,33 @@ static void test_skips_models_the_chat_surface_cannot_serve(void)
         &models, &n_models, &next_page_token, &error);
     EXPECT(result == 0);
     EXPECT(error == NULL);
-    EXPECT(n_models == 1);
-    if (n_models == 1)
+    EXPECT(n_models == 2);
+    if (n_models == 2) {
         EXPECT_STR_EQ(models[0].id, "gemini-3.1-flash-lite");
+        EXPECT_STR_EQ(models[1].id, "claude-opus-4-5");
+    }
     EXPECT(next_page_token == NULL);
     model_info_free(models, n_models);
+    free(next_page_token);
+    free(error);
+}
+
+/* A publisher hax does not serve leaves its models out. */
+static void test_skips_models_of_an_unserved_publisher(void)
+{
+    struct model_info *models = NULL;
+    size_t n_models = 0;
+    char *next_page_token = NULL;
+    char *error = NULL;
+    int result = vertex_parse_publisher_models(
+        "{\"publisherModels\":["
+        "{\"name\":\"publishers/mistralai/models/mistral-medium-3\",\"launchStage\":\"GA\"},"
+        "{\"name\":\"publishers/xai/models/grok-4.7\",\"launchStage\":\"GA\"}]}",
+        &models, &n_models, &next_page_token, &error);
+    EXPECT(result == 0);
+    EXPECT(error == NULL);
+    EXPECT(n_models == 0);
+    EXPECT(models == NULL);
     free(next_page_token);
     free(error);
 }
@@ -241,6 +275,7 @@ int main(void)
     test_lists_chat_models();
     test_follows_the_next_page();
     test_skips_models_the_chat_surface_cannot_serve();
+    test_skips_models_of_an_unserved_publisher();
     test_reports_a_page_without_models();
     test_reports_a_malformed_body();
     test_reports_an_empty_catalog();

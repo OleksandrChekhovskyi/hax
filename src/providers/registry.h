@@ -8,6 +8,7 @@
 #include "provider.h"
 
 struct http_auth_source; /* providers/http_provider.h */
+struct wire;             /* providers/wire.h */
 
 /* Provider definitions.
  *
@@ -107,6 +108,13 @@ struct provider_def {
     /* Optional: rewrite a model id before it is sent on the wire. Returns an owned string,
      * or NULL to keep the original. Metadata lookups still use the original id. */
     char *(*rewrite_model)(const char *model);
+    /* Optional: the dialect a model speaks, when the endpoint serves more than one (Vertex
+     * serves Gemini over OpenAI Chat Completions and Claude over the Anthropic Messages
+     * dialect). Returns NULL to keep the provider's default dialect. */
+    const struct wire *(*wire_for_model)(const struct provider *provider, const char *model);
+    /* Optional: the request's base URL, when the endpoint names the model in its path (the
+     * Claude endpoint does). Returns an owned base URL, or NULL to use the provider's base URL. */
+    char *(*request_base)(const struct provider *provider, const char *model);
 
     /* Prepare an immediate verdict or an owned GET request on the foreground thread. NULL uses
      * the generic data-driven check — or, with a construct override, immediate availability. */

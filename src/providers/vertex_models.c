@@ -16,34 +16,53 @@
 #define VERTEX_MODEL_PAGE_LIMIT 20
 #define VERTEX_MODEL_TIMEOUT_S  15
 
-/* Publisher models are named by their resource name; the chat surface takes the bare id. */
-#define VERTEX_MODEL_PREFIX "publishers/google/models/"
+/* A publisher model is named by its resource name; the chat surface takes the bare id. */
+#define VERTEX_MODEL_PREFIX "publishers/"
 
-/* Model Garden lists every family beside the chat models, and the OpenAI-compatible surface
- * serves the Gemini chat ones. The other families answer a different request shape: embeddings,
- * live sessions, and text-to-speech have no chat completion, and a transcription model refuses
- * one ("No multi-modal generation support in registered version"). */
+/* Model Garden lists every family beside the chat models. The other families answer a different
+ * request shape: embeddings, live sessions, and text-to-speech have no chat completion, and a
+ * transcription model refuses one ("No multi-modal generation support in registered version"). */
 static const char *const VERTEX_OTHER_FAMILIES[] = {
     "-embedding", "-tts", "-live", "-robotics", "-aqa", "-transcribe", NULL};
 
-/* The bare model id of a publisher entry, or NULL when the entry names something else. */
-static char *vertex_model_id(const json_t *entry)
+/* The publisher and the bare model id of a catalog entry, or zero when the entry names
+ * something else. */
+static int vertex_split_name(const json_t *entry, const struct vertex_publisher **publisher,
+                             const char **model_id)
 {
     const char *name = json_string_value(json_object_get(entry, "name"));
     if (!name)
-        return NULL;
-    size_t prefix_len = strlen(VERTEX_MODEL_PREFIX);
-    if (strncmp(name, VERTEX_MODEL_PREFIX, prefix_len) != 0)
-        return NULL;
-    const char *id = name + prefix_len;
-    return *id ? xstrdup(id) : NULL;
+        return 0;
+    if (strncmp(name, VERTEX_MODEL_PREFIX, strlen(VERTEX_MODEL_PREFIX)) != 0)
+        return 0;
+
+    const char *rest = name + strlen(VERTEX_MODEL_PREFIX);
+    const char *slash = strchr(rest, '/');
+    if (!slash)
+        return 0;
+    size_t publisher_len = (size_t)(slash - rest);
+    const char *after = slash + 1;
+    if (strncmp(after, "models/", strlen("models/")) != 0)
+        return 0;
+    const char *id = after + strlen("models/");
+    if (!*id)
+        return 0;
+
+    for (size_t i = 0; i < VERTEX_N_PUBLISHERS; i++) {
+        const struct vertex_publisher *candidate = &VERTEX_PUBLISHERS[i];
+        if (strlen(candidate->publisher) == publisher_len &&
+            strncmp(candidate->publisher, rest, publisher_len) == 0) {
+            *publisher = candidate;
+            *model_id = id;
+            return 1;
+        }
+    }
+    return 0;
 }
 
 /* Whether the chat surface can serve this model. */
 static int vertex_model_is_chat(const char *id, const char *stage)
 {
-    if (strncmp(id, "gemini-", 7) != 0)
-        return 0;
     for (size_t i = 0; VERTEX_OTHER_FAMILIES[i]; i++) {
         if (strstr(id, VERTEX_OTHER_FAMILIES[i]))
             return 0;
@@ -52,6 +71,16 @@ static int vertex_model_is_chat(const char *id, const char *stage)
     if (stage && (strcmp(stage, "EXPERIMENTAL") == 0 || strcmp(stage, "PRIVATE_PREVIEW") == 0))
         return 0;
     return 1;
+}
+
+/* The id a user names the model by. A publisher whose models carry a version names it in the
+ * id, the way the Claude endpoint does. */
+static char *vertex_model_name(const struct vertex_publisher *publisher, const char *id,
+                               const char *version)
+{
+    if (!publisher->versioned || !version || !*version)
+        return xstrdup(id);
+    return xasprintf("%s@%s", id, version);
 }
 
 /* A note for the picker: a preview model behaves differently from a released one. */
@@ -87,20 +116,23 @@ int vertex_parse_publisher_models(const char *body, struct model_info **models, 
     size_t n_entries = json_array_size(entries);
     for (size_t i = 0; i < n_entries; i++) {
         json_t *entry = json_array_get(entries, i);
-        char *id = vertex_model_id(entry);
-        if (!id)
+        const struct vertex_publisher *publisher = NULL;
+        const char *id = NULL;
+        if (!vertex_split_name(entry, &publisher, &id))
+            continue;
+        /* A publisher serves several families, and only some of them answer a chat request. */
+        if (strncmp(id, publisher->chat_prefix, strlen(publisher->chat_prefix)) != 0)
             continue;
         const char *stage = json_string_value(json_object_get(entry, "launchStage"));
-        if (!vertex_model_is_chat(id, stage)) {
-            free(id);
+        if (!vertex_model_is_chat(id, stage))
             continue;
-        }
+        const char *version = json_string_value(json_object_get(entry, "versionId"));
         if (n_available == capacity) {
             capacity = capacity ? capacity * 2 : (n_entries > 8 ? n_entries : 8);
             available = xrealloc(available, capacity * sizeof(*available));
         }
         model_info_init(&available[n_available]);
-        available[n_available].id = id;
+        available[n_available].id = vertex_model_name(publisher, id, version);
         available[n_available].description = vertex_stage_note(stage);
         n_available++;
     }
@@ -129,6 +161,65 @@ static char *vertex_list_error(const struct http_auth_source *auth, long status)
     if (status > 0)
         return xasprintf("listing Vertex AI models failed (HTTP %ld)", status);
     return xstrdup("could not reach the Vertex AI model list");
+}
+
+/* One publisher's models, page by page. The entries move into the collected list. */
+static int vertex_list_publisher(const char *origin, const char *publisher,
+                                 const struct http_auth_source *auth, char *const *headers,
+                                 struct model_info **available, size_t *n_available,
+                                 size_t *capacity, char **error, http_tick_cb tick, void *tick_user)
+{
+    char *page_token = NULL;
+    int result = 0;
+
+    for (int page_number = 0; page_number < VERTEX_MODEL_PAGE_LIMIT; page_number++) {
+        /* The service picks the page size; asking for one the catalog may not serve is a 400. */
+        char *encoded = page_token ? url_encode(page_token) : NULL;
+        char *url = encoded ? xasprintf("%s/v1beta1/publishers/%s/models?pageToken=%s", origin,
+                                        publisher, encoded)
+                            : xasprintf("%s/v1beta1/publishers/%s/models", origin, publisher);
+        free(encoded);
+
+        char *body = NULL;
+        long status = 0;
+        int request = http_get(url, (const char *const *)headers, VERTEX_MODEL_TIMEOUT_S, 0, tick,
+                               tick_user, &body, &status);
+        free(url);
+        if (request != 0) {
+            *error = vertex_list_error(auth, status);
+            result = -1;
+            break;
+        }
+
+        struct model_info *page_models = NULL;
+        size_t n_page_models = 0;
+        char *next_token = NULL;
+        if (vertex_parse_publisher_models(body, &page_models, &n_page_models, &next_token, error) !=
+            0) {
+            free(body);
+            result = -1;
+            break;
+        }
+        free(body);
+
+        /* The entries move into the collected list, so only their array is released here. */
+        for (size_t i = 0; i < n_page_models; i++) {
+            if (*n_available == *capacity) {
+                *capacity = *capacity ? *capacity * 2 : 32;
+                *available = xrealloc(*available, *capacity * sizeof(**available));
+            }
+            (*available)[(*n_available)++] = page_models[i];
+        }
+        free(page_models);
+
+        free(page_token);
+        page_token = next_token;
+        if (!page_token)
+            break;
+    }
+
+    free(page_token);
+    return result;
 }
 
 int vertex_list_models(struct provider *provider, struct model_info **models, size_t *n_models,
@@ -167,56 +258,18 @@ int vertex_list_models(struct provider *provider, struct model_info **models, si
     struct model_info *available = NULL;
     size_t n_available = 0;
     size_t capacity = 0;
-    char *page_token = NULL;
     int result = 0;
 
-    for (int page_number = 0; page_number < VERTEX_MODEL_PAGE_LIMIT; page_number++) {
-        /* The service picks the page size; asking for one the catalog may not serve is a 400. */
-        char *encoded = page_token ? url_encode(page_token) : NULL;
-        char *url =
-            encoded ? xasprintf("%s/v1beta1/publishers/google/models?pageToken=%s", origin, encoded)
-                    : xasprintf("%s/v1beta1/publishers/google/models", origin);
-        free(encoded);
-
-        char *body = NULL;
-        long status = 0;
-        int request = http_get(url, (const char *const *)headers, VERTEX_MODEL_TIMEOUT_S, 0, tick,
-                               tick_user, &body, &status);
-        free(url);
-        if (request != 0) {
-            *error = vertex_list_error(auth, status);
+    /* Each publisher keeps its own catalog: the Gemini models of one, the Claude models of
+     * another. */
+    for (size_t i = 0; i < VERTEX_N_PUBLISHERS; i++) {
+        if (vertex_list_publisher(origin, VERTEX_PUBLISHERS[i].publisher, auth, headers, &available,
+                                  &n_available, &capacity, error, tick, tick_user) != 0) {
             result = -1;
             break;
         }
-
-        struct model_info *page_models = NULL;
-        size_t n_page_models = 0;
-        char *next_token = NULL;
-        if (vertex_parse_publisher_models(body, &page_models, &n_page_models, &next_token, error) !=
-            0) {
-            free(body);
-            result = -1;
-            break;
-        }
-        free(body);
-
-        /* The entries move into the collected list, so only their array is released here. */
-        for (size_t i = 0; i < n_page_models; i++) {
-            if (n_available == capacity) {
-                capacity = capacity ? capacity * 2 : 32;
-                available = xrealloc(available, capacity * sizeof(*available));
-            }
-            available[n_available++] = page_models[i];
-        }
-        free(page_models);
-
-        free(page_token);
-        page_token = next_token;
-        if (!page_token)
-            break;
     }
 
-    free(page_token);
     string_array_free(headers);
     free(origin);
 
