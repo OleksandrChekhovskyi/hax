@@ -80,6 +80,8 @@ test_sources = [
     'providers/test_responses_body.c',
     'providers/test_responses_events.c',
     'providers/test_stream_retry.c',
+    'providers/test_vertex.c',
+    'providers/test_vertex_models.c',
     'providers/test_wire.c',
 
     'render/test_ctrl_strip.c',

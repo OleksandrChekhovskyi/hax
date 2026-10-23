@@ -22,6 +22,7 @@ keys in environment variables rather than command arguments or `config.json`.
 | `codex` | Existing ChatGPT/Codex subscription | Run `/login`. |
 | `openai` | Direct OpenAI API | `OPENAI_API_KEY`; choose a model. |
 | `anthropic` | Direct Anthropic API | `ANTHROPIC_API_KEY`; choose a model. |
+| `vertex-ai` | Google Cloud Vertex AI (Gemini) | `VERTEXAI_PROJECT`; uses application default credentials or `HAX_VERTEX_API_KEY`. |
 | `openrouter` | Many vendors through one API | `OPENROUTER_API_KEY`; choose a model. |
 | `opencode-zen` | Curated pay-as-you-go models | `OPENCODE_API_KEY`; choose a model. |
 | `opencode-go` | OpenCode's model subscription | `OPENCODE_API_KEY`; choose a model. |
@@ -270,6 +271,58 @@ thinking. Override `thinking_mode` or `cache` when an endpoint needs it.
 
 For a static endpoint you use regularly, prefer a named custom provider instead of repeatedly
 exporting the generic base URL.
+
+## Vertex AI
+
+`vertex-ai` uses Vertex AI's OpenAI-compatible endpoint for Gemini models:
+
+```sh
+export VERTEXAI_PROJECT=my-gcp-project
+export VERTEXAI_LOCATION=us-central1   # or global
+hax --provider=vertex-ai --model=gemini-2.5-flash
+```
+
+Authentication uses application default credentials by default; set `HAX_VERTEX_API_KEY` for a
+static bearer token. Model ids may omit the `google/` publisher prefix, which hax adds
+automatically.
+
+The `/model` picker lists the chat models of the project's Model Garden: the Gemini models of
+Google's publisher and the Claude models of Anthropic's. Vertex's OpenAI-compatible endpoint
+serves no model list, so hax asks the native publisher API
+(`/v1beta1/publishers/google/models` and `/v1beta1/publishers/anthropic/models`) instead. Models
+from other families (embeddings, live sessions, text-to-speech, transcription) and the
+experimental and private-preview stages, which few projects can call, are left out; name one with
+`--model` or `HAX_MODEL` to use it anyway.
+
+Claude does not travel over the OpenAI-compatible endpoint: Vertex serves it with the Anthropic
+Messages protocol, on a path that names the model and asks for the dialect's version in the
+body. hax speaks that protocol for a `claude-` model id, and names the model the way Vertex
+does, with its version (`claude-sonnet-4-6@default`). Which models a location serves differs:
+Claude answers in `us-east5` and `europe-west1`, not in `us-central1`, and the global endpoint
+serves it under a small per-minute token quota.
+
+Model Garden also serves third-party models that Vertex runs as a managed service (Llama,
+gpt-oss, Qwen, DeepSeek, GLM, and Kimi among them). The publisher catalog lists none of them, so
+`/model` leaves them out; name one with its publisher, as `openai/gpt-oss-120b-maas`, and hax
+sends it as it stands.
+
+That publisher API names no project in its path, so hax sends the project as the request's
+quota project. Without it, Google refuses the call with "the aiplatform.googleapis.com API
+requires a quota project" (the usual reason being a token from `gcloud auth print-access-token`
+on a machine with no active project).
+
+When the gcloud credentials live on another machine, point hax at the host that holds them:
+
+```sh
+export HAX_VERTEX_GCLOUD_HOST=gcp-host
+```
+
+hax then asks that host for the token over SSH (`ssh gcp-host gcloud auth print-access-token`)
+instead of running gcloud here, and the local credentials are not used. The host needs a key-based
+SSH login: hax never asks for a password, so a login that prompts fails instead of hanging.
+
+On `vertex-ai`, `/usage` reports the project's Vertex AI quota consumption from the
+Cloud Monitoring API.
 
 ## Custom providers
 

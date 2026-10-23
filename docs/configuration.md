@@ -377,5 +377,8 @@ When model metadata has no output limit, `max_tokens` falls back internally to 3
 | `providers.llamacpp.api_key` | `HAX_LLAMACPP_API_KEY` | — | Bearer token when llama-server uses `--api-key`. |
 | `providers.llamacpp.port` | `HAX_LLAMACPP_PORT` | `9931` | llama-server port when no base URL is set. |
 | `providers.mock.script` | `HAX_MOCK_SCRIPT` | — | Mock-provider script path. |
+| `providers.vertex-ai.project` | `VERTEXAI_PROJECT` | (none) | Google Cloud project that owns the Vertex AI models. |
+| `providers.vertex-ai.location` | `VERTEXAI_LOCATION` | `us-central1` | Vertex AI location (region) or `global`. |
+| `providers.vertex-ai.gcloud_host` | `HAX_VERTEX_GCLOUD_HOST` | (none) | SSH host holding the gcloud credentials; hax asks it for the Vertex AI token instead of running gcloud locally. |
 
 Custom provider blocks are documented in [providers.md](./providers.md#custom-providers).

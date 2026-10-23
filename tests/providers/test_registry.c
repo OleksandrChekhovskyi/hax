@@ -11,6 +11,7 @@
 #include "providers/http_provider.h"
 #include "providers/openrouter.h"
 #include "providers/registry.h"
+#include "providers/vertex_models.h"
 
 /* Position of `name` in provider_all() (the autoselect-priority order), or -1
  * when it isn't a selectable provider. */
@@ -259,6 +260,28 @@ static void test_port_template(void)
     EXPECT(config_load(NULL) == 0);
 }
 
+/* The Vertex listing comes from the native publisher API: its hook reaches the provider, and
+ * the generic probe stands down because the OpenAI-compatible surface serves no metadata. */
+static void test_vertex_listing_hook_reaches_provider(void)
+{
+    unsetenv("HAX_MODEL");
+    setenv("VERTEXAI_PROJECT", "test-project", 1);
+    setenv("HAX_VERTEX_API_KEY", "test-token", 1);
+    const struct provider_def *def = provider_find("vertex-ai");
+    EXPECT(def != NULL);
+    if (!def)
+        return;
+    struct provider *provider = provider_construct(def);
+    EXPECT(provider != NULL);
+    if (provider) {
+        EXPECT(provider->list_models == vertex_list_models);
+        EXPECT(provider->probe_model == NULL);
+        provider->destroy(provider);
+    }
+    unsetenv("VERTEXAI_PROJECT");
+    unsetenv("HAX_VERTEX_API_KEY");
+}
+
 int main(void)
 {
     test_default_is_highest_priority();
@@ -269,6 +292,7 @@ int main(void)
     test_former_id_canonicalized();
     test_display_name_resolution();
     test_def_hooks_reach_provider();
+    test_vertex_listing_hook_reaches_provider();
     test_port_template();
     test_pinned_def_ignores_compat_config();
     T_REPORT();

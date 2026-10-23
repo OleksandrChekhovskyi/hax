@@ -195,4 +195,15 @@ char *session_prompt_history_path(const char *cwd);
 void session_label_read(const char *path, int max_cells, struct session_label *out);
 void session_label_free(struct session_label *label);
 
+struct session_local_totals {
+    long input_tokens;
+    long output_tokens;
+    double spend;
+    long requests;
+};
+
+/* Aggregate turn_usage items for `provider` across all session files in the current working
+ * directory's session store. */
+void session_aggregate_usage(const char *provider, struct session_local_totals *out);
+
 #endif /* HAX_SESSION_H */

@@ -7,6 +7,20 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
+### Added
+
+- A `vertex-ai` provider for Google Cloud Vertex AI, serving Gemini models through Vertex's
+  OpenAI-compatible endpoint. It authenticates with application default credentials, or with
+  `HAX_VERTEX_API_KEY` for a static bearer token, and reads the project from `VERTEXAI_PROJECT`
+  and the location from `VERTEXAI_LOCATION`. Model ids may omit the `google/` publisher prefix,
+  which hax adds.
+- The `vertex-ai` provider can list models: `/model` offers the Gemini chat models of the
+  project's Model Garden, read from Vertex's native publisher API.
+- The `vertex-ai` provider lists Anthropic's Claude models too, and serves them: Vertex answers
+  Claude with the Anthropic Messages protocol on a path that names the model, so hax speaks that
+  protocol for a `claude-` model id and names the model the way Vertex does, with its version
+  (`claude-sonnet-4-6@default`).
+
 ### Changed
 
 - Prompts are sent without leading blank lines or trailing whitespace, so a paste or Ctrl+G edit
@@ -17,6 +31,17 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   `providers.llamacpp.port`.
 - The status line stays visible for the whole turn, including while an answer streams or a tool
   runs, so the elapsed time and the current state, such as a requested pause, are always in view.
+- `/usage` is now supported by the `vertex-ai` provider, reporting project quota consumption
+  from the Google Cloud Monitoring API.
+- `/usage` for the `vertex-ai` provider also totals the tokens and the spend recorded in this
+  project's sessions, beside the quota consumption of the project.
+- The `vertex-ai` `/usage` report estimates the token total from the spend so far when no token cap
+  is set.
+- The `vertex-ai` provider can take its credentials from another machine: set
+  `providers.vertex-ai.gcloud_host` (or `HAX_VERTEX_GCLOUD_HOST`) and hax asks that host for the
+  token over SSH instead of running gcloud locally.
+
+### Fixed
 
 ## [0.6.1] - 2026-10-15
 

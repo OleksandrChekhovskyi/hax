@@ -52,6 +52,9 @@ struct wire_body_opts {
 struct wire {
     const char *id;   /* canonical dialect name accepted by `api` config fields */
     const char *path; /* request path appended to the provider base URL */
+    /* The wire speaks the Anthropic Messages dialect, whose request fields differ from the
+     * OpenAI family's. Vertex serves Claude with that dialect over its own path. */
+    int messages;
     /* Compose one request minus the extra_body passthrough; wire_build_body finishes it. */
     json_t *(*build_body)(const struct context *context, const char *provider_id, const char *model,
                           const struct wire_body_opts *opts);

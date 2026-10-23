@@ -234,6 +234,25 @@ static const struct config_setting REGISTRY[] = {
     {.key = "providers.anthropic-compatible.version", .env_var = "HAX_ANTHROPIC_VERSION",
      .description = "anthropic-version request header value (default: 2023-06-01)"},
 
+    /* vertex-ai */
+    {.key = "providers.vertex-ai.project", .env_var = "VERTEXAI_PROJECT",
+     .description = "Google Cloud project that owns the Vertex AI models"},
+    {.key = "providers.vertex-ai.location", .env_var = "VERTEXAI_LOCATION",
+     .description = "Vertex AI location (region) or 'global'"},
+    {.key = "providers.vertex-ai.base_url", .env_var = "HAX_VERTEX_BASE_URL",
+     .description = "Full Vertex AI OpenAI-compatible base URL; overrides project/location"},
+    {.key = "providers.vertex-ai.api_key", .env_var = "HAX_VERTEX_API_KEY", .secret = 1,
+     .description = "Bearer token for Vertex AI (otherwise uses gcloud application default credentials)"},
+    {.key = "providers.vertex-ai.display_name", .env_var = "HAX_VERTEX_DISPLAY_NAME",
+     .description = "Display name for the provider in the banner and picker"},
+    {.key = "providers.vertex-ai.gcloud_host", .env_var = "HAX_VERTEX_GCLOUD_HOST",
+     .description = "SSH host holding the gcloud credentials; hax asks it for the token instead "
+                    "of running gcloud locally"},
+    {.key = "providers.vertex-ai.quota_tokens", .env_var = "HAX_VERTEX_QUOTA_TOKENS",
+     .description = "Local monthly token quota for Vertex AI usage tracking", .kind = CONFIG_KIND_TOKENS},
+    {.key = "providers.vertex-ai.quota_cost", .env_var = "HAX_VERTEX_QUOTA_COST",
+     .description = "Local monthly spend quota (USD) for Vertex AI usage tracking"},
+
     /* per-provider */
     {.key = "providers.llamacpp.base_url", .env_var = "HAX_LLAMACPP_BASE_URL",
      .description = "Full llama-server base URL; overrides the port setting"},
