@@ -326,12 +326,12 @@ static int vertex_refresh_gcloud(struct vertex_auth_state *state)
     return 0;
 }
 
-static int vertex_auth_refresh(struct vertex_auth_state *state)
+/* Obtain a fresh token now. The expiry is only a guess, so a rejected token must be renewed even
+ * when the guess has not run out. */
+static int vertex_auth_renew(struct vertex_auth_state *state)
 {
     if (state->static_token)
         return state->token ? 0 : -1;
-    if (state->token && time(NULL) < state->expiry)
-        return 0;
     /* A configured host owns the credentials, so the local ones do not apply. */
     if (state->gcloud_host)
         return vertex_refresh_gcloud(state) == 0 ? 0 : -1;
@@ -342,6 +342,13 @@ static int vertex_auth_refresh(struct vertex_auth_state *state)
     if (vertex_refresh_gcloud(state) == 0)
         return 0;
     return -1;
+}
+
+static int vertex_auth_refresh(struct vertex_auth_state *state)
+{
+    if (state->token && time(NULL) < state->expiry)
+        return 0;
+    return vertex_auth_renew(state);
 }
 
 static int vertex_auth_prepare(void *auth, int allow_refresh, http_tick_cb tick, void *tick_user)
@@ -380,7 +387,7 @@ static int vertex_auth_recover(void *auth, int *retried, http_tick_cb tick, void
     if (*retried || state->static_token)
         return 0;
     *retried = 1;
-    if (vertex_auth_refresh(state) == 0)
+    if (vertex_auth_renew(state) == 0)
         return 1;
     return 0;
 }
