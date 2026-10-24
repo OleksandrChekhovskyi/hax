@@ -419,11 +419,12 @@ static const char SUBAGENTS_PROMPT[] =
     "\n"
     "`hax -p \"<task>\"` (via the bash tool) runs a fresh hax instance with clean context in this "
     "directory and prints its final answer to stdout. Delegate to subagents only when the user "
-    "asks for it. The child inherits this session's provider, model, and effort. For concurrent "
-    "work, launch subagents with `background: true` and collect answers with task_wait; a "
-    "synchronous call is simpler when you would otherwise wait immediately. The child prints its "
-    "session id to stderr at startup; follow up on a finished (or killed) run with `hax "
-    "--resume=<id> -p \"<follow-up>\"`.\n";
+    "asks for it. The child inherits this session's provider, model, and effort unless "
+    "`--preset <name>` selects a preset from the user's config. For concurrent work, launch "
+    "subagents with `background: true` and collect answers with task_wait; a synchronous call "
+    "is simpler when you would otherwise wait immediately. The child prints its session id to "
+    "stderr at startup; follow up on a finished (or killed) run with `hax --resume=<id> -p "
+    "\"<follow-up>\"`.\n";
 
 /* Task-less variant: synchronous calls need a wide timeout to survive a slow child. */
 static const char SUBAGENTS_PROMPT_NO_TASKS[] =
@@ -431,8 +432,9 @@ static const char SUBAGENTS_PROMPT_NO_TASKS[] =
     "\n"
     "`hax -p \"<task>\"` (via the bash tool) runs a fresh hax instance with clean context in "
     "this directory and prints its final answer to stdout. Delegate to subagents only when "
-    "the user asks for it. The child inherits this session's provider, model, and effort. "
-    "Subagents are slow: pass a generous timeout_seconds (e.g. 1800). The child prints its "
+    "the user asks for it. The child inherits this session's provider, model, and effort "
+    "unless `--preset <name>` selects a preset from the user's config. Subagents are slow: pass a "
+    "generous timeout_seconds (e.g. 1800). The child prints its "
     "session id to stderr at startup; follow up on a finished (or timed-out) run with "
     "`hax --resume=<id> -p \"<follow-up>\"`.\n";
 
@@ -471,7 +473,7 @@ static void append_subagent_presets(struct buf *prompt)
     if (name_count > 1)
         qsort(names, name_count, sizeof(*names), compare_strings);
 
-    /* Build the list first so an empty result does not advertise --preset without choices. */
+    /* Build the list first so an empty result does not leave a heading without entries. */
     struct buf list;
     buf_init(&list);
     for (size_t i = 0; i < name_count; i++) {
@@ -501,7 +503,7 @@ static void append_subagent_presets(struct buf *prompt)
         free(clean_name);
     }
     if (list.len > 0) {
-        buf_append_str(prompt, "\nPresets (select with `--preset <name>`):\n");
+        buf_append_str(prompt, "\nPresets:\n");
         buf_append(prompt, list.data, list.len);
     }
 

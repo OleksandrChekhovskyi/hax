@@ -992,7 +992,8 @@ static void test_subagents_follow_task_guidance(void)
         EXPECT(contains(suffix, "# Subagents"));
         EXPECT(contains(suffix, "only when the user asks"));
         EXPECT(contains(suffix, "task_wait"));
-        EXPECT(!contains(suffix, "--preset"));
+        EXPECT(contains(suffix, "`--preset <name>`"));
+        EXPECT(!contains(suffix, "Presets:"));
         const char *background_tasks = strstr(suffix, "# Background tasks");
         const char *subagents = strstr(suffix, "# Subagents");
         const char *environment = strstr(suffix, "# Environment");
@@ -1040,7 +1041,7 @@ static void test_subagent_presets_are_filtered_and_sorted(void)
     char *suffix = agent_env_build_suffix("m");
     EXPECT(suffix != NULL);
     if (suffix) {
-        EXPECT(contains(suffix, "Presets (select with `--preset <name>`):\n"
+        EXPECT(contains(suffix, "Presets:\n"
                                 "- alpha: quick answers\n- review: code review stance\n"));
         EXPECT(!contains(suffix, "zeta"));
         EXPECT(!contains(suffix, "typo"));
@@ -1064,8 +1065,7 @@ static void test_subagent_preset_heading_requires_valid_role(void)
     char *suffix = agent_env_build_suffix("m");
     EXPECT(suffix != NULL);
     if (suffix) {
-        EXPECT(!contains(suffix, "Presets ("));
-        EXPECT(!contains(suffix, "--preset"));
+        EXPECT(!contains(suffix, "Presets:"));
         free(suffix);
     }
     config_load(NULL);

@@ -17,6 +17,9 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   `providers.llamacpp.port`.
 - The status line stays visible for the whole turn, including while an answer streams or a tool
   runs, so the elapsed time and the current state, such as a requested pause, are always in view.
+- The model now always knows that `--preset <name>` starts a subagent with one of your presets,
+  so asking for a preset by name works even when no preset has a description. Presets with a
+  description are still the only ones listed for the model to pick on its own.
 
 ## [0.6.1] - 2026-10-15
 
