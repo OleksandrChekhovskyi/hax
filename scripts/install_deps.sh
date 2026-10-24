@@ -92,6 +92,7 @@ OpenBSD)
     ;;
 esac
 
+# shellcheck source=/etc/os-release
 . /etc/os-release
 
 case "$ID ${ID_LIKE:-}" in
@@ -120,8 +121,6 @@ case "$ID ${ID_LIKE:-}" in
         meson ninja pkgconf-pkg-config python3 ${tests:+tmux} ${extras:+fzf} ${lint:+clang-tools}
     ;;
 *arch*)
-    arch_pkgs="gcc make curl jansson meson ninja pkgconf python"
-    arch_pkgs="$arch_pkgs ${tests:+tmux} ${extras:+fzf} ${lint:+clang}"
     # Disposable containers need the full sync-and-upgrade (a bare -Sy install risks a
     # partial upgrade), but only on explicit opt-in from the CI workflow: `CI` alone also
     # describes self-hosted runners on real machines. Elsewhere only the listed packages
@@ -132,9 +131,19 @@ case "$ID ${ID_LIKE:-}" in
         # hook failure behind exit 0). Regenerate it before touching packages.
         as_root pacman-key --init
         as_root pacman-key --populate archlinux
-        as_root pacman -Syu --noconfirm --needed $arch_pkgs
+        as_root pacman -Syu --noconfirm --needed \
+            gcc make curl jansson meson ninja pkgconf python \
+            ${tests:+tmux} ${extras:+fzf} ${lint:+clang}
     else
-        as_root pacman -S --needed $noconfirm $arch_pkgs
+        if [ -n "${noconfirm:-}" ]; then
+            as_root pacman -S --needed "$noconfirm" \
+                gcc make curl jansson meson ninja pkgconf python \
+                ${tests:+tmux} ${extras:+fzf} ${lint:+clang}
+        else
+            as_root pacman -S --needed \
+                gcc make curl jansson meson ninja pkgconf python \
+                ${tests:+tmux} ${extras:+fzf} ${lint:+clang}
+        fi
     fi
     ;;
 *alpine*)

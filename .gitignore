@@ -10,3 +10,8 @@ __pycache__/
 
 # clang static-analyzer output
 *.plist
+
+# Nix
+result
+result-*
+.pre-commit-config.yaml
