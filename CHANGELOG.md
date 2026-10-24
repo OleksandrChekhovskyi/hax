@@ -7,6 +7,13 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
+### Added
+
+- A request the model refuses because the conversation no longer fits its context window is now
+  compacted and sent again, so the turn continues instead of failing. A history too large to
+  summarize in one request is summarized in pieces, each piece standing in for the older one in
+  the next request.
+
 ### Changed
 
 - Prompts are sent without leading blank lines or trailing whitespace, so a paste or Ctrl+G edit

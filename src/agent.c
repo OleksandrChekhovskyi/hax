@@ -959,15 +959,16 @@ static struct item repl_loop_tool_call(const struct item *call, enum agent_loop_
     return dispatch_tool_call(render, call, image_input);
 }
 
-static void repl_loop_compact(void *user)
+static int repl_loop_compact(void *user)
 {
     struct repl_loop_ctx *ctx = user;
-    compact_conversation(ctx->state, NULL, 1);
+    int compacted = compact_conversation(ctx->state, NULL, 1);
     /* Preserve cancellation for the loop checkpoint; otherwise re-arm after compaction. */
     if (!interrupt_abort_requested() && !interrupt_pause_requested()) {
         interrupt_clear_requests();
         interrupt_arm();
     }
+    return compacted;
 }
 
 static void repl_loop_task_note(const char *text, void *user)

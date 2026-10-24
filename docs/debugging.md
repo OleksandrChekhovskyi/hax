@@ -73,6 +73,7 @@ space
 tool <name> <json>
 delay <ms>
 usage in=N out=M [cached=K] [cache_write=W] [cache_write_1h=H] [cost=D]
+error <message>
 end-turn
 ```
 
@@ -80,7 +81,8 @@ end-turn
 `reasoning` is displayed only with `HAX_SHOW_REASONING=1`. `space` emits one single-space text
 delta. `delay` sets the pacing for later text, reasoning, space, and tool emissions; zero restores
 burst mode. `tool` takes a name and a single-line JSON object. `usage` sets the accounting on the
-turn's final event, and `end-turn` completes the turn. A final turn may end at EOF.
+turn's final event. `error` refuses the turn with the given message, the way a provider rejects a
+request it cannot take. `end-turn` completes the turn. A final turn may end at EOF.
 
 `{{CWD}}` in text or tool arguments expands to the process working directory, allowing checked-in
 fixtures to exercise path normalization without hard-coding a machine-specific path.

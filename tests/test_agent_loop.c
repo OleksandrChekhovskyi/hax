@@ -562,10 +562,11 @@ static int cancel_checkpoint(void *user)
     return AGENT_LOOP_SIG_NONE;
 }
 
-static void count_compaction(void *user)
+static int count_compaction(void *user)
 {
     struct loop_test_ctx *ctx = user;
     ctx->compactions++;
+    return 1;
 }
 
 static void session_enable_tools(struct agent_session *session)
@@ -1338,6 +1339,76 @@ static void observed_task_note(const char *text, void *user)
     (*(int *)user)++;
 }
 
+/* The model refuses the first request for size and takes the second. */
+static int overflow_stream_calls;
+
+static int overflow_stream(struct provider *p, const struct context *ctx, const char *model,
+                           stream_cb cb, void *user, http_tick_cb tick, void *tick_user)
+{
+    (void)p;
+    (void)ctx;
+    (void)model;
+    (void)tick;
+    (void)tick_user;
+    overflow_stream_calls++;
+    if (overflow_stream_calls == 1) {
+        emit_error(cb, user, "HTTP 400: This model's maximum context length is 8192 tokens", NULL);
+        return 0;
+    }
+    emit_text(cb, user, "recovered");
+    emit_done(cb, user, usage_tokens(100, 20));
+    return 0;
+}
+
+/* A request the model refuses for size is answered by a compacted history: the loop summarizes
+ * and re-issues it. */
+static void test_loop_recovers_from_an_oversized_request(void)
+{
+    config_set_override("compact.auto", "1");
+
+    struct agent_session session;
+    session_init(&session);
+    agent_session_add_user(&session, "start");
+    struct provider provider = {.name = "test", .stream = overflow_stream};
+    struct loop_test_ctx ctx = {0};
+    overflow_stream_calls = 0;
+
+    struct agent_loop_result result = run_chain(&session, &provider, &ctx, 0);
+    EXPECT(result.outcome == AGENT_LOOP_COMPLETE);
+    EXPECT(ctx.compactions == 1);
+    EXPECT(overflow_stream_calls == 2);
+    /* The retry continued the same turn rather than starting a new one. */
+    EXPECT(ctx.turn_begins == 2);
+    EXPECT(result.error_message == NULL);
+
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+    config_set_override("compact.auto", NULL);
+}
+
+/* Without automatic compaction the refusal stands: the user compacts by hand. */
+static void test_loop_keeps_an_oversized_request_without_auto_compaction(void)
+{
+    config_set_override("compact.auto", "0");
+
+    struct agent_session session;
+    session_init(&session);
+    agent_session_add_user(&session, "start");
+    struct provider provider = {.name = "test", .stream = overflow_stream};
+    struct loop_test_ctx ctx = {0};
+    overflow_stream_calls = 0;
+
+    struct agent_loop_result result = run_chain(&session, &provider, &ctx, 0);
+    EXPECT(result.outcome == AGENT_LOOP_PROVIDER_ERROR);
+    EXPECT(ctx.compactions == 0);
+    EXPECT(overflow_stream_calls == 1);
+    EXPECT(result.error_message != NULL);
+
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+    config_set_override("compact.auto", NULL);
+}
+
 static void test_loop_injects_finished_task_note(void)
 {
     setenv("HAX_BASH_BACKGROUND_YIELD", "30ms", 1);
@@ -1430,6 +1501,8 @@ int main(void)
     test_loop_reports_provider_error();
     test_loop_prestream_error_leaves_no_marker();
     test_loop_requests_mid_chain_compaction();
+    test_loop_recovers_from_an_oversized_request();
+    test_loop_keeps_an_oversized_request_without_auto_compaction();
     test_loop_injects_finished_task_note();
     T_REPORT();
 }

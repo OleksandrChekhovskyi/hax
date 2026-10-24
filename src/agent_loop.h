@@ -81,7 +81,8 @@ enum agent_loop_signal {
 /* Optional frontend behavior. checkpoint settles and samples cancellation, returning an
  * agent_loop_signal; tool_call must return the matching owned result for the requested action,
  * and when NULL the loop falls back to silent semantic tool execution; compact performs the
- * frontend's compaction transaction when the shared threshold is reached. */
+ * frontend's compaction transaction when the shared threshold is reached, and reports whether
+ * the conversation was compacted. */
 struct agent_loop_hooks {
     void *user;
     stream_cb observe;
@@ -92,7 +93,7 @@ struct agent_loop_hooks {
     /* image_input is the resolved provider/model capability for the run context. */
     struct item (*tool_call)(const struct item *call, enum agent_loop_tool_action action,
                              int image_input, void *user);
-    void (*compact)(void *user);
+    int (*compact)(void *user);
     /* A background-task note was appended to history before this turn's request; text is
      * borrowed for the call. Display-only. */
     void (*task_note)(const char *text, void *user);
