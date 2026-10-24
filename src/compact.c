@@ -86,16 +86,40 @@ int compact_should_auto(long context_tokens, long context_limit)
     return compact_over_threshold(context_tokens, context_limit, config_int("compact.threshold"));
 }
 
-static char *build_summary_prompt(const char *instructions)
+static const char SHRUNK_NOTE[] =
+    "Parts of the conversation above were shortened or omitted to fit the model's context window. "
+    "Summarize what remains, and note under Critical Context that earlier details may be missing.";
+
+static char *build_summary_prompt(const char *instructions, int shrunk)
 {
-    if (instructions && *instructions)
-        return xasprintf("%s\n\nAdditional focus for this summary:\n%s", COMPACT_PROMPT,
-                         instructions);
-    return xstrdup(COMPACT_PROMPT);
+    return xasprintf("%s%s%s%s%s", COMPACT_PROMPT, shrunk ? "\n\n" : "", shrunk ? SHRUNK_NOTE : "",
+                     instructions && *instructions ? "\n\nAdditional focus for this summary:\n"
+                                                   : "",
+                     instructions && *instructions ? instructions : "");
 }
 
-static char *build_summary_seed(const char *summary)
+/* A longer request is left to the summary: quoting it would make the seed nearly as large as a
+ * request the model may just have refused. */
+#define KEPT_REQUEST_MAX_BYTES 8192
+
+/* The newest prompt the user typed, or NULL. It may predate the context window when an earlier
+ * compaction in the same user turn already summarized it. */
+static const char *latest_request(const struct agent_session *session)
 {
+    for (size_t i = session->n_items; i-- > 0;) {
+        const struct item *item = &session->items[i];
+        if (item->kind == ITEM_USER_MESSAGE && item->origin == ITEM_ORIGIN_NONE)
+            return item->text;
+    }
+    return NULL;
+}
+
+/* `request` is quoted after the summary when non-NULL. */
+static char *build_summary_seed(const char *summary, const char *request)
+{
+    if (request)
+        return xasprintf("%s\n\n%s\n\nThe request being worked on, verbatim:\n\n%s",
+                         COMPACT_SEED_PREAMBLE, summary, request);
     return xasprintf("%s\n\n%s", COMPACT_SEED_PREAMBLE, summary);
 }
 
@@ -105,7 +129,10 @@ struct compact_sink {
     struct turn turn;
     struct attempt_log attempt_log;
     const struct compact_hooks *hooks;
+    /* The latest failure, so a later request's error replaces an earlier refusal. */
     char *error_message;
+    /* The latest attempt was refused for size, so a smaller request may still fit. */
+    int overflow;
 };
 
 struct summary_request {
@@ -126,9 +153,10 @@ static int compact_sink_on_event(const struct stream_event *event, void *user)
         usage = &event->u.done.usage;
         response = &event->u.done.response;
     } else if (event->kind == EV_ERROR) {
-        if (!sink->error_message)
-            sink->error_message =
-                xstrdup(event->u.error.message ? event->u.error.message : "stream failed");
+        free(sink->error_message);
+        sink->error_message =
+            xstrdup(event->u.error.message ? event->u.error.message : "stream failed");
+        sink->overflow = event->u.error.error_kind == STREAM_ERROR_CONTEXT_OVERFLOW;
         usage = event->u.error.usage;
         response = event->u.error.response;
     } else if (event->kind == EV_RETRY) {
@@ -152,24 +180,25 @@ static void summary_request_append(struct summary_request *request, struct item 
     request->items[request->count++] = item;
 }
 
+/* `items` are borrowed for the request's lifetime; `shrunk` marks them as a shortened view. */
 static void summary_request_init(struct summary_request *request,
-                                 const struct compact_params *params)
+                                 const struct compact_params *params, const struct item *items,
+                                 size_t n_items, int shrunk)
 {
     memset(request, 0, sizeof(*request));
     request->base_context = agent_session_context(params->session);
     request->base_context.image_input =
         model_meta_image_input(params->provider, params->session->model);
     request->base_context.session_id = session_log_id(params->session_log);
-    request->borrowed_count = request->base_context.n_items;
+    request->borrowed_count = n_items;
     request->capacity = request->borrowed_count + 1;
     request->items = xmalloc(request->capacity * sizeof(*request->items));
     if (request->borrowed_count > 0)
-        memcpy(request->items, request->base_context.items,
-               request->borrowed_count * sizeof(*request->items));
+        memcpy(request->items, items, request->borrowed_count * sizeof(*request->items));
     request->count = request->borrowed_count;
     summary_request_append(request, (struct item){
                                         .kind = ITEM_USER_MESSAGE,
-                                        .text = build_summary_prompt(params->instructions),
+                                        .text = build_summary_prompt(params->instructions, shrunk),
                                     });
 }
 
@@ -232,11 +261,14 @@ static void append_rejected_response(struct summary_request *request, struct ite
 }
 
 static char *generate_summary(const struct compact_params *params, struct compact_sink *sink,
+                              const struct item *items, size_t n_items, int shrunk,
                               int *attempt_count)
 {
     struct summary_request request;
-    summary_request_init(&request, params);
+    summary_request_init(&request, params, items, n_items, shrunk);
     char *summary = NULL;
+    /* A refused request left a failed assembly behind. */
+    turn_reset(&sink->turn);
 
     /* Advertising the normal tools preserves the provider's cached request prefix. Calls are
      * rejected rather than executed because compaction must not mutate task state. */
@@ -245,6 +277,7 @@ static char *generate_summary(const struct compact_params *params, struct compac
         context.items = request.items;
         context.n_items = request.count;
         (*attempt_count)++;
+        sink->overflow = 0;
         params->provider->stream(params->provider, &context, params->session->model,
                                  compact_sink_on_event, sink, params->hooks.tick,
                                  params->hooks.user);
@@ -272,13 +305,246 @@ static char *generate_summary(const struct compact_params *params, struct compac
     return summary;
 }
 
-/* The boundary prevents the seed from rendering as part of the preceding assistant turn. */
-static void append_summary_seed(struct agent_session *session, const char *summary)
+/* A summarization request the model refuses for size is retried on shortened views of the
+ * conversation, each smaller than the last. The session itself is never trimmed. */
+enum shrink_stage {
+    SHRINK_CLIP,        /* clip bulky tool output and arguments */
+    SHRINK_OLDER_HALF,  /* also omit the older half of the earlier rounds */
+    SHRINK_LATEST_ONLY, /* also omit every round but the latest request's and the last */
+    SHRINK_STAGES,
+};
+
+static const size_t SHRINK_CLIP_BYTES[SHRINK_STAGES] = {4096, 4096, 1024};
+
+static const char OMITTED_ROUNDS[] =
+    "[Earlier exchanges were omitted here to fit the model's context window.]";
+
+/* Shallow copies of session items: they borrow every pointer except the replacement strings in
+ * `strings`, which the view owns. */
+struct summary_view {
+    struct item *items;
+    size_t n_items;
+    size_t capacity;
+    char **strings;
+    size_t n_strings;
+    size_t bytes; /* approximate content size, for comparing requests */
+};
+
+static size_t text_bytes(const char *text)
 {
+    return text ? strlen(text) : 0;
+}
+
+static size_t item_bytes(const struct item *item)
+{
+    size_t bytes = text_bytes(item->text) + text_bytes(item->tool_arguments_json) +
+                   text_bytes(item->output) + text_bytes(item->reasoning_json) +
+                   text_bytes(item->reasoning_text);
+    for (size_t i = 0; i < item->n_images; i++)
+        bytes += text_bytes(item->images[i].data_b64);
+    return bytes;
+}
+
+static size_t items_bytes(const struct item *items, size_t n_items)
+{
+    size_t bytes = 0;
+    for (size_t i = 0; i < n_items; i++)
+        bytes += item_bytes(&items[i]);
+    return bytes;
+}
+
+static char *view_own(struct summary_view *view, char *text)
+{
+    view->strings = xrealloc(view->strings, (view->n_strings + 1) * sizeof(*view->strings));
+    view->strings[view->n_strings++] = text;
+    return text;
+}
+
+static void view_append(struct summary_view *view, struct item item)
+{
+    if (view->n_items == view->capacity) {
+        view->capacity = view->capacity ? view->capacity * 2 : 16;
+        view->items = xrealloc(view->items, view->capacity * sizeof(*view->items));
+    }
+    view->items[view->n_items++] = item;
+    view->bytes += item_bytes(&item);
+}
+
+static void view_free(struct summary_view *view)
+{
+    for (size_t i = 0; i < view->n_strings; i++)
+        free(view->strings[i]);
+    free(view->strings);
+    free(view->items);
+}
+
+/* The leading `cap` bytes of `output`, cut at a character boundary, with image parts replaced by
+ * their placeholders and the omission stated. */
+static char *clip_output(const struct item *result, size_t cap)
+{
+    const char *output = result->output ? result->output : "";
+    size_t len = strlen(output);
+    size_t keep = len;
+    if (len > cap) {
+        keep = cap;
+        while (keep > 0 && ((unsigned char)output[keep] & 0xC0) == 0x80)
+            keep--;
+    }
+
+    char *clipped = xasprintf("%.*s", (int)keep, output);
+    for (size_t i = 0; i < result->n_images; i++) {
+        char *placeholder = item_image_placeholder(&result->images[i]);
+        char *joined = xasprintf("%s\n%s", clipped, placeholder);
+        free(placeholder);
+        free(clipped);
+        clipped = joined;
+    }
+    if (keep < len) {
+        char *joined = xasprintf("%s\n[%zu bytes omitted to fit the model's context window]",
+                                 clipped, len - keep);
+        free(clipped);
+        clipped = joined;
+    }
+    return clipped;
+}
+
+static void view_append_clipped(struct summary_view *view, const struct item *item, size_t cap)
+{
+    struct item copy = *item;
+    if (item->kind == ITEM_TOOL_RESULT && (text_bytes(item->output) > cap || item->n_images > 0)) {
+        copy.output = view_own(view, clip_output(item, cap));
+        copy.output_hidden_tail = 0;
+        copy.images = NULL;
+        copy.n_images = 0;
+    } else if (item->kind == ITEM_TOOL_CALL && text_bytes(item->tool_arguments_json) > cap) {
+        /* Adapters send arguments as JSON, so the stand-in must stay a JSON object. */
+        copy.tool_arguments_json = view_own(
+            view, xasprintf("{\"omitted\":\"%zu bytes of arguments omitted to fit the model's "
+                            "context window\"}",
+                            strlen(item->tool_arguments_json)));
+    }
+    view_append(view, copy);
+}
+
+/* Rounds start at index 0 and at each turn boundary, so a round holds whole tool exchanges and
+ * omitting one never separates a call from its result. Returns the round count; `starts` is
+ * owned by the caller. */
+static size_t split_rounds(const struct item *items, size_t n_items, size_t **starts)
+{
+    size_t n_rounds = 0;
+    *starts = xmalloc((n_items + 1) * sizeof(**starts));
+    for (size_t i = 0; i < n_items; i++)
+        if (i == 0 || items[i].kind == ITEM_TURN_BOUNDARY)
+            (*starts)[n_rounds++] = i;
+    (*starts)[n_rounds] = n_items;
+    return n_rounds;
+}
+
+/* The latest request is the newest prompt the user typed; the summary must cover it whole. */
+static size_t latest_request_round(const struct item *items, const size_t *starts, size_t n_rounds)
+{
+    for (size_t round = n_rounds; round-- > 0;)
+        for (size_t i = starts[round]; i < starts[round + 1]; i++)
+            if (items[i].kind == ITEM_USER_MESSAGE && items[i].origin == ITEM_ORIGIN_NONE)
+                return round;
+    return n_rounds - 1;
+}
+
+static void build_view(const struct item *items, size_t n_items, enum shrink_stage stage,
+                       struct summary_view *view)
+{
+    memset(view, 0, sizeof(*view));
+    if (n_items == 0)
+        return;
+
+    size_t *starts;
+    size_t n_rounds = split_rounds(items, n_items, &starts);
+    size_t request_round = latest_request_round(items, starts, n_rounds);
+    /* An earlier seed already condenses everything before it, so it is the last to go. */
+    int seed_round = items[0].origin == ITEM_ORIGIN_COMPACT_SEED;
+    char *keep = xmalloc(n_rounds);
+    memset(keep, 1, n_rounds);
+
+    if (stage >= SHRINK_OLDER_HALF) {
+        size_t droppable_bytes = 0;
+        for (size_t round = seed_round; round < request_round; round++)
+            droppable_bytes +=
+                items_bytes(items + starts[round], starts[round + 1] - starts[round]);
+        size_t dropped_bytes = 0;
+        for (size_t round = seed_round; round + 1 < n_rounds; round++) {
+            if (round == request_round)
+                continue;
+            int older = round < request_round;
+            if (stage == SHRINK_OLDER_HALF && (!older || dropped_bytes * 2 >= droppable_bytes))
+                continue;
+            keep[round] = 0;
+            dropped_bytes += items_bytes(items + starts[round], starts[round + 1] - starts[round]);
+        }
+        if (stage == SHRINK_LATEST_ONLY && seed_round && request_round > 0 && n_rounds > 1)
+            keep[0] = 0;
+    }
+
+    for (size_t round = 0; round < n_rounds; round++) {
+        if (!keep[round]) {
+            if (round == 0 || keep[round - 1])
+                view_append(
+                    view, (struct item){.kind = ITEM_USER_MESSAGE, .text = (char *)OMITTED_ROUNDS});
+            continue;
+        }
+        for (size_t i = starts[round]; i < starts[round + 1]; i++)
+            view_append_clipped(view, &items[i], SHRINK_CLIP_BYTES[stage]);
+    }
+    free(keep);
+    free(starts);
+}
+
+/* Retry a refused summarization on shortened views. Each request must be materially smaller
+ * than the refused one; a stage that is not is skipped rather than sent. */
+static char *generate_shrunk_summary(const struct compact_params *params, struct compact_sink *sink,
+                                     const struct item *items, size_t n_items, int *attempt_count,
+                                     int *shrunk)
+{
+    size_t refused_bytes = items_bytes(items, n_items);
+
+    for (int stage = 0; stage < SHRINK_STAGES; stage++) {
+        if (params->hooks.is_cancelled && params->hooks.is_cancelled(params->hooks.user))
+            return NULL;
+
+        struct summary_view view;
+        build_view(items, n_items, (enum shrink_stage)stage, &view);
+        if (view.bytes * 10 > refused_bytes * 9) {
+            view_free(&view);
+            continue;
+        }
+        char *summary = generate_summary(params, sink, view.items, view.n_items, 1, attempt_count);
+        refused_bytes = view.bytes;
+        view_free(&view);
+        if (summary) {
+            *shrunk = 1;
+            return summary;
+        }
+        if (!sink->overflow)
+            return NULL;
+    }
+
+    char *refusal = sink->error_message;
+    sink->error_message =
+        xasprintf("%s — the conversation cannot be shortened enough to fit the model's context "
+                  "window",
+                  refusal ? refusal : "context window exceeded");
+    free(refusal);
+    return NULL;
+}
+
+/* The boundary prevents the seed from rendering as part of the preceding assistant turn. */
+static void append_summary_seed(struct agent_session *session, const char *summary,
+                                const char *request)
+{
+    char *seed = build_summary_seed(summary, request);
     agent_session_add_boundary(session);
     agent_session_append(session, (struct item){
                                       .kind = ITEM_USER_MESSAGE,
-                                      .text = build_summary_seed(summary),
+                                      .text = seed,
                                       .origin = ITEM_ORIGIN_COMPACT_SEED,
                                   });
 }
@@ -329,7 +595,12 @@ void compact_run(const struct compact_params *params, struct compact_result *res
     struct compact_sink sink = {.hooks = &params->hooks};
     turn_init(&sink.turn);
     attempt_log_init(&sink.attempt_log);
-    char *summary = generate_summary(params, &sink, &result->attempts);
+    struct context window = agent_session_context(params->session);
+    char *summary =
+        generate_summary(params, &sink, window.items, window.n_items, 0, &result->attempts);
+    if (!summary && sink.overflow)
+        summary = generate_shrunk_summary(params, &sink, window.items, window.n_items,
+                                          &result->attempts, &result->shrunk);
     int cancelled = params->hooks.is_cancelled && params->hooks.is_cancelled(params->hooks.user);
     if (cancelled) {
         free(summary);
@@ -355,7 +626,10 @@ void compact_run(const struct compact_params *params, struct compact_result *res
     /* Rejected attempts are part of the summarized prefix; accepted usage follows the seed. */
     size_t accepted_usage_index = sink.attempt_log.count ? sink.attempt_log.count - 1 : 0;
     append_attempt_usage(params, &sink.attempt_log, 0, accepted_usage_index);
-    append_summary_seed(params->session, summary);
+    const char *request = params->keep_request ? latest_request(params->session) : NULL;
+    if (request && strlen(request) > KEPT_REQUEST_MAX_BYTES)
+        request = NULL;
+    append_summary_seed(params->session, summary, request);
     free(summary);
     append_attempt_usage(params, &sink.attempt_log, accepted_usage_index, sink.attempt_log.count);
     attempt_log_free(&sink.attempt_log);

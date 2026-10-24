@@ -20,6 +20,7 @@ struct captured_event {
     char *response_id;
     char *served_model;
     struct stream_usage usage;
+    enum stream_error_kind error_kind;
 };
 
 struct capture_state {
@@ -72,6 +73,7 @@ static int capture_event(const struct stream_event *event, void *user)
         break;
     case EV_ERROR:
         captured->message = strdup(event->u.error.message ? event->u.error.message : "");
+        captured->error_kind = event->u.error.error_kind;
         captured->usage = event->u.error.usage ? *event->u.error.usage
                                                : (struct stream_usage){-1, -1, -1, -1, -1, -1};
         break;
@@ -315,7 +317,18 @@ static void test_error_event(void)
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_ERROR);
     EXPECT_STR_EQ(capture.events[0].message, "Overloaded");
+    EXPECT(capture.events[0].error_kind == STREAM_ERROR_OTHER);
     EXPECT(parser.terminal_emitted == 1);
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+static void test_overflow_error_event_is_classified(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    FEED(parser, "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\","
+                 "\"message\":\"prompt is too long: 234858 tokens > 200000 maximum\"}}");
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].error_kind == STREAM_ERROR_CONTEXT_OVERFLOW);
     EVENTS_FIXTURE_FREE(capture, parser);
 }
 
@@ -379,6 +392,7 @@ int main(void)
     test_stop_reason_max_tokens_is_error();
     test_stop_reason_pause_turn_is_error();
     test_error_event();
+    test_overflow_error_event_is_classified();
     test_ping_and_unparseable_ignored();
     test_finalize_without_terminal_emits_error();
     test_finalize_after_done_no_extra();

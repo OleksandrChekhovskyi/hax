@@ -2,6 +2,8 @@
 #ifndef HAX_TRANSPORT_API_ERROR_H
 #define HAX_TRANSPORT_API_ERROR_H
 
+#include <jansson.h>
+
 /* Extracts common JSON and SSE error shapes, or flattens a plain-text/HTML body. The result is
  * heap-owned, never NULL, and prefixed with the HTTP status when `status > 0`. */
 char *format_api_error(long status, const char *body);
@@ -9,5 +11,14 @@ char *format_api_error(long status, const char *body);
 /* Formats a failed provider model-list request. `name == NULL` is rendered as "provider". The
  * result is heap-owned and never NULL. */
 char *format_model_list_error(const char *name, const char *base_url, int has_key, long status);
+
+/* Whether a failed request was refused because it exceeds the model's context window. `status` is
+ * the HTTP status, or 0 for an error reported inside a stream; `body` is the raw response body
+ * (JSON, SSE, or text) and may be NULL. */
+int api_error_is_context_overflow(long status, const char *body);
+
+/* The same test over an already-parsed error object, from its "code", "type", and "message"
+ * members. `error` may be NULL. */
+int api_error_object_is_context_overflow(long status, const json_t *error);
 
 #endif /* HAX_TRANSPORT_API_ERROR_H */

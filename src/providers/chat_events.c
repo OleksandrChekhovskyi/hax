@@ -8,6 +8,7 @@
 #include "buf.h"
 #include "provider.h"
 #include "xalloc.h"
+#include "transport/api_error.h"
 
 void chat_events_init(struct chat_events *parser, stream_cb callback, void *callback_user)
 {
@@ -469,6 +470,9 @@ static void handle_error(struct chat_events *parser, json_t *error)
             {
                 .message = message ? message : "provider error",
                 .http_status = 0,
+                .error_kind = api_error_object_is_context_overflow(0, error)
+                                  ? STREAM_ERROR_CONTEXT_OVERFLOW
+                                  : STREAM_ERROR_OTHER,
                 .usage = &parser->usage,
                 .response = &response,
             },

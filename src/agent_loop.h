@@ -23,6 +23,7 @@ struct agent_loop_turn {
     /* Every served attempt, retried ones included, for one footer each. */
     struct attempt_log attempts;
     char *error_message;
+    enum stream_error_kind error_kind;
 };
 
 /* Run one model turn. session_id is the conversation's stable id for provider affinity (may be
@@ -78,10 +79,16 @@ enum agent_loop_signal {
     AGENT_LOOP_SIG_ABORT,
 };
 
+enum agent_loop_compact_reason {
+    AGENT_LOOP_COMPACT_THRESHOLD, /* context use reached compact.threshold */
+    AGENT_LOOP_COMPACT_OVERFLOW,  /* the model refused the request for size; it is re-sent */
+};
+
 /* Optional frontend behavior. checkpoint settles and samples cancellation, returning an
  * agent_loop_signal; tool_call must return the matching owned result for the requested action,
  * and when NULL the loop falls back to silent semantic tool execution; compact performs the
- * frontend's compaction transaction when the shared threshold is reached. */
+ * frontend's compaction transaction and returns whether the conversation was compacted. A
+ * refusal for size the loop may recover reaches observe only if it does not. */
 struct agent_loop_hooks {
     void *user;
     stream_cb observe;
@@ -92,7 +99,7 @@ struct agent_loop_hooks {
     /* image_input is the resolved provider/model capability for the run context. */
     struct item (*tool_call)(const struct item *call, enum agent_loop_tool_action action,
                              int image_input, void *user);
-    void (*compact)(void *user);
+    int (*compact)(enum agent_loop_compact_reason reason, void *user);
     /* A background-task note was appended to history before this turn's request; text is
      * borrowed for the call. Display-only. */
     void (*task_note)(const char *text, void *user);

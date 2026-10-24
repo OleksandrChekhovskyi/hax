@@ -7,6 +7,18 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
+### Added
+
+- Compaction still works when the conversation no longer fits the model's context window. A
+  summarization request the model refuses for size is retried on a shortened view, with long tool
+  output clipped and then older exchanges omitted, and the notice says so. The session keeps the
+  full history.
+- A request the model refuses because the conversation no longer fits its context window is
+  compacted and sent again, so the turn continues instead of failing, even when the model's
+  context limit is unknown. The refusal never shows as an error when the retry recovers it.
+- A compaction in the middle of a user turn keeps the prompt being worked on verbatim after the
+  summary, so the agent continues on the user's own words rather than a paraphrase.
+
 ### Changed
 
 - Prompts are sent without leading blank lines or trailing whitespace, so a paste or Ctrl+G edit

@@ -34,8 +34,10 @@ static int loop_turn_on_event(const struct stream_event *ev, void *user)
         loop_turn->usage = ev->u.done.usage;
         attempt_log_record(&loop_turn->attempts, &ev->u.done.usage, &ev->u.done.response);
     } else if (ev->kind == EV_ERROR) {
-        if (!loop_turn->error_message && ev->u.error.message)
+        if (!loop_turn->error_message && ev->u.error.message) {
             loop_turn->error_message = xstrdup(ev->u.error.message);
+            loop_turn->error_kind = ev->u.error.error_kind;
+        }
         if (ev->u.error.usage) {
             loop_turn->usage = *ev->u.error.usage;
             attempt_log_record(&loop_turn->attempts, ev->u.error.usage, ev->u.error.response);
@@ -267,6 +269,54 @@ static void loop_flush(const struct agent_loop_params *params)
     agent_flush_logs(params->tlog, params->slog, params->session->items, params->session->n_items);
 }
 
+/* True when the turn produced nothing the user saw: re-sending it repeats no output. */
+static int assembly_is_empty(const struct turn *assembly)
+{
+    return assembly->n_items == 0 && !assembly->has_text && !assembly->has_reasoning &&
+           assembly->n_pending_calls == 0;
+}
+
+/* Withholds a refusal for size from the frontend while the loop may still recover it, so a
+ * recovered request never shows as a failure. */
+struct overflow_hold {
+    const struct agent_loop_hooks *hooks;
+    int armed;
+    int held;
+};
+
+static int loop_observe_holding(const struct stream_event *ev, void *user)
+{
+    struct overflow_hold *hold = user;
+    if (hold->armed && ev->kind == EV_ERROR &&
+        ev->u.error.error_kind == STREAM_ERROR_CONTEXT_OVERFLOW) {
+        hold->held = 1;
+        return 0;
+    }
+    return hold->hooks->observe(ev, hold->hooks->user);
+}
+
+/* Run the frontend's compaction, then sample cancellation: a cancel during the transaction must
+ * stop continuation against old history. Returns whether the run stops here. */
+static int loop_compact(const struct agent_loop_params *params, struct agent_loop_result *result,
+                        enum agent_loop_compact_reason reason, int *compacted)
+{
+    const struct agent_loop_hooks *hooks = &params->hooks;
+    *compacted = hooks->compact(reason, hooks->user);
+    int sig = loop_checkpoint(hooks);
+    if (sig == AGENT_LOOP_SIG_ABORT) {
+        agent_session_mark_interrupt(params->session);
+        loop_flush(params);
+        result->outcome = AGENT_LOOP_INTERRUPTED;
+        result->abort_marker_placed = 1;
+        return 1;
+    }
+    if (sig == AGENT_LOOP_SIG_PAUSE) {
+        result->outcome = AGENT_LOOP_PAUSED;
+        return 1;
+    }
+    return 0;
+}
+
 static void loop_run_active(const struct agent_loop_params *params,
                             struct agent_loop_result *result)
 {
@@ -277,6 +327,9 @@ static void loop_run_active(const struct agent_loop_params *params,
      * returns from its branch below. */
     result->outcome = AGENT_LOOP_MAX_TURNS;
     result->last_context_tokens = -1;
+    /* One recovery per failed request: a refusal of the compacted retry ends the turn, and any
+     * successful response renews the allowance. */
+    int overflow_recovery = 1;
 
     for (int turn_n = 0; params->max_turns <= 0 || turn_n < params->max_turns; turn_n++) {
         /* The first boundary arrived with the user message — except on a continued run, whose
@@ -308,9 +361,14 @@ static void loop_run_active(const struct agent_loop_params *params,
         if (hooks->turn_begin)
             hooks->turn_begin(hooks->user);
 
+        struct overflow_hold hold = {
+            .hooks = hooks,
+            .armed = overflow_recovery && hooks->compact && compact_auto_enabled(),
+        };
         struct agent_loop_turn loop_turn;
         agent_loop_turn_run(&loop_turn, session, params->provider, session_log_id(params->slog),
-                            hooks->observe, hooks->user, hooks->tick, hooks->user);
+                            hooks->observe ? loop_observe_holding : NULL, &hold, hooks->tick,
+                            hooks->user);
         result->turns++;
 
         long turn_context = -1;
@@ -320,6 +378,10 @@ static void loop_run_active(const struct agent_loop_params *params,
         }
 
         if (loop_turn.assembly.state == TURN_FAILED) {
+            /* Only a request that showed nothing is re-sent: continuing partial output is a
+             * different problem. */
+            int recoverable = hold.armed && loop_turn.error_kind == STREAM_ERROR_CONTEXT_OVERFLOW &&
+                              assembly_is_empty(&loop_turn.assembly);
             /* Provider failure wins over a simultaneous frontend cancel: it supplies the
              * diagnostic. The boundary is owed exactly when something lands after it — the
              * partial text repair keeps and/or a billable-usage footer — so it neither dangles
@@ -338,9 +400,32 @@ static void loop_run_active(const struct agent_loop_params *params,
             loop_add_usage(params, &loop_turn, 1);
             loop_flush(params);
             agent_loop_turn_destroy(&loop_turn);
+            /* A pending cancel wins: the frontend's compaction would clear it. */
+            if (recoverable && loop_checkpoint(hooks) == AGENT_LOOP_SIG_NONE) {
+                int compacted;
+                if (loop_compact(params, result, AGENT_LOOP_COMPACT_OVERFLOW, &compacted))
+                    return;
+                if (compacted) {
+                    overflow_recovery = 0;
+                    /* The retry re-sends the same request, so it keeps its boundary debt. */
+                    turn_n--;
+                    free(result->error_message);
+                    result->error_message = NULL;
+                    continue;
+                }
+            }
+            if (hold.held) {
+                struct stream_event error = {
+                    .kind = EV_ERROR,
+                    .u.error = {.message = result->error_message,
+                                .error_kind = STREAM_ERROR_CONTEXT_OVERFLOW},
+                };
+                hooks->observe(&error, hooks->user);
+            }
             result->outcome = AGENT_LOOP_PROVIDER_ERROR;
             return;
         }
+        overflow_recovery = 1;
 
         /* Sample cancellation after a clean stream but before absorption or dispatch, so a late
          * Esc cannot launch tools or another turn. A pause request is only noted: the batch it
@@ -450,19 +535,9 @@ static void loop_run_active(const struct agent_loop_params *params,
         if (compact_should_auto(turn_context,
                                 model_meta_context(params->provider, session->model)) &&
             hooks->compact) {
-            hooks->compact(hooks->user);
-            sig = loop_checkpoint(hooks);
-            if (sig == AGENT_LOOP_SIG_ABORT) {
-                agent_session_mark_interrupt(session);
-                loop_flush(params);
-                result->outcome = AGENT_LOOP_INTERRUPTED;
-                result->abort_marker_placed = 1;
+            int compacted;
+            if (loop_compact(params, result, AGENT_LOOP_COMPACT_THRESHOLD, &compacted))
                 return;
-            }
-            if (sig == AGENT_LOOP_SIG_PAUSE) {
-                result->outcome = AGENT_LOOP_PAUSED;
-                return;
-            }
         }
     }
 }

@@ -103,6 +103,10 @@ int stream_retry_run(const struct stream_retry *request, stream_cb callback, voi
                 .kind = EV_ERROR,
                 .u.error = {.message = message,
                             .http_status = (int)response.status,
+                            .error_kind =
+                                api_error_is_context_overflow(response.status, response.error_body)
+                                    ? STREAM_ERROR_CONTEXT_OVERFLOW
+                                    : STREAM_ERROR_OTHER,
                             .usage = stranded_usage},
             };
             callback(&error, callback_user);

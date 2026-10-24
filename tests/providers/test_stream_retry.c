@@ -145,6 +145,7 @@ struct event_log {
     long retry_usage_input;
     long error_usage_input;
     int error_status;
+    enum stream_error_kind error_kind;
     char text[128];
     char error_message[256];
 };
@@ -166,6 +167,7 @@ static int log_event(const struct stream_event *event, void *user)
     case EV_ERROR:
         log->n_error++;
         log->error_status = event->u.error.http_status;
+        log->error_kind = event->u.error.error_kind;
         if (event->u.error.usage)
             log->error_usage_input = event->u.error.usage->input_tokens;
         snprintf(log->error_message, sizeof(log->error_message), "%s", event->u.error.message);
@@ -255,6 +257,21 @@ static void test_retry_then_success(void)
     EXPECT(fake.frees == 2);
 }
 
+static void test_overflow_refusal_is_classified(void)
+{
+    const char *responses[] = {
+        "HTTP/1.1 400 Bad Request\r\nContent-Length: 58\r\nConnection: close\r\n\r\n"
+        "{\"error\":{\"message\":\"x\",\"code\":\"context_length_exceeded\"}}",
+    };
+    struct fake_stream fake = {0};
+    struct event_log log = {0};
+    run_scripted(responses, 1, &fake, &log);
+
+    EXPECT(log.n_retry == 0);
+    EXPECT(log.n_error == 1);
+    EXPECT(log.error_kind == STREAM_ERROR_CONTEXT_OVERFLOW);
+}
+
 static void test_non_retryable_error(void)
 {
     const char *responses[] = {
@@ -270,6 +287,7 @@ static void test_non_retryable_error(void)
     EXPECT(log.n_error == 1);
     EXPECT(log.error_status == 400);
     EXPECT(strstr(log.error_message, "bad request") != NULL);
+    EXPECT(log.error_kind == STREAM_ERROR_OTHER);
     EXPECT(fake.finalizes == 0);
     EXPECT(fake.inits == 1);
     EXPECT(fake.frees == 1);
@@ -435,6 +453,7 @@ int main(void)
     test_success_first_attempt();
     test_retry_then_success();
     test_non_retryable_error();
+    test_overflow_refusal_is_classified();
     test_retry_budget_exhausted();
     test_recover_redoes_attempt();
     test_midstream_death_retried();

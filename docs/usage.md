@@ -263,6 +263,28 @@ window. Use `/compact` earlier when the conversation has accumulated obsolete ex
 optionally naming what the summary must preserve. Manual compaction works even when the model's
 context limit is unknown.
 
+Compaction sends the whole conversation to the model, so it can fail for the same reason the
+conversation needs it: the model refuses a request too large for its context window. hax then
+retries, at most three times, on a shortened view: first with long tool output and arguments
+clipped, then without the older half of the earlier exchanges, then with only the latest request
+and the last exchange. The summary says that earlier details may be missing, and the notice reads
+"compacted from a shortened view". Only the summarization request is shortened: the session keeps
+the full history. When even the latest exchange does not fit, compaction fails and says so; start a
+new conversation or switch to a model with a larger window.
+
+When the model refuses an ordinary request because the conversation no longer fits its context
+window, hax compacts the conversation and sends the request again, so the turn continues instead of
+failing. This works even when the context limit is unknown. The refusal is recognized from the
+provider's error code, or from wording that names the context window, on an HTTP 400 or 413 or an
+error inside the stream; rate limits and server errors never count. A request is sent again only
+if the model showed no output for it, at most once per request: a refusal of the retried request
+ends the turn. Automatic compaction covers this recovery, so `compact.auto=off` leaves the refusal
+to you.
+
+A compaction in the middle of a user turn, whether on the threshold or to recover a refused
+request, quotes your prompt verbatim after the summary, so the work continues on your own words
+rather than the summary's account of them. A prompt over 8 KiB is left to the summary.
+
 For local servers, configure a context window large enough for the system prompt, project context,
 conversation, and response. A small server-side context often appears as truncated answers rather
 than a hax error; see the provider-specific notes in [providers.md](./providers.md).

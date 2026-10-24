@@ -514,6 +514,13 @@ struct loop_test_ctx {
     int cancel_at;
     int pause_at;
     int continued;
+    int errors_observed;
+    enum agent_loop_compact_reason compact_reason;
+    /* The compaction hook reports no compaction. */
+    int compaction_fails;
+    /* The compaction hook requests an abort or a pause for the checkpoint after it. */
+    int cancel_in_compaction;
+    int pause_in_compaction;
 };
 
 static void count_turn_begin(void *user)
@@ -562,10 +569,23 @@ static int cancel_checkpoint(void *user)
     return AGENT_LOOP_SIG_NONE;
 }
 
-static void count_compaction(void *user)
+static int count_compaction(enum agent_loop_compact_reason reason, void *user)
 {
     struct loop_test_ctx *ctx = user;
     ctx->compactions++;
+    ctx->compact_reason = reason;
+    if (ctx->cancel_in_compaction)
+        ctx->cancel_at = ctx->checkpoints + 1;
+    if (ctx->pause_in_compaction)
+        ctx->pause_at = ctx->checkpoints + 1;
+    return !ctx->compaction_fails;
+}
+
+static int count_observed_errors(const struct stream_event *event, void *user)
+{
+    struct loop_test_ctx *ctx = user;
+    ctx->errors_observed += event->kind == EV_ERROR;
+    return 0;
 }
 
 static void session_enable_tools(struct agent_session *session)
@@ -626,8 +646,12 @@ static struct agent_loop_result run_chain(struct agent_session *session, struct 
         .hooks =
             {
                 .user = ctx,
+                .observe = count_observed_errors,
                 .turn_begin = count_turn_begin,
-                .checkpoint = (ctx->cancel_at || ctx->pause_at) ? cancel_checkpoint : NULL,
+                .checkpoint = (ctx->cancel_at || ctx->pause_at || ctx->cancel_in_compaction ||
+                               ctx->pause_in_compaction)
+                                  ? cancel_checkpoint
+                                  : NULL,
                 .tool_seen = count_tool,
                 .tool_call = run_test_tool,
                 .compact = count_compaction,
@@ -1332,6 +1356,174 @@ static void test_loop_requests_mid_chain_compaction(void)
     config_set_override("compact.auto", NULL);
 }
 
+/* One letter per request: O refuses it for size before any output, P refuses it after partial
+ * text, T answers with a tool call, A answers with text. */
+static const char *overflow_plan;
+static int overflow_requests;
+
+static int overflow_stream(struct provider *p, const struct context *ctx, const char *model,
+                           stream_cb cb, void *user, http_tick_cb tick, void *tick_user)
+{
+    (void)p;
+    (void)ctx;
+    (void)model;
+    (void)tick;
+    (void)tick_user;
+    char step = overflow_plan[overflow_requests++];
+    struct stream_event refusal = {
+        .kind = EV_ERROR,
+        .u.error = {.message = "HTTP 400: prompt is too long",
+                    .http_status = 400,
+                    .error_kind = STREAM_ERROR_CONTEXT_OVERFLOW},
+    };
+    if (step == 'P')
+        emit_text(cb, user, "partial");
+    if (step == 'O' || step == 'P') {
+        cb(&refusal, user);
+        return 0;
+    }
+    if (step == 'T')
+        emit_tool_call(cb, user, "c1");
+    else
+        emit_text(cb, user, "recovered");
+    emit_done(cb, user, usage_tokens(100, 20));
+    return 0;
+}
+
+static struct agent_loop_result run_overflow_plan(const char *plan, struct loop_test_ctx *ctx,
+                                                  struct agent_session *session)
+{
+    session_init(session);
+    session_enable_tools(session);
+    agent_session_add_user(session, "start");
+    struct provider provider = {.name = "test", .stream = overflow_stream};
+    overflow_plan = plan;
+    overflow_requests = 0;
+    return run_chain(session, &provider, ctx, 0);
+}
+
+/* A request refused for size is compacted and re-sent, and the refusal never reaches the
+ * frontend. */
+static void test_loop_recovers_from_an_oversized_request(void)
+{
+    struct agent_session session;
+    struct loop_test_ctx ctx = {0};
+    struct agent_loop_result result = run_overflow_plan("OA", &ctx, &session);
+    EXPECT(result.outcome == AGENT_LOOP_COMPLETE);
+    EXPECT(ctx.compactions == 1);
+    EXPECT(ctx.compact_reason == AGENT_LOOP_COMPACT_OVERFLOW);
+    EXPECT(overflow_requests == 2);
+    EXPECT(ctx.errors_observed == 0);
+    EXPECT(result.error_message == NULL);
+    EXPECT(!result.abort_marker_placed);
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+/* A refusal of the compacted retry ends the turn rather than looping. */
+static void test_loop_recovers_once_per_request(void)
+{
+    struct agent_session session;
+    struct loop_test_ctx ctx = {0};
+    struct agent_loop_result result = run_overflow_plan("OO", &ctx, &session);
+    EXPECT(result.outcome == AGENT_LOOP_PROVIDER_ERROR);
+    EXPECT(ctx.compactions == 1);
+    EXPECT(overflow_requests == 2);
+    EXPECT(ctx.errors_observed == 1);
+    EXPECT_STR_EQ(result.error_message, "HTTP 400: prompt is too long");
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+/* Progress renews the allowance: a later, independent refusal is recovered too. */
+static void test_loop_recovers_again_after_progress(void)
+{
+    struct agent_session session;
+    struct loop_test_ctx ctx = {0};
+    struct agent_loop_result result = run_overflow_plan("OTOA", &ctx, &session);
+    EXPECT(result.outcome == AGENT_LOOP_COMPLETE);
+    EXPECT(ctx.compactions == 2);
+    EXPECT(ctx.tools_run == 1);
+    EXPECT(ctx.errors_observed == 0);
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+static void test_loop_reports_a_failed_recovery(void)
+{
+    struct agent_session session;
+    struct loop_test_ctx ctx = {.compaction_fails = 1};
+    struct agent_loop_result result = run_overflow_plan("O", &ctx, &session);
+    EXPECT(result.outcome == AGENT_LOOP_PROVIDER_ERROR);
+    EXPECT(ctx.compactions == 1);
+    EXPECT(overflow_requests == 1);
+    EXPECT(ctx.errors_observed == 1);
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+/* Without automatic compaction the refusal stands: the user compacts by hand. */
+static void test_loop_keeps_a_refusal_without_auto_compaction(void)
+{
+    config_set_override("compact.auto", "0");
+    struct agent_session session;
+    struct loop_test_ctx ctx = {0};
+    struct agent_loop_result result = run_overflow_plan("O", &ctx, &session);
+    EXPECT(result.outcome == AGENT_LOOP_PROVIDER_ERROR);
+    EXPECT(ctx.compactions == 0);
+    EXPECT(ctx.errors_observed == 1);
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+    config_set_override("compact.auto", NULL);
+}
+
+/* A refusal after partial output is not re-sent: the user already saw the start of an answer. */
+static void test_loop_keeps_a_refusal_after_output(void)
+{
+    struct agent_session session;
+    struct loop_test_ctx ctx = {0};
+    struct agent_loop_result result = run_overflow_plan("P", &ctx, &session);
+    EXPECT(result.outcome == AGENT_LOOP_PROVIDER_ERROR);
+    EXPECT(ctx.compactions == 0);
+    EXPECT(overflow_requests == 1);
+    EXPECT(ctx.errors_observed == 1);
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+/* A cancel pending at the refusal wins over recovery, which would otherwise clear it. */
+static void test_loop_pending_cancel_skips_recovery(void)
+{
+    struct agent_session session;
+    struct loop_test_ctx ctx = {.cancel_at = 1};
+    struct agent_loop_result result = run_overflow_plan("OA", &ctx, &session);
+    EXPECT(result.outcome == AGENT_LOOP_PROVIDER_ERROR);
+    EXPECT(ctx.compactions == 0);
+    EXPECT(overflow_requests == 1);
+    EXPECT(ctx.errors_observed == 1);
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+static void test_loop_stops_on_cancel_during_recovery(void)
+{
+    struct agent_session session;
+    struct loop_test_ctx ctx = {.cancel_in_compaction = 1};
+    struct agent_loop_result result = run_overflow_plan("OA", &ctx, &session);
+    EXPECT(result.outcome == AGENT_LOOP_INTERRUPTED);
+    EXPECT(ctx.compactions == 1);
+    EXPECT(overflow_requests == 1);
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+
+    ctx = (struct loop_test_ctx){.pause_in_compaction = 1};
+    result = run_overflow_plan("OA", &ctx, &session);
+    EXPECT(result.outcome == AGENT_LOOP_PAUSED);
+    EXPECT(overflow_requests == 1);
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+}
+
 static void observed_task_note(const char *text, void *user)
 {
     EXPECT(text != NULL);
@@ -1430,6 +1622,14 @@ int main(void)
     test_loop_reports_provider_error();
     test_loop_prestream_error_leaves_no_marker();
     test_loop_requests_mid_chain_compaction();
+    test_loop_recovers_from_an_oversized_request();
+    test_loop_recovers_once_per_request();
+    test_loop_recovers_again_after_progress();
+    test_loop_reports_a_failed_recovery();
+    test_loop_keeps_a_refusal_without_auto_compaction();
+    test_loop_keeps_a_refusal_after_output();
+    test_loop_pending_cancel_skips_recovery();
+    test_loop_stops_on_cancel_during_recovery();
     test_loop_injects_finished_task_note();
     T_REPORT();
 }

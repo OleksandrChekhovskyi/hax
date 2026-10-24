@@ -214,6 +214,12 @@ enum stream_event_kind {
     EV_ERROR,
 };
 
+/* Why a request failed, when the failure says so. */
+enum stream_error_kind {
+    STREAM_ERROR_OTHER,
+    STREAM_ERROR_CONTEXT_OVERFLOW, /* the request exceeds the model's context window */
+};
+
 struct stream_event {
     enum stream_event_kind kind;
     union {
@@ -264,6 +270,7 @@ struct stream_event {
         struct {
             const char *message;
             int http_status;
+            enum stream_error_kind error_kind;
             /* Usage the provider reported before the failure, or NULL.
              * Truncated responses (max_tokens/length) are billed like
              * complete ones, so translators that captured usage attach

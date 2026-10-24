@@ -12,6 +12,32 @@
 
 #define MAX_MESSAGE_BYTES 200
 
+/* Native codes and types that name the overflow. The request_too_large type is Anthropic's 413,
+ * which a smaller conversation also answers. */
+static const char *const OVERFLOW_CODES[] = {
+    "context_length_exceeded",
+    "exceed_context_size_error",
+    "request_too_large",
+    NULL,
+};
+
+/* Wordings for providers that send no such code. Each names the input or the context window:
+ * phrases like "too many tokens" also describe rate limits and output-token settings. */
+static const char *const OVERFLOW_PHRASES[] = {
+    "context length exceeded",
+    "context_length_exceeded",
+    "maximum context length",
+    "context window exceeded",
+    "exceeds the context window",
+    "exceeds the available context size",
+    "context size has been exceeded",
+    "prompt is too long",
+    "input is too long",
+    "input token count",
+    "reduce the length of the messages",
+    NULL,
+};
+
 static int is_tag_start(const char *text, const char *tag)
 {
     size_t tag_len = strlen(tag);
@@ -165,6 +191,79 @@ static char *format_status_message(long status, const char *message)
         return xasprintf("HTTP %ld", status);
     }
     return xstrdup(message && *message ? message : "request failed");
+}
+
+static int contains_fold(const char *haystack, const char *needle)
+{
+    size_t needle_len = strlen(needle);
+
+    for (const char *cursor = haystack; *cursor; cursor++) {
+        size_t i = 0;
+        while (i < needle_len && cursor[i] &&
+               tolower((unsigned char)cursor[i]) == tolower((unsigned char)needle[i]))
+            i++;
+        if (i == needle_len)
+            return 1;
+    }
+    return 0;
+}
+
+static int names_overflow(const char *code)
+{
+    if (!code)
+        return 0;
+    for (size_t i = 0; OVERFLOW_CODES[i]; i++)
+        if (strcmp(code, OVERFLOW_CODES[i]) == 0)
+            return 1;
+    return 0;
+}
+
+static int says_overflow(const char *text)
+{
+    if (!text)
+        return 0;
+    for (size_t i = 0; OVERFLOW_PHRASES[i]; i++)
+        if (contains_fold(text, OVERFLOW_PHRASES[i]))
+            return 1;
+    return 0;
+}
+
+/* A size refusal comes back as 400 or 413, or inside a stream with no status. Rate limits and
+ * server errors never mean the request was too large, whatever they say. */
+static int status_allows_overflow(long status)
+{
+    return status == 0 || status == 400 || status == 413;
+}
+
+int api_error_object_is_context_overflow(long status, const json_t *error)
+{
+    if (!status_allows_overflow(status) || !json_is_object(error))
+        return 0;
+    return names_overflow(json_string_value(json_object_get(error, "code"))) ||
+           names_overflow(json_string_value(json_object_get(error, "type"))) ||
+           says_overflow(json_string_value(json_object_get(error, "message")));
+}
+
+int api_error_is_context_overflow(long status, const char *body)
+{
+    if (!status_allows_overflow(status) || !body || !*body)
+        return 0;
+
+    char *sse_data = unwrap_sse_data(body);
+    const char *content = sse_data ? sse_data : body;
+    json_t *root = json_loads(content, 0, NULL);
+    int overflow;
+    if (root) {
+        json_t *error = json_object_get(root, "error");
+        overflow =
+            api_error_object_is_context_overflow(status, json_is_object(error) ? error : root) ||
+            says_overflow(json_string_value(error));
+        json_decref(root);
+    } else {
+        overflow = says_overflow(content);
+    }
+    free(sse_data);
+    return overflow;
 }
 
 char *format_api_error(long status, const char *body)

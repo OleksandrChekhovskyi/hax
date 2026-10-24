@@ -63,6 +63,12 @@ enum mock_script {
     MOCK_INCOMPLETE,
     MOCK_STREAM_RETRY,
     MOCK_STREAM_RETRY_INCOMPLETE,
+    /* Refuses for size any request whose content exceeds `overflow_above` bytes. */
+    MOCK_OVERFLOW,
+    /* Refuses the first request for size and fails the next one for another reason. */
+    MOCK_OVERFLOW_THEN_ERROR,
+    /* Refuses the first request for size and cancels the compaction. */
+    MOCK_OVERFLOW_THEN_CANCEL,
 };
 
 struct mock_state {
@@ -71,6 +77,12 @@ struct mock_state {
     int cancel_requested;
     int observed_events;
     size_t last_request_items;
+    size_t overflow_above;
+    size_t largest_accepted;
+    /* The text of every item in the last accepted request, joined. */
+    char accepted_text[16384];
+    /* Tool calls an accepted request carried without their results. */
+    int unpaired_calls;
 };
 
 static struct mock_state mock;
@@ -131,6 +143,53 @@ static void emit_tool_call(stream_cb cb, void *user)
     cb(&end, user);
 }
 
+static void emit_overflow(stream_cb cb, void *user)
+{
+    struct stream_event ev = {
+        .kind = EV_ERROR,
+        .u.error = {.message = "HTTP 400: prompt is too long",
+                    .http_status = 400,
+                    .error_kind = STREAM_ERROR_CONTEXT_OVERFLOW},
+    };
+    cb(&ev, user);
+}
+
+/* The content the request carries, without the trailing summarization prompt. */
+static size_t request_bytes(const struct context *ctx)
+{
+    size_t bytes = 0;
+    for (size_t i = 0; i + 1 < ctx->n_items; i++) {
+        const struct item *item = &ctx->items[i];
+        bytes += (item->text ? strlen(item->text) : 0) + (item->output ? strlen(item->output) : 0) +
+                 (item->tool_arguments_json ? strlen(item->tool_arguments_json) : 0);
+    }
+    return bytes;
+}
+
+static void record_accepted(const struct context *ctx)
+{
+    size_t bytes = request_bytes(ctx);
+    if (bytes > mock.largest_accepted)
+        mock.largest_accepted = bytes;
+
+    mock.accepted_text[0] = '\0';
+    for (size_t i = 0; i < ctx->n_items; i++) {
+        const struct item *item = &ctx->items[i];
+        const char *text = item->text ? item->text : item->output;
+        if (text)
+            snprintf(mock.accepted_text + strlen(mock.accepted_text),
+                     sizeof(mock.accepted_text) - strlen(mock.accepted_text), "%s\n", text);
+        if (item->kind != ITEM_TOOL_CALL)
+            continue;
+        int paired = 0;
+        for (size_t j = i + 1; j < ctx->n_items; j++)
+            if (ctx->items[j].kind == ITEM_TOOL_RESULT &&
+                strcmp(ctx->items[j].call_id, item->call_id) == 0)
+                paired = 1;
+        mock.unpaired_calls += !paired;
+    }
+}
+
 static int mock_stream(struct provider *provider, const struct context *ctx, const char *model,
                        stream_cb cb, void *user, http_tick_cb tick, void *tick_user)
 {
@@ -141,6 +200,20 @@ static int mock_stream(struct provider *provider, const struct context *ctx, con
     EXPECT(ctx != NULL);
     mock.last_request_items = ctx->n_items;
     mock.stream_calls++;
+
+    int first = mock.stream_calls == 1;
+    if ((mock.script == MOCK_OVERFLOW && request_bytes(ctx) > mock.overflow_above) ||
+        ((mock.script == MOCK_OVERFLOW_THEN_ERROR || mock.script == MOCK_OVERFLOW_THEN_CANCEL) &&
+         first)) {
+        emit_overflow(cb, user);
+        mock.cancel_requested = mock.script == MOCK_OVERFLOW_THEN_CANCEL;
+        return 0;
+    }
+    if (mock.script == MOCK_OVERFLOW_THEN_ERROR) {
+        emit_error(cb, user, "summary failed", NULL);
+        return 0;
+    }
+    record_accepted(ctx);
 
     if ((mock.script == MOCK_RETRY_ONCE && mock.stream_calls == 1) ||
         mock.script == MOCK_ALWAYS_TOOL_CALL) {
@@ -193,14 +266,16 @@ static void init_session(struct agent_session *session)
                          (struct item){.kind = ITEM_USER_MESSAGE, .text = xstrdup("old history")});
 }
 
-static struct compact_result run_compaction(struct agent_session *session,
-                                            struct provider *provider,
-                                            struct session_log *session_log)
+static struct compact_result run_compaction_keeping(struct agent_session *session,
+                                                    struct provider *provider,
+                                                    struct session_log *session_log,
+                                                    int keep_request)
 {
     struct compact_params params = {
         .session = session,
         .provider = provider,
         .session_log = session_log,
+        .keep_request = keep_request,
         .hooks =
             {
                 .on_event = observe_event,
@@ -210,6 +285,13 @@ static struct compact_result run_compaction(struct agent_session *session,
     struct compact_result result;
     compact_run(&params, &result);
     return result;
+}
+
+static struct compact_result run_compaction(struct agent_session *session,
+                                            struct provider *provider,
+                                            struct session_log *session_log)
+{
+    return run_compaction_keeping(session, provider, session_log, 0);
 }
 
 static void test_applies_summary(void)
@@ -499,6 +581,206 @@ static void test_discards_cancelled_summary(void)
     agent_session_free(&session);
 }
 
+static void add_tool_round(struct agent_session *session, const char *prompt, size_t output_bytes)
+{
+    agent_session_add_user(session, prompt);
+    agent_session_append(session, (struct item){.kind = ITEM_TOOL_CALL,
+                                                .call_id = xstrdup("c1"),
+                                                .tool_name = xstrdup("read"),
+                                                .tool_arguments_json = xstrdup("{}")});
+    char *output = xmalloc(output_bytes + 1);
+    memset(output, 'x', output_bytes);
+    output[output_bytes] = '\0';
+    agent_session_append(
+        session,
+        (struct item){.kind = ITEM_TOOL_RESULT, .call_id = xstrdup("c1"), .output = output});
+}
+
+static void init_empty_session(struct agent_session *session)
+{
+    memset(session, 0, sizeof(*session));
+    session->model = xstrdup("model");
+    session->provider_id = "test";
+}
+
+static int window_has_seed(const struct agent_session *session)
+{
+    struct context window = agent_session_context(session);
+    return window.n_items > 0 && window.items[0].origin == ITEM_ORIGIN_COMPACT_SEED;
+}
+
+/* One tool result larger than the window: clipping it is enough. */
+static void test_shrinks_an_oversized_tool_result(void)
+{
+    struct agent_session session;
+    init_empty_session(&session);
+    add_tool_round(&session, "inspect the log", 20000);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_OVERFLOW);
+    mock.overflow_above = 8000;
+
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    EXPECT(result.outcome == COMPACT_COMPLETE);
+    EXPECT(result.shrunk);
+    EXPECT(mock.stream_calls == 2);
+    EXPECT(mock.largest_accepted <= mock.overflow_above);
+    EXPECT(mock.unpaired_calls == 0);
+    EXPECT(strstr(mock.accepted_text, "inspect the log") != NULL);
+    EXPECT(strstr(mock.accepted_text, "bytes omitted to fit") != NULL);
+    EXPECT(strstr(mock.accepted_text, "shortened or omitted") != NULL);
+    EXPECT(window_has_seed(&session));
+
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+/* Many rounds with nothing to clip: the older half goes, the latest request stays whole, and a
+ * stage that would not shrink the request is not sent. */
+static void test_omits_older_rounds(void)
+{
+    struct agent_session session;
+    init_empty_session(&session);
+    char answer[1501];
+    memset(answer, 'a', sizeof(answer) - 1);
+    answer[sizeof(answer) - 1] = '\0';
+    for (int i = 0; i < 8; i++) {
+        char prompt[16];
+        snprintf(prompt, sizeof(prompt), "prompt %d", i);
+        agent_session_add_user(&session, prompt);
+        agent_session_append(
+            &session, (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup(answer)});
+    }
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_OVERFLOW);
+    mock.overflow_above = 7000;
+
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    EXPECT(result.outcome == COMPACT_COMPLETE);
+    EXPECT(result.shrunk);
+    EXPECT(mock.stream_calls == 2);
+    EXPECT(strstr(mock.accepted_text, "prompt 7") != NULL);
+    EXPECT(strstr(mock.accepted_text, "prompt 0") == NULL);
+    EXPECT(strstr(mock.accepted_text, "Earlier exchanges were omitted") != NULL);
+
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+/* A latest request too large on its own cannot be shortened: compaction fails with an actionable
+ * message, sends nothing it cannot shrink, and leaves the history as it was. */
+static void test_reports_an_irreducible_request(void)
+{
+    struct agent_session session;
+    init_empty_session(&session);
+    char *prompt = xmalloc(20001);
+    memset(prompt, 'p', 20000);
+    prompt[20000] = '\0';
+    agent_session_add_user(&session, prompt);
+    free(prompt);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_OVERFLOW);
+    mock.overflow_above = 8000;
+
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    EXPECT(result.outcome == COMPACT_PROVIDER_ERROR);
+    EXPECT(mock.stream_calls == 1);
+    EXPECT(result.error_message && strstr(result.error_message, "prompt is too long") != NULL);
+    EXPECT(result.error_message &&
+           strstr(result.error_message, "cannot be shortened enough") != NULL);
+    EXPECT(!window_has_seed(&session));
+
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+/* A shortened request that fails for another reason reports that failure, not the refusal. */
+static void test_reports_the_latest_failure(void)
+{
+    struct agent_session session;
+    init_empty_session(&session);
+    add_tool_round(&session, "inspect the log", 20000);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_OVERFLOW_THEN_ERROR);
+
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    EXPECT(result.outcome == COMPACT_PROVIDER_ERROR);
+    EXPECT(mock.stream_calls == 2);
+    EXPECT_STR_EQ(result.error_message, "summary failed");
+
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+static void test_cancel_stops_shrinking(void)
+{
+    struct agent_session session;
+    init_empty_session(&session);
+    add_tool_round(&session, "inspect the log", 20000);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_OVERFLOW_THEN_CANCEL);
+
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    EXPECT(result.outcome == COMPACT_CANCELLED);
+    EXPECT(mock.stream_calls == 1);
+
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+static const char *seed_text(const struct agent_session *session)
+{
+    struct context window = agent_session_context(session);
+    return window.n_items > 0 && window.items[0].origin == ITEM_ORIGIN_COMPACT_SEED
+               ? window.items[0].text
+               : "";
+}
+
+/* Inside a user turn the seed quotes the request verbatim; outside one it does not. */
+static void test_keeps_the_request_in_progress(void)
+{
+    struct agent_session session;
+    init_empty_session(&session);
+    agent_session_add_user(&session, "rename `foo_bar` to `baz` in src/");
+    agent_session_append(&session, (struct item){.kind = ITEM_ASSISTANT_MESSAGE,
+                                                 .text = xstrdup("Looking at src/")});
+    struct provider provider = {.name = "test", .stream = mock_stream};
+
+    reset_mock(MOCK_SUCCESS);
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    EXPECT(result.outcome == COMPACT_COMPLETE);
+    EXPECT(strstr(seed_text(&session), "verbatim") == NULL);
+    compact_result_destroy(&result);
+
+    /* The request now predates the window; a second compaction still finds it. */
+    reset_mock(MOCK_SUCCESS);
+    result = run_compaction_keeping(&session, &provider, NULL, 1);
+    EXPECT(result.outcome == COMPACT_COMPLETE);
+    EXPECT(strstr(seed_text(&session), "The request being worked on, verbatim:\n\nrename "
+                                       "`foo_bar` to `baz` in src/") != NULL);
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+/* A request too long to quote is left to the summary. */
+static void test_leaves_a_long_request_to_the_summary(void)
+{
+    struct agent_session session;
+    init_empty_session(&session);
+    char *prompt = xmalloc(9001);
+    memset(prompt, 'p', 9000);
+    prompt[9000] = '\0';
+    agent_session_add_user(&session, prompt);
+    free(prompt);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_SUCCESS);
+
+    struct compact_result result = run_compaction_keeping(&session, &provider, NULL, 1);
+    EXPECT(result.outcome == COMPACT_COMPLETE);
+    EXPECT(strstr(seed_text(&session), "verbatim") == NULL);
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
 int main(void)
 {
     /* Outside any repository, so recorded sessions neither run git nor depend on the checkout. */
@@ -517,5 +799,12 @@ int main(void)
     test_rejects_empty_summary();
     test_rejects_incomplete_response();
     test_discards_cancelled_summary();
+    test_shrinks_an_oversized_tool_result();
+    test_omits_older_rounds();
+    test_reports_an_irreducible_request();
+    test_reports_the_latest_failure();
+    test_cancel_stops_shrinking();
+    test_keeps_the_request_in_progress();
+    test_leaves_a_long_request_to_the_summary();
     T_REPORT();
 }

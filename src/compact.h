@@ -38,16 +38,23 @@ struct compact_params {
     struct session_log *session_log;
     struct transcript_log *transcript_log;
     const char *instructions;
+    /* A user turn is in progress: the seed quotes its request verbatim, so the work continues on
+     * the user's own words rather than the summary's account of them. */
+    int keep_request;
     struct compact_hooks hooks;
 };
 
 struct compact_result {
     enum compact_outcome outcome;
     int attempts;
+    /* The summary covers a shortened view: tool output was clipped or earlier exchanges were
+     * omitted to fit the model's context window. The session still holds the full history. */
+    int shrunk;
     char *error_message;
 };
 
-/* Summarize the current model-visible context and append a seed on success. Every attempt's
+/* Summarize the current model-visible context and append a seed on success. A request the model
+ * refuses for size is retried a bounded number of times on shortened views. Every attempt's
  * reported usage is appended to the session and both logs are flushed. The result owns
  * `error_message`. */
 void compact_run(const struct compact_params *params, struct compact_result *result);

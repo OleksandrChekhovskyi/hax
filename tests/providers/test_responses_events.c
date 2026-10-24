@@ -18,6 +18,7 @@ struct captured_event {
     char *response_id;
     char *served_model;
     int http_status;
+    enum stream_error_kind error_kind;
     struct stream_usage usage;
 };
 
@@ -71,6 +72,7 @@ static int capture_event(const struct stream_event *event, void *callback_user)
     case EV_ERROR:
         captured->message = strdup(event->u.error.message ? event->u.error.message : "");
         captured->http_status = event->u.error.http_status;
+        captured->error_kind = event->u.error.error_kind;
         if (event->u.error.usage)
             captured->usage = *event->u.error.usage;
         else
@@ -329,6 +331,25 @@ static void test_failed_with_message(void)
     fixture_free(&fixture);
 }
 
+static void test_overflow_failures_are_classified(void)
+{
+    struct event_fixture fixture;
+    fixture_init(&fixture);
+    responses_events_feed(&fixture.parser, "{\"type\":\"response.failed\",\"response\":"
+                                           "{\"error\":{\"code\":\"context_length_exceeded\","
+                                           "\"message\":\"Too long\"}}}");
+    EXPECT(fixture.capture.count == 1);
+    EXPECT(fixture.capture.events[0].error_kind == STREAM_ERROR_CONTEXT_OVERFLOW);
+    fixture_free(&fixture);
+
+    fixture_init(&fixture);
+    responses_events_feed(&fixture.parser, "{\"type\":\"error\",\"code\":"
+                                           "\"context_length_exceeded\",\"message\":\"Too long\"}");
+    EXPECT(fixture.capture.count == 1);
+    EXPECT(fixture.capture.events[0].error_kind == STREAM_ERROR_CONTEXT_OVERFLOW);
+    fixture_free(&fixture);
+}
+
 static void test_failed_without_message_uses_fallback(void)
 {
     struct event_fixture fixture;
@@ -352,6 +373,7 @@ static void test_stream_error_event(void)
     EXPECT(fixture.capture.count == 1);
     EXPECT(fixture.capture.events[0].kind == EV_ERROR);
     EXPECT_STR_EQ(fixture.capture.events[0].message, "Rate limit reached");
+    EXPECT(fixture.capture.events[0].error_kind == STREAM_ERROR_OTHER);
     responses_events_finalize(&fixture.parser);
     EXPECT(fixture.capture.count == 1);
     fixture_free(&fixture);
@@ -782,6 +804,7 @@ int main(void)
     test_incomplete_with_reason();
     test_incomplete_without_reason();
     test_failed_with_message();
+    test_overflow_failures_are_classified();
     test_failed_without_message_uses_fallback();
     test_stream_error_event();
     test_stream_error_falls_back_to_code();

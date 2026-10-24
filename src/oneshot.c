@@ -53,31 +53,38 @@ static int compact_cancelled(void *user)
     return interrupt_abort_requested() || interrupt_pause_requested();
 }
 
-static int compact_context(struct oneshot_state *state)
+/* Returns whether the conversation was compacted and reports it on stderr. `keep_request` marks
+ * a compaction inside the run's user turn, whose request the seed quotes. */
+static int compact_context(struct oneshot_state *state, enum agent_loop_compact_reason reason,
+                           int keep_request)
 {
     struct compact_params params = {
         .session = &state->session,
         .provider = state->provider,
         .session_log = state->session_log,
         .transcript_log = state->transcript,
+        .keep_request = keep_request,
         .hooks = {.user = state, .tick = compact_cancelled, .is_cancelled = compact_cancelled},
     };
     struct compact_result result;
 
     compact_run(&params, &result);
     int completed = result.outcome == COMPACT_COMPLETE;
+    int shrunk = result.shrunk;
     compact_result_destroy(&result);
+    if (!completed || state->json)
+        return completed;
+    int tty = isatty(fileno(stderr));
+    fprintf(stderr, "%s[%scompacted context%s]%s\n", tty ? ANSI_DIM : "",
+            reason == AGENT_LOOP_COMPACT_OVERFLOW ? "request too large for the context window; "
+                                                  : "",
+            shrunk ? " from a shortened view" : "", tty ? ANSI_RESET : "");
     return completed;
 }
 
-static void auto_compact(void *user)
+static int auto_compact(enum agent_loop_compact_reason reason, void *user)
 {
-    struct oneshot_state *state = user;
-
-    if (!compact_context(state) || state->json)
-        return;
-    int tty = isatty(fileno(stderr));
-    fprintf(stderr, "%s[compacted context]%s\n", tty ? ANSI_DIM : "", tty ? ANSI_RESET : "");
+    return compact_context(user, reason, 1);
 }
 
 /* The --json stream on stdout; docs/sessions.md is the record contract. On a write failure
@@ -587,7 +594,7 @@ int oneshot_run(struct provider *provider, const char *prompt, const struct hax_
     /* The REPL's deferred compaction before a send: the loop compacts only at seams it reaches
      * itself, so a resumed record over the threshold is compacted here. */
     if (state.compact_owed)
-        auto_compact(&state);
+        compact_context(&state, AGENT_LOOP_COMPACT_THRESHOLD, 0);
 
     struct agent_loop_result loop_result;
     if (interrupt_abort_requested() || interrupt_pause_requested()) {

@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: MIT */
+#include <jansson.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -316,6 +317,69 @@ static void test_model_list_error_null_name(void)
     free(message);
 }
 
+/* A native code names the overflow even when the message does not. */
+static void test_overflow_by_code(void)
+{
+    EXPECT(api_error_is_context_overflow(400, "{\"error\":{\"message\":\"Context too long\","
+                                              "\"code\":\"context_length_exceeded\"}}"));
+    EXPECT(api_error_is_context_overflow(400, "{\"error\":{\"code\":400,\"message\":\"try a "
+                                              "smaller prompt\",\"type\":"
+                                              "\"exceed_context_size_error\"}}"));
+    EXPECT(api_error_is_context_overflow(413, "{\"type\":\"error\",\"error\":{\"type\":"
+                                              "\"request_too_large\",\"message\":\"Request "
+                                              "exceeds the maximum size\"}}"));
+}
+
+static void test_overflow_by_wording(void)
+{
+    EXPECT(api_error_is_context_overflow(400, "{\"type\":\"error\",\"error\":{\"type\":"
+                                              "\"invalid_request_error\",\"message\":\"prompt "
+                                              "is too long: 234858 tokens > 200000 maximum\"}}"));
+    EXPECT(api_error_is_context_overflow(400, "{\"error\":\"This model's maximum context length "
+                                              "is 8192 tokens.\"}"));
+    EXPECT(api_error_is_context_overflow(400, "{\"message\":\"The input token count (2000) "
+                                              "exceeds the maximum number of tokens allowed\"}"));
+    EXPECT(api_error_is_context_overflow(400, "Context size has been exceeded."));
+    EXPECT(api_error_is_context_overflow(
+        400, "event: error\ndata: {\"error\":{\"message\":\"the request exceeds the "
+             "available context size\"}}\n\n"));
+}
+
+/* The wording past the 200 bytes a displayed message keeps still classifies. */
+static void test_overflow_beyond_display_truncation(void)
+{
+    char body[1024];
+    char *cursor = body;
+    cursor += snprintf(cursor, sizeof(body), "{\"error\":{\"message\":\"");
+    for (int i = 0; i < 300; i++)
+        *cursor++ = 'x';
+    snprintf(cursor, sizeof(body) - (size_t)(cursor - body), " prompt is too long\"}}");
+    EXPECT(api_error_is_context_overflow(400, body));
+}
+
+static void test_overflow_false_positives(void)
+{
+    /* Rate limits and server errors are never size refusals, whatever they say. */
+    EXPECT(!api_error_is_context_overflow(429, "{\"error\":{\"message\":\"too many tokens per "
+                                               "minute\",\"code\":\"context_length_exceeded\"}}"));
+    EXPECT(!api_error_is_context_overflow(500, "context length exceeded upstream"));
+    /* An output-token setting is not the input overflowing. */
+    EXPECT(!api_error_is_context_overflow(400, "{\"error\":{\"message\":\"max_tokens: too many "
+                                               "tokens requested\"}}"));
+    EXPECT(!api_error_is_context_overflow(401, "{\"error\":{\"message\":\"invalid api key\"}}"));
+    EXPECT(!api_error_is_context_overflow(400, NULL));
+    EXPECT(!api_error_is_context_overflow(400, ""));
+}
+
+static void test_overflow_from_error_object(void)
+{
+    json_t *error = json_pack("{s:s, s:s}", "code", "context_length_exceeded", "message", "?");
+    EXPECT(api_error_object_is_context_overflow(0, error));
+    EXPECT(!api_error_object_is_context_overflow(429, error));
+    json_decref(error);
+    EXPECT(!api_error_object_is_context_overflow(0, NULL));
+}
+
 int main(void)
 {
     test_empty_body();
@@ -350,5 +414,10 @@ int main(void)
     test_model_list_error_http_status();
     test_model_list_error_unreachable();
     test_model_list_error_null_name();
+    test_overflow_by_code();
+    test_overflow_by_wording();
+    test_overflow_beyond_display_truncation();
+    test_overflow_false_positives();
+    test_overflow_from_error_object();
     T_REPORT();
 }

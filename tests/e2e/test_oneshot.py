@@ -181,4 +181,64 @@ def test_sigint_then_resume():
     harness.expect(records[-1].get("outcome") == "complete", "the resumed result completes", result)
 
 
+def test_compacts_after_an_oversized_request():
+    """A request the model refuses for size is compacted and sent again: the run answers instead of
+    failing, and stderr names the recovery rather than the refusal."""
+    result = harness.run_oneshot(
+        "keep going",
+        """
+        error This model's maximum context length is 8192 tokens.
+        end-turn
+
+        text ## Goal
+        end-turn
+
+        text Answered after compaction.
+        end-turn
+        """,
+    )
+    harness.expect(result.returncode == 0, "the run completes", result)
+    harness.expect(
+        "Answered after compaction." in result.stdout, "the retried request reaches stdout", result
+    )
+    harness.expect(
+        "[request too large for the context window; compacted context]" in result.stderr,
+        "stderr names the recovery",
+        result,
+    )
+    harness.expect(
+        "maximum context length" not in result.stderr, "the refusal does not reach stderr", result
+    )
+
+
+def test_recovery_keeps_the_request():
+    """The compaction that recovers a refused request quotes the prompt in its seed."""
+    result = harness.run_oneshot(
+        "rename foo_bar to baz",
+        """
+        error prompt is too long: 9000 tokens > 8192 maximum
+        end-turn
+
+        text ## Goal
+        end-turn
+
+        text Renamed.
+        end-turn
+        """,
+        extra_args=["--json"],
+    )
+    harness.expect(result.returncode == 0, "the run completes", result)
+    seeds = [
+        record
+        for record in map(json.loads, result.stdout.splitlines())
+        if record.get("origin") == "compact_seed"
+    ]
+    harness.expect(len(seeds) == 1, "the recovery compacted once", result)
+    harness.expect(
+        seeds and "verbatim:\n\nrename foo_bar to baz" in seeds[0].get("text", ""),
+        "the seed quotes the request",
+        result,
+    )
+
+
 harness.main(globals())

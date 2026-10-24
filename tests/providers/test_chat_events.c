@@ -19,6 +19,7 @@ struct captured_event {
     char *args_delta;
     char *message;
     int http_status;
+    enum stream_error_kind error_kind;
     struct stream_usage usage;
     char *response_id;
     char *served_model;
@@ -87,6 +88,7 @@ static int capture_event(const struct stream_event *event, void *user)
     case EV_ERROR:
         captured->message = strdup(event->u.error.message ? event->u.error.message : "");
         captured->http_status = event->u.error.http_status;
+        captured->error_kind = event->u.error.error_kind;
         if (event->u.error.usage)
             captured->usage = *event->u.error.usage;
         else
@@ -739,7 +741,18 @@ static void test_error_object_emits_error(void)
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_ERROR);
     EXPECT_STR_EQ(capture.events[0].message, "Rate limit exceeded");
+    EXPECT(capture.events[0].error_kind == STREAM_ERROR_OTHER);
     EXPECT(parser.terminal_emitted == 1);
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+static void test_error_object_overflow_is_classified(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    chat_events_feed(&parser, "{\"error\":{\"message\":\"Context too long\","
+                              "\"code\":\"context_length_exceeded\"}}");
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].error_kind == STREAM_ERROR_CONTEXT_OVERFLOW);
     EVENTS_FIXTURE_FREE(capture, parser);
 }
 
@@ -1038,6 +1051,7 @@ int main(void)
     test_double_termination_gated();
     test_events_after_terminal_ignored();
     test_error_object_emits_error();
+    test_error_object_overflow_is_classified();
     test_unparseable_json_ignored();
     test_missing_choices_ignored();
     test_finalize_without_terminal_emits_error();
