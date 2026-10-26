@@ -1,0 +1,20 @@
+[
+  {
+    "os": "ubuntu-26.04",
+    "platform": "linux",
+    "arch": "x86_64",
+    "nix_system": "x86_64-linux"
+  },
+  {
+    "os": "ubuntu-26.04-arm",
+    "platform": "linux",
+    "arch": "aarch64",
+    "nix_system": "aarch64-linux"
+  },
+  {
+    "os": "macos-latest",
+    "platform": "macos",
+    "arch": "arm64",
+    "nix_system": "aarch64-darwin"
+  }
+]

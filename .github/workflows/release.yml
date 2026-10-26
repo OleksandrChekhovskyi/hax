@@ -8,25 +8,25 @@ permissions:
   contents: write
 
 jobs:
+  release-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.platforms.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: platforms
+        run: echo "matrix=$(jq -c '{include: .}' release-platforms.json)" >> "$GITHUB_OUTPUT"
+
   # Linux builds run in build_linux.sh's own podman container, not a job-level
   # Alpine one: the runner rejects JavaScript actions in musl containers on
   # anything but x64, so that layout cannot check out on arm64.
   binary:
+    needs: release-matrix
     name: binary (${{ matrix.platform }}-${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
-      matrix:
-        include:
-          - os: ubuntu-26.04
-            platform: linux
-            arch: x86_64
-          - os: ubuntu-26.04-arm
-            platform: linux
-            arch: aarch64
-          - os: macos-latest
-            platform: macos
-            arch: arm64
+      matrix: ${{ fromJSON(needs.release-matrix.outputs.matrix) }}
     env:
       BUILD_DIR: build-dist
     steps:
