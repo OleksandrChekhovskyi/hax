@@ -50,6 +50,15 @@ brew install oleksandrchekhovskyi/hax/hax
 
 On Arch Linux, hax is in the [AUR](https://aur.archlinux.org/packages/hax) as `hax`.
 
+On NixOS or with Nix installed, the repository is a flake:
+
+```sh
+nix run github:OleksandrChekhovskyi/hax   # run hax without installing
+```
+
+The flake also ships an overlay (`overlays.default`) that adds `hax` to nixpkgs, for use in
+`nixpkgs.overlays` or an impure `import <nixpkgs> { overlays = [ ... ]; }`.
+
 Alternatively, prebuilt binaries for Linux (x86_64 and aarch64) and macOS (Apple Silicon) are
 available from the [latest release](https://github.com/OleksandrChekhovskyi/hax/releases/latest):
 unpack the `hax` binary into any directory on your `PATH`. The Linux binaries are fully static,

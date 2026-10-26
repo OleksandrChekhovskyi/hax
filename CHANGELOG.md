@@ -7,6 +7,11 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
+### Added
+
+- A Nix flake with an overlay: `nix run github:OleksandrChekhovskyi/hax` builds and runs hax from
+  the repository, and `overlays.default` adds `hax` to nixpkgs.
+
 ### Changed
 
 - Prompts are sent without leading blank lines or trailing whitespace, so a paste or Ctrl+G edit
