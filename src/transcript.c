@@ -141,6 +141,10 @@ static const char *synthetic_user_label(enum item_origin origin)
         return "compaction seed";
     if (origin == ITEM_ORIGIN_TASK_NOTE)
         return "task update";
+    if (origin == ITEM_ORIGIN_GOAL)
+        return "goal";
+    if (origin == ITEM_ORIGIN_GOAL_END)
+        return "goal cancelled";
     return "continuation";
 }
 

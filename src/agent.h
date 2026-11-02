@@ -27,6 +27,7 @@ struct agent_state {
     struct transcript_log *transcript;
     struct session_log *session_log; /* NULL when session recording is disabled or unavailable */
     struct render_ctx *render;
+    char *pending_prompt;  /* owned objective submitted by /goal through the normal send path */
     char *pending_recall;  /* owned prompt to add to editor recall after a slash command */
     char *pending_preseed; /* owned text to seed into the next prompt */
     enum agent_resume_reason resume_reason;

@@ -235,8 +235,10 @@ static void render_streamed_range(struct render_ctx *render, const struct item *
                 render_compaction_marker(render);
             else if (item->origin == ITEM_ORIGIN_TASK_NOTE)
                 render_dim_marker(render, item->text ? item->text : "");
-            else if (item->origin == ITEM_ORIGIN_NONE)
+            else if (item_is_typed_prompt(item))
                 render_user_message(render, item->text);
+            else if (item->origin == ITEM_ORIGIN_GOAL_END)
+                render_dim_marker(render, item->text ? item->text : "");
             break;
         case ITEM_ASSISTANT_MESSAGE:
             render_assistant(render, item);

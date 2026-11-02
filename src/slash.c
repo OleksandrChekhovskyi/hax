@@ -17,6 +17,7 @@
 #include "session.h"
 #include "session_picker.h"
 #include "xalloc.h"
+#include "commands/goal_cmd.h"
 #include "commands/login.h"
 #include "commands/session_cmd.h"
 #include "commands/tasks.h"
@@ -85,6 +86,7 @@ static void run_preset(const struct command_call *call);
 static void run_preset_save(const struct command_call *call);
 static void run_config(const struct command_call *call);
 static void run_compact(const struct command_call *call);
+static void run_goal(const struct command_call *call);
 static void run_copy(const struct command_call *call);
 static void run_session(const struct command_call *call);
 static void run_tasks(const struct command_call *call);
@@ -194,6 +196,12 @@ static const struct slash_command COMMANDS[] = {
         .handler = run_config,
         .argument_choices = config_choices,
         .later_usage = config_later_usage,
+    },
+    {
+        .name = "goal",
+        .summary = "work toward an objective until complete or blocked",
+        .usage = "[objective | clear]",
+        .handler = run_goal,
     },
     {
         .name = "compact",
@@ -796,6 +804,11 @@ static const char *config_later_usage(const char *preceding)
         return NULL;
     const struct config_setting *setting = config_setting_find(preceding);
     return setting && setting->editable ? "[value]" : NULL;
+}
+
+static void run_goal(const struct command_call *call)
+{
+    goal_command(call->state, call->argument);
 }
 
 static void run_compact(const struct command_call *call)

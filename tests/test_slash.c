@@ -656,6 +656,7 @@ static void expect_candidates(const char *text, const char *expected)
 
 static void test_complete_names_and_aliases(void)
 {
+    expect_completion("go", "goal ");
     expect_completion("mo", "model ");
     expect_completion("cle", "clear ");
     expect_completion("pre", "preset");

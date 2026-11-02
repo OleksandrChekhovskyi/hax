@@ -18,6 +18,7 @@
 #include "config.h"
 #include "diag.h"
 #include "file_mention.h"
+#include "goal.h"
 #include "history.h"
 #include "model_meta.h"
 #include "paste_image.h"
@@ -1111,6 +1112,8 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
     char prompt_buffer[64];
 
     for (;;) {
+        if (state.resume_reason == AGENT_RESUME_NONE && goal_current(&session))
+            state.resume_reason = AGENT_RESUME_PAUSED;
         disp_block_separator(&render.disp);
         /* Only a resumable turn gives an empty send a meaning; otherwise
          * the editor keeps swallowing bare Enter. */
@@ -1134,13 +1137,18 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
          * handlers may override this when they drive the display themselves. */
         if (*line)
             disp_sync_external_line(&render.disp);
+        int starting_goal = 0;
         if (handle_slash_input(input, &state, line)) {
             current_provider = state.provider;
             free(line);
-            continue;
-        }
-        if (*line)
+            if (!state.pending_prompt)
+                continue;
+            line = state.pending_prompt;
+            state.pending_prompt = NULL;
+            starting_goal = 1;
+        } else if (*line) {
             input_history_add(input, line);
+        }
 
         /* Provider absence takes precedence over a possibly configured model. */
         if (!current_provider) {
@@ -1181,6 +1189,8 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
          * continue, so a compaction seed just appended above supersedes an older marker. */
         if (*line) {
             agent_session_add_user(&session, line);
+            if (starting_goal)
+                session.items[session.n_items - 1].origin = ITEM_ORIGIN_GOAL;
         } else {
             switch (agent_session_resume_tail(&session)) {
             case AGENT_RESUME_TAIL_MARKED:
@@ -1318,6 +1328,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
     transcript_log_close(transcript);
     session_log_close(state.session_log);
     free(state.pending_preseed);
+    free(state.pending_prompt);
     agent_session_free(&session);
     return 0;
 }

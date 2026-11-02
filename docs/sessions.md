@@ -79,6 +79,7 @@ Conversation records, in order. `kind` is one of:
 `origin` marks synthetic records: `compact_seed` (a compaction summary), `continuation`,
 `interrupted`, `skipped`, `refused`, `summarized`, `task_note` (a background-task report), and
 `compaction` (a `turn_usage` footer for a summarization request rather than an agent turn).
+`goal` identifies a typed objective; `goal_end` marks its completion, blocker, or cancellation.
 Items without `origin` are ordinary typed or streamed content. `inherited: true` marks items
 `/fork` copied from the source session: context this conversation reads but did not pay for.
 

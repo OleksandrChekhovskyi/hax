@@ -8,6 +8,7 @@
 #include "agent_tool.h"
 #include "agent_usage.h"
 #include "compact.h"
+#include "goal.h"
 #include "model_meta.h"
 #include "provider.h"
 #include "session.h"
@@ -278,7 +279,11 @@ static void loop_run_active(const struct agent_loop_params *params,
     result->outcome = AGENT_LOOP_MAX_TURNS;
     result->last_context_tokens = -1;
 
-    for (int turn_n = 0; params->max_turns <= 0 || turn_n < params->max_turns; turn_n++) {
+    int max_turns = params->max_turns;
+    if (goal_current(session) && max_turns <= 0)
+        max_turns = 100;
+    int goal_remind = 1;
+    for (int turn_n = 0; max_turns <= 0 || turn_n < max_turns; turn_n++) {
         /* The first boundary arrived with the user message — except on a continued run, whose
          * first turn extends the previous seam. Follow-up turns owe their own. Either way it is
          * appended lazily — just before this turn's items land in history — so a turn that
@@ -303,6 +308,15 @@ static void loop_run_active(const struct agent_loop_params *params,
             loop_flush(params);
             if (hooks->task_note)
                 hooks->task_note(note, hooks->user);
+        }
+
+        const char *objective = goal_current(session);
+        if (objective && goal_remind) {
+            agent_session_append(session, (struct item){.kind = ITEM_USER_MESSAGE,
+                                                        .text = goal_prompt(objective),
+                                                        .origin = ITEM_ORIGIN_CONTINUATION});
+            loop_flush(params);
+            goal_remind = 0;
         }
 
         if (hooks->turn_begin)
@@ -387,14 +401,17 @@ static void loop_run_active(const struct agent_loop_params *params,
         result->final_items_to = response_to;
 
         if (!absorbed.had_tool_call) {
-            /* A tool-free response completes the user turn — unless the pause pre-empted the
-             * request (paused_empty above): an empty cancelled turn is nothing to complete, so
-             * pause here and let a resume re-send the request. */
-            loop_add_usage(params, &loop_turn, paused_empty);
-            loop_flush(params);
-            agent_loop_turn_destroy(&loop_turn);
-            result->outcome = paused_empty ? AGENT_LOOP_PAUSED : AGENT_LOOP_COMPLETE;
-            return;
+            int goal_active = goal_current(session) != NULL;
+            int goal_finished = goal_active && loop_turn.assembly.state == TURN_DONE &&
+                                goal_finish_response(session, absorbed.items_from);
+            if (!goal_active || goal_finished || paused_empty) {
+                loop_add_usage(params, &loop_turn, paused_empty);
+                loop_flush(params);
+                agent_loop_turn_destroy(&loop_turn);
+                result->outcome = paused_empty ? AGENT_LOOP_PAUSED : AGENT_LOOP_COMPLETE;
+                return;
+            }
+            goal_remind = 1;
         }
 
         /* Every streamed tool call gets exactly one result. Disabled tools are refused rather
@@ -451,6 +468,7 @@ static void loop_run_active(const struct agent_loop_params *params,
                                 model_meta_context(params->provider, session->model)) &&
             hooks->compact) {
             hooks->compact(hooks->user);
+            goal_remind = 1;
             sig = loop_checkpoint(hooks);
             if (sig == AGENT_LOOP_SIG_ABORT) {
                 agent_session_mark_interrupt(session);
