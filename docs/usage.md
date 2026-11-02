@@ -100,8 +100,8 @@ Type `/help` for the authoritative live list.
 | `/tasks [kill <id>... \| kill all]` | List or stop background tasks. |
 | `/session` | Show the session's selection and usage totals. |
 | `/usage` | Query provider account/subscription usage when supported. |
-| `/login [provider]` | Log in to a provider account with a hax-managed token (ChatGPT/codex). |
-| `/logout [provider]` | Revoke and remove a hax-managed login. |
+| `/login [provider]` | Log in with a hax-managed token (ChatGPT/codex or Kimi Code). |
+| `/logout [provider]` | Remove a hax-managed login; revoke remotely when supported. |
 | `/help` | List commands and keyboard shortcuts. |
 
 Without an argument, `/provider`, `/model`, and `/effort` open pickers, and the provider and model

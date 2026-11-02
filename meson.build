@@ -122,6 +122,8 @@ sources = files(
     'src/providers/deepseek.c',
     'src/providers/provider_config.c',
     'src/providers/http_provider.c',
+    'src/providers/kimi_auth.c',
+    'src/providers/kimi_login.c',
     'src/providers/llamacpp.c',
     'src/providers/mock.c',
     'src/providers/openai_models.c',
