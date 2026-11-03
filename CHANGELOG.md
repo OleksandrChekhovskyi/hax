@@ -9,6 +9,9 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Added
 
+- `/goal <objective>` pursues an objective across progress-only responses until complete or
+  blocked. Esc pauses, Enter continues, and `/goal clear` cancels goal mode. Goals survive
+  compaction and session resume; an unlimited `max_turns` uses a 100-request goal safety cap.
 - Man pages for offline reference: `man hax` for usage, plus `hax-config(5)`, `hax-sessions(5)`,
   and `hax-providers(7)`. Packages and source builds install them; the prebuilt binaries do not.
 

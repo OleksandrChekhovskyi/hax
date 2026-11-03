@@ -95,6 +95,8 @@ Type `/help` for the authoritative live list.
 | `/preset [name]` | Apply a config-defined preset. |
 | `/preset-save <name> [tint]` | Save the current provider/model/effort as a preset. |
 | `/config [key [value]]` | Inspect settings or change one for this process. |
+| `/goal [objective]` | Start working toward an objective, or show the active goal. |
+| `/goal clear` | Cancel goal mode without clearing conversation history. |
 | `/compact [focus]` | Summarize older context, optionally emphasizing a focus. |
 | `/copy` | Copy the latest assistant response. |
 | `/tasks [kill <id>... \| kill all]` | List or stop background tasks. |
@@ -103,6 +105,18 @@ Type `/help` for the authoritative live list.
 | `/login [provider]` | Log in to a provider account with a hax-managed token (ChatGPT/codex). |
 | `/logout [provider]` | Revoke and remove a hax-managed login. |
 | `/help` | List commands and keyboard shortcuts. |
+
+`/goal <objective>` starts immediately and continues after progress-only responses. It stops when
+the model ends a tool-free response with `[goal complete]` or `[goal blocked]` on its own final
+line. Completion is model-reported, not an independent guarantee. Esc pauses at the next step;
+Enter continues. Ordinary prompts can steer an active goal. `/goal` shows it; `/goal clear`
+cancels goal mode. Goals survive compaction and session resume, but resuming waits for Enter
+rather than starting work automatically. `/new` clears the goal with the conversation. This mode
+requires tools and is unavailable with `--raw`.
+
+Goal runs respect a positive `max_turns`. When it is unlimited (`0`), each goal run pauses after
+100 model requests to prevent an unbounded loop; Enter grants another run. Goals can consume
+substantial tokens and execute tools with the same permissions as ordinary prompts.
 
 Without an argument, `/provider`, `/model`, and `/effort` open pickers, and the provider and model
 pickers continue to the settings that depend on them. With an argument they switch directly:
