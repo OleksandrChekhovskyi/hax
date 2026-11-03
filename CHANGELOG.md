@@ -9,6 +9,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Added
 
+- Kimi Code OAuth: `/login kimi` signs in with a device code, including over ssh. The `kimi`
+  provider refreshes hax-owned tokens automatically; `/logout kimi` removes the local login.
 - Man pages for offline reference: `man hax` for usage, plus `hax-config(5)`, `hax-sessions(5)`,
   and `hax-providers(7)`. Packages and source builds install them; the prebuilt binaries do not.
 

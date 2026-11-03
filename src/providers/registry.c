@@ -17,6 +17,7 @@
 #include "providers/codex_settings.h"
 #include "providers/deepseek.h"
 #include "providers/http_provider.h"
+#include "providers/kimi_auth.h"
 #include "providers/llamacpp.h"
 #include "providers/mock.h"
 #include "providers/opencode.h"
@@ -127,6 +128,18 @@ static const struct provider_def DEFS[] = {
         .reasoning_required = 1,
         .parse_model = deepseek_parse_model,
         .query_usage = deepseek_query_usage,
+    },
+    {
+        .id = "kimi",
+        .display_name = "Kimi Code",
+        .base_url = "https://api.kimi.com/coding/v1",
+        .pinned = 1,
+        .catalog_id = "kimi-code-plan-cn",
+        .reasoning_roundtrip = "reasoning_content",
+        .reasoning_required = 1,
+        .parse_model = kimi_parse_model,
+        .auth_source = kimi_auth_source,
+        .prepare_availability = kimi_prepare_availability,
     },
     /* Local servers. */
     {
