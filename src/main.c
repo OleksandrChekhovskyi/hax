@@ -12,6 +12,7 @@
 #include "diag.h"
 #include "oneshot.h"
 #include "provider.h"
+#include "provider_router.h"
 #include "select.h"
 #include "session.h"
 #include "session_prune.h"
@@ -24,6 +25,16 @@
 
 static struct provider *select_initial_provider(int one_shot, int *autoselected)
 {
+    /* Check for fallback mode first */
+    if (config_bool("fallback")) {
+        struct provider *router = provider_router_construct_from_config();
+        if (router) {
+            *autoselected = 0;
+            return router;
+        }
+        /* Fall through to normal selection if router fails */
+    }
+
     const char *name = config_str("provider");
     if (name && *name) {
         int restored = strcmp(config_source("provider"), "conversation") == 0;

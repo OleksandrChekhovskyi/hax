@@ -178,10 +178,37 @@ static void test_sleep_completes(void)
     EXPECT(calls >= 1);
 }
 
+static void test_retry_classification(void)
+{
+    /* Terminal errors should trigger fallback; transient errors should not. */
+    EXPECT(retry_is_terminal_error(0, NULL) == 0);   /* transport failure -> retry */
+    EXPECT(retry_is_terminal_error(200, NULL) == 0); /* success */
+    EXPECT(retry_is_terminal_error(204, NULL) == 0); /* no content */
+    EXPECT(retry_is_terminal_error(400, NULL) == 1); /* bad request -> terminal */
+    EXPECT(retry_is_terminal_error(401, NULL) == 1); /* unauthorized -> terminal */
+    EXPECT(retry_is_terminal_error(403, NULL) == 1); /* forbidden -> terminal */
+    EXPECT(retry_is_terminal_error(404, NULL) == 1); /* not found -> terminal */
+    EXPECT(retry_is_terminal_error(408, NULL) == 0); /* timeout -> retry */
+    EXPECT(retry_is_terminal_error(429, NULL) == 0); /* rate limit without quota marker -> retry */
+    EXPECT(retry_is_terminal_error(429, "{\"error\":{\"code\":\"quota_exceeded\"}}") ==
+           1);                                       /* terminal quota -> fallback */
+    EXPECT(retry_is_terminal_error(500, NULL) == 0); /* server error -> retry */
+    EXPECT(retry_is_terminal_error(502, NULL) == 0); /* bad gateway -> retry */
+    EXPECT(retry_is_terminal_error(503, NULL) == 0); /* service unavailable -> retry */
+    EXPECT(retry_is_terminal_error(504, NULL) == 0); /* gateway timeout -> retry */
+
+    /* Verify terminal 429 codes mirror retry_should_attempt behavior. */
+    const char *codex = "{\"error\":{\"type\":\"usage_limit_reached\"}}";
+    EXPECT(retry_is_terminal_error(429, codex) == 1);
+    const char *rate_limit = "{\"error\":{\"type\":\"rate_limit_exceeded\"}}";
+    EXPECT(retry_is_terminal_error(429, rate_limit) == 0);
+}
+
 int main(void)
 {
     test_response_classification();
     test_terminal_429_errors();
+    test_retry_classification();
     test_backoff_growth();
     test_backoff_cap();
     test_default_policy_config();

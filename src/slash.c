@@ -11,8 +11,10 @@
 #include "agent_core.h"
 #include "buf.h"
 #include "config.h"
+#include "diag.h"
 #include "file_mention.h"
 #include "provider.h"
+#include "provider_router.h"
 #include "select.h"
 #include "session.h"
 #include "session_picker.h"
@@ -89,6 +91,10 @@ static void run_copy(const struct command_call *call);
 static void run_session(const struct command_call *call);
 static void run_tasks(const struct command_call *call);
 static void run_usage(const struct command_call *call);
+static void run_fallback(const struct command_call *call);
+static void fallback_choices(struct agent_state *state, const char *preceding,
+                             struct completion *choices);
+static const char *fallback_later_usage(const char *preceding);
 static void run_login(const struct command_call *call);
 static void run_logout(const struct command_call *call);
 static void run_help(const struct command_call *call);
@@ -151,6 +157,15 @@ static const struct slash_command COMMANDS[] = {
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_provider,
         .argument_choices = provider_id_choices,
+    },
+    {
+        .name = "fallback",
+        .summary = "toggle provider fallback on terminal errors",
+        .usage = "[on|off|status]",
+        .display = COMMAND_DISPLAY_MANAGED,
+        .handler = run_fallback,
+        .argument_choices = fallback_choices,
+        .later_usage = fallback_later_usage,
     },
     {
         .name = "model",
@@ -696,6 +711,53 @@ static void run_fork(const struct command_call *call)
 static void run_provider(const struct command_call *call)
 {
     select_provider(call->state, call->argument);
+}
+
+static void run_fallback(const struct command_call *call)
+{
+    const char *arg = call->argument;
+    struct agent_state *state = call->state;
+
+    if (!arg || !*arg || strcmp(arg, "status") == 0) {
+        int enabled = config_bool("fallback");
+        ui_note("fallback: %s", enabled ? "on" : "off");
+        if (enabled && state->provider && provider_is_router(state->provider)) {
+            size_t current = 0, total = 0;
+            if (provider_router_position(state->provider, &current, &total))
+                ui_note("current: %zu of %zu", current, total);
+        }
+        return;
+    }
+
+    int enabled = 0;
+    if (strcmp(arg, "on") == 0 || strcmp(arg, "1") == 0 || strcmp(arg, "true") == 0) {
+        enabled = 1;
+    } else if (strcmp(arg, "off") == 0 || strcmp(arg, "0") == 0 || strcmp(arg, "false") == 0) {
+        enabled = 0;
+    } else {
+        hax_err("usage: /fallback [on|off|status]");
+        return;
+    }
+
+    /* Toggle requires session restart to take effect (provider is resolved at startup) */
+    config_set_override("fallback", enabled ? "1" : "0");
+    ui_note("fallback %s (restart session to apply)", enabled ? "enabled" : "disabled");
+}
+
+static void fallback_choices(struct agent_state *state, const char *preceding,
+                             struct completion *choices)
+{
+    (void)state;
+    (void)preceding;
+    completion_add(choices, "on");
+    completion_add(choices, "off");
+    completion_add(choices, "status");
+}
+
+static const char *fallback_later_usage(const char *preceding)
+{
+    (void)preceding;
+    return NULL;
 }
 
 static void provider_id_choices(struct agent_state *state, const char *preceding,

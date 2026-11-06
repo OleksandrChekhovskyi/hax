@@ -153,6 +153,7 @@ test_sources = [
     'transport/test_ca.c',
     'transport/test_http.c',
     'transport/test_oauth.c',
+    'transport/test_provider_router.c',
     'transport/test_retry.c',
     'transport/test_sse.c',
 ]
