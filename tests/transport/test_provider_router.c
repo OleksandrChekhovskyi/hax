@@ -1,4 +1,6 @@
 /* SPDX-License-Identifier: MIT */
+#include <stddef.h>
+
 #include "harness.h"
 #include "provider_router.h"
 #include "providers/registry.h"
