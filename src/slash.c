@@ -713,7 +713,8 @@ static void run_provider(const struct command_call *call)
     select_provider(call->state, call->argument);
 }
 
-static void run_fallback(const struct command_call *call) {
+static void run_fallback(const struct command_call *call)
+{
     const char *arg = call->argument;
     struct agent_state *state = call->state;
 
@@ -744,14 +745,17 @@ static void run_fallback(const struct command_call *call) {
 }
 
 static void fallback_choices(struct agent_state *state, const char *preceding,
-                             struct completion *choices) {
-    (void)state; (void)preceding;
+                             struct completion *choices)
+{
+    (void)state;
+    (void)preceding;
     completion_add(choices, "on");
     completion_add(choices, "off");
     completion_add(choices, "status");
 }
 
-static const char *fallback_later_usage(const char *preceding) {
+static const char *fallback_later_usage(const char *preceding)
+{
     (void)preceding;
     return NULL;
 }
