@@ -69,6 +69,23 @@ static int has_terminal_429_error(const char *body)
     return terminal;
 }
 
+int retry_is_terminal_error(long status, const char *body)
+{
+    if (status == 0)
+        return 0; /* transport failure -> retry */
+    if (status >= 200 && status < 300)
+        return 0; /* success */
+    if (status == 408)
+        return 0; /* timeout -> retry */
+    if (status == 429)
+        return has_terminal_429_error(body); /* terminal quota marker -> fallback; otherwise retry */
+    if (status == 401 || status == 403)
+        return 1; /* auth -> terminal */
+    if (status >= 500 && status <= 599)
+        return 0; /* server error -> retry */
+    return 1; /* other 4xx -> terminal */
+}
+
 int retry_should_attempt(int result, long status, const char *body)
 {
     if (result == 0 && status >= 200 && status < 300)
