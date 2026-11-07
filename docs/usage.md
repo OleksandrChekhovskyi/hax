@@ -102,7 +102,7 @@ Type `/help` for the authoritative live list.
 | `/tasks [kill <id>... \| kill all]` | List or stop background tasks. |
 | `/session` | Show the session's selection and usage totals. |
 | `/usage` | Query provider account/subscription usage when supported. |
-| `/login [provider]` | Log in with a hax-managed token (ChatGPT/codex or Kimi Code). |
+| `/login [provider]` | Log in with a hax-managed token (ChatGPT/codex, Claude/Anthropic, or Kimi Code). |
 | `/logout [provider]` | Remove a hax-managed login; revoke remotely when supported. |
 | `/help` | List commands and keyboard shortcuts. |
 

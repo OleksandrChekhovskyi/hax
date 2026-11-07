@@ -61,8 +61,10 @@ test_sources = [
     'commands/test_session_cmd.c',
     'commands/test_tasks.c',
 
+    'providers/test_anthropic_auth.c',
     'providers/test_anthropic_body.c',
     'providers/test_anthropic_events.c',
+    'providers/test_anthropic_login.c',
     'providers/test_anthropic_models.c',
     'providers/test_chat_body.c',
     'providers/test_chat_events.c',
@@ -183,6 +185,7 @@ endforeach
 # binary through the mock provider (see e2e/harness.py). Names mirror the C tests:
 # e2e/test_oneshot.py registers as e2e/oneshot, so `meson test 'e2e/*'` selects the group.
 e2e_scenarios = [
+    'anthropic',
     'goal',
     'kimi',
     'oneshot',

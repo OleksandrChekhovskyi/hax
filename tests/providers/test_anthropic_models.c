@@ -199,6 +199,8 @@ static void test_max_tokens_uses_model_limit(void)
  * such as max_tokens resolve from that same block. */
 static void test_first_party_pins_endpoint(void)
 {
+    setenv("XDG_STATE_HOME", t_tempdir(), 1);
+    config_set_override("providers.anthropic.api_key", "test-key");
     config_set_override("providers.anthropic.base_url", "http://127.0.0.1:1");
     config_set_override("providers.anthropic.max_tokens", "1234");
 
@@ -216,6 +218,7 @@ static void test_first_party_pins_endpoint(void)
 
     config_set_override("providers.anthropic.max_tokens", NULL);
     config_set_override("providers.anthropic.base_url", NULL);
+    config_set_override("providers.anthropic.api_key", NULL);
 }
 
 int main(void)

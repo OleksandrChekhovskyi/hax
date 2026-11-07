@@ -12,6 +12,7 @@
 #include "provider.h"
 #include "version.h"
 #include "xalloc.h"
+#include "providers/anthropic_auth.h"
 #include "providers/codex.h"
 #include "providers/codex_auth.h"
 #include "providers/codex_settings.h"
@@ -74,6 +75,8 @@ static const struct provider_def DEFS[] = {
         /* Every Claude since 4.6 thinks adaptively, so a model the catalog lacks yet does too. */
         .thinking_mode = "prefer-adaptive",
         .strict_signatures = 1,
+        .auth_source = anthropic_auth_source,
+        .prepare_availability = anthropic_prepare_availability,
     },
     {
         .id = "openrouter",

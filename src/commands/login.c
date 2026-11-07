@@ -8,6 +8,8 @@
 #include "agent.h"
 #include "provider.h"
 #include "xalloc.h"
+#include "providers/anthropic_auth.h"
+#include "providers/anthropic_login.h"
 #include "providers/codex.h"
 #include "providers/codex_login.h"
 #include "providers/kimi_auth.h"
@@ -50,6 +52,15 @@ static const struct login_method METHODS[] = {
         .status = kimi_login_status,
         .logged_in = kimi_login_present,
         .adopt = kimi_provider_reload_auth,
+    },
+    {
+        .provider_id = "anthropic",
+        .detail = "Claude account (browser login)",
+        .login = anthropic_login_run,
+        .logout = anthropic_logout_run,
+        .status = anthropic_login_status,
+        .logged_in = anthropic_login_present,
+        .adopt = anthropic_provider_reload_auth,
     },
 };
 #define N_METHODS (sizeof(METHODS) / sizeof(METHODS[0]))
@@ -109,7 +120,7 @@ static const struct login_method *resolve_argument(struct agent_state *state, co
 {
     const struct login_method *method = find_method(argument);
     if (!method) {
-        ui_error("no login flow for '%s' — hax manages logins for: codex kimi", argument);
+        ui_error("no login flow for '%s' — hax manages logins for: codex kimi anthropic", argument);
         disp_sync_external_line(&state->render->disp);
     }
     return method;

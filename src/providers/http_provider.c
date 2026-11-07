@@ -414,6 +414,8 @@ static int http_provider_stream(struct provider *base, const struct context *con
         opts.thinking_budget = config_scoped_int(provider->config_prefix, "thinking_budget");
         opts.show_reasoning = config_bool("show_reasoning");
         opts.allow_empty_signature = !provider->strict_signatures;
+        if (provider->auth.ops && provider->auth.ops->system_identity)
+            opts.system_identity = provider->auth.ops->system_identity(provider->auth.state);
     } else {
         struct catalog_entry rates;
         model_meta_rates(base, model, &rates);
@@ -881,15 +883,18 @@ struct provider *http_provider_new(const struct provider_def *def)
      * request wire would. */
     static const char *const METADATA_FIELDS[] = {"version", NULL};
     /* A pinned def's api is fixed (resolve_wire warns when config sets it); an unpinned def's
-     * wire already reflects config. Key fields are consumed only when a static key
-     * authenticates the provider; the port only when the def's base_url is port-templated. */
+     * wire already reflects config. Key fields are consumed when static-key auth is supported,
+     * including an auth source with an API-key fallback; the port only when the def's base_url
+     * is port-templated. */
     unsigned classes = wire == &WIRE_ANTHROPIC_MESSAGES ? PROVIDER_FIELD_ANTHROPIC
                        : wire == &WIRE_OPENAI_RESPONSES ? PROVIDER_FIELD_OPENAI_RESPONSES
                                                         : PROVIDER_FIELD_OPENAI_CHAT;
     if (routes_wires)
         classes |= PROVIDER_FIELD_OPENAI | PROVIDER_FIELD_ANTHROPIC;
-    if (!def->auth_source)
-        classes |= PROVIDER_FIELD_KEYED | (def->pinned ? 0 : PROVIDER_FIELD_UNPINNED);
+    if (!def->auth_source || def->api_key_env)
+        classes |= PROVIDER_FIELD_KEYED;
+    if (!def->auth_source && !def->pinned)
+        classes |= PROVIDER_FIELD_UNPINNED;
     if (def_base_url_port_templated(def))
         classes |= PROVIDER_FIELD_PORT_TEMPLATED;
     provider_warn_unused_fields(name, wire->id, classes,

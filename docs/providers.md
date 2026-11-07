@@ -21,7 +21,7 @@ keys in environment variables rather than command arguments or `config.json`.
 | --- | --- | --- |
 | `codex` | Existing ChatGPT/Codex subscription | Run `/login`. |
 | `openai` | Direct OpenAI API | `OPENAI_API_KEY`; choose a model. |
-| `anthropic` | Direct Anthropic API | `ANTHROPIC_API_KEY`; choose a model. |
+| `anthropic` | Anthropic API or Claude account | `/login anthropic` or `ANTHROPIC_API_KEY`; choose a model. |
 | `openrouter` | Many vendors through one API | `OPENROUTER_API_KEY`; choose a model. |
 | `opencode-zen` | Curated pay-as-you-go models | `OPENCODE_API_KEY`; choose a model. |
 | `opencode-go` | OpenCode's model subscription | `OPENCODE_API_KEY`; choose a model. |
@@ -96,6 +96,21 @@ hax --provider=openai
 For an OpenAI-shaped endpoint elsewhere, use a [custom provider](#custom-providers).
 
 ## Anthropic
+
+Run `/login anthropic` to open Claude's browser authorization page, approve access, and paste
+its `code#state` back into hax. The displayed link also works in a browser on another device.
+Use `/provider` to select `anthropic`, then `/model` to choose a model. hax stores the login in
+`~/.local/state/hax/auth.json` with mode 0600 and refreshes tokens automatically, coordinating
+rotation across processes. Claude Code is not required and its credentials are not read or changed.
+
+A hax-managed login takes precedence over an API key. `/logout anthropic` removes the local login
+and returns the active provider to its configured API key, if any; it does not revoke the remote
+grant. A login replaced by another process requires an explicit `/provider` selection to adopt.
+OAuth requests include the required Claude Code identity as a standalone system block, followed by
+hax's own instructions. Access remains subject to Anthropic's account and client restrictions.
+API-equivalent cost estimates are not subscription charges.
+
+For API-key authentication instead:
 
 ```sh
 export ANTHROPIC_API_KEY=...

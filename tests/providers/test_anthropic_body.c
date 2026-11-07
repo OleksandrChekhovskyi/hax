@@ -334,6 +334,41 @@ static void test_build_body_thinking_off(void)
     json_decref(body);
 }
 
+static void test_system_identity_is_standalone(void)
+{
+    struct wire_body_opts opts = {
+        .max_tokens = 1000,
+        .cache_markers = 1,
+        .cache_ttl = "1h",
+        .system_identity = "required identity",
+    };
+    struct context context = BODY_CONTEXT;
+    json_t *body = anthropic_build_body(&context, "prov", "model-1", &opts);
+    json_t *system = json_object_get(body, "system");
+    EXPECT(json_array_size(system) == 2);
+    json_t *identity = json_array_get(system, 0);
+    EXPECT_STR_EQ(block_type(identity), "text");
+    EXPECT_STR_EQ(json_string_value(json_object_get(identity, "text")), "required identity");
+    EXPECT(json_object_get(identity, "cache_control") == NULL);
+    json_t *prompt = json_array_get(system, 1);
+    EXPECT_STR_EQ(json_string_value(json_object_get(prompt, "text")), context.system_prompt);
+    EXPECT(json_object_get(prompt, "cache_control") != NULL);
+    json_decref(body);
+
+    context.system_prompt = NULL;
+    body = anthropic_build_body(&context, "prov", "model-1", &opts);
+    system = json_object_get(body, "system");
+    EXPECT(json_array_size(system) == 1);
+    EXPECT_STR_EQ(json_string_value(json_object_get(json_array_get(system, 0), "text")),
+                  "required identity");
+    json_decref(body);
+
+    opts.system_identity = NULL;
+    body = anthropic_build_body(&context, "prov", "model-1", &opts);
+    EXPECT(json_object_get(body, "system") == NULL);
+    json_decref(body);
+}
+
 int main(void)
 {
     test_user_message();
@@ -348,5 +383,6 @@ int main(void)
     test_build_body_budget_clamped();
     test_build_body_adaptive_thinking();
     test_build_body_thinking_off();
+    test_system_identity_is_standalone();
     T_REPORT();
 }

@@ -112,8 +112,10 @@ sources = files(
     'src/commands/session_cmd.c',
     'src/commands/tasks.c',
 
+    'src/providers/anthropic_auth.c',
     'src/providers/anthropic_body.c',
     'src/providers/anthropic_events.c',
+    'src/providers/anthropic_login.c',
     'src/providers/anthropic_models.c',
     'src/providers/chat_body.c',
     'src/providers/chat_events.c',

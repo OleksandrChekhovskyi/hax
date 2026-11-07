@@ -30,6 +30,8 @@ struct http_auth_ops {
      * per-process fallback outside one; `streaming` distinguishes the streaming completion
      * request from metadata GETs. */
     char **(*headers)(const void *auth, const char *session_id, int streaming);
+    /* Optional borrowed identity that Messages authentication requires as its own system block. */
+    const char *(*system_identity)(const void *auth);
     /* One bounded recovery after an unauthorized response: renew or re-read credentials and
      * return non-zero to retry with rebuilt headers. `retried` is the caller's per-operation
      * guard; the op must set it. */

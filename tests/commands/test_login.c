@@ -11,10 +11,11 @@ static void test_login_offers_every_flow(void)
 {
     struct completion choices = {0};
     login_choices(&choices);
-    EXPECT(choices.count == 2);
-    if (choices.count == 2) {
+    EXPECT(choices.count == 3);
+    if (choices.count == 3) {
         EXPECT_STR_EQ(choices.candidates[0], "codex");
         EXPECT_STR_EQ(choices.candidates[1], "kimi");
+        EXPECT_STR_EQ(choices.candidates[2], "anthropic");
     }
     completion_free(&choices);
 }
@@ -51,6 +52,16 @@ static void test_logout_offers_held_logins(void)
     EXPECT(cred_store_delete("kimi") == 1);
     logout_choices(&choices);
     EXPECT(choices.count == 1);
+    completion_free(&choices);
+
+    entry = json_pack("{s:s,s:s,s:s,s:i,s:i}", "access_token", "at", "refresh_token", "rt",
+                      "login_id", "anthropic-login", "expires_at", 1234, "generation", 0);
+    EXPECT(cred_store_set("anthropic", entry) == 0);
+    json_decref(entry);
+    logout_choices(&choices);
+    EXPECT(choices.count == 2);
+    if (choices.count == 2)
+        EXPECT_STR_EQ(choices.candidates[1], "anthropic");
     completion_free(&choices);
 }
 
