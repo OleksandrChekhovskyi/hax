@@ -17,6 +17,7 @@
 #include "loopback.h"
 #include "model_meta.h"
 #include "provider.h"
+#include "xalloc.h"
 
 /* Parent-made temp root; children carve their own XDG_CACHE_HOME under it. */
 static char *g_root;
@@ -24,38 +25,55 @@ static char *g_root;
 /* ---------------- child-side helpers ---------------- */
 
 /* Point the module at a private cache dir and the scenario's server. catalog.refresh=1ms makes any
- * existing snapshot count as stale, so the fetch always spawns. */
+ * snapshot written by write_snapshot count as stale, so the fetch always spawns. */
 static void child_env(const char *name, int port)
 {
-    char dir[512], url[64];
-    snprintf(dir, sizeof(dir), "%s/%s", g_root, name);
+    char *dir = xasprintf("%s/%s", g_root, name);
     mkdir(dir, 0755);
     setenv("XDG_CACHE_HOME", dir, 1);
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d/api.json", port);
+    free(dir);
+    char *url = xasprintf("http://127.0.0.1:%d/api.json", port);
     setenv("HAX_CATALOG_URL", url, 1);
+    free(url);
     setenv("HAX_CATALOG_REFRESH", "1ms", 1);
 }
 
+static char *snapshot_path(void)
+{
+    return xasprintf("%s/hax/catalog.json", getenv("XDG_CACHE_HOME"));
+}
+
+static void backdate_snapshot_s(long seconds)
+{
+    char *path = snapshot_path();
+    struct timeval tv[2] = {{time(NULL) - seconds, 0}, {time(NULL) - seconds, 0}};
+    EXPECT(utimes(path, tv) == 0);
+    free(path);
+}
+
+/* The snapshot is backdated a minute: a just-written file's mtime can be a second ahead of time(),
+ * which the refresh check would read as fresh even against a 1ms interval. */
 static void write_snapshot(const char *json)
 {
-    char path[600];
-    snprintf(path, sizeof(path), "%s/hax", getenv("XDG_CACHE_HOME"));
-    mkdir(path, 0755);
-    snprintf(path, sizeof(path), "%s/hax/catalog.json", getenv("XDG_CACHE_HOME"));
+    char *dir = xasprintf("%s/hax", getenv("XDG_CACHE_HOME"));
+    mkdir(dir, 0755);
+    free(dir);
+    char *path = snapshot_path();
     FILE *f = fopen(path, "w");
-    if (!f)
+    if (!f) {
         FAIL("fopen %s: %s", path, strerror(errno));
+        free(path);
+        return;
+    }
     fputs(json, f);
     fclose(f);
+    free(path);
+    backdate_snapshot_s(60);
 }
 
 static void backdate_snapshot_days(long days)
 {
-    char path[600];
-    snprintf(path, sizeof(path), "%s/hax/catalog.json", getenv("XDG_CACHE_HOME"));
-    struct timeval tv[2] = {{time(NULL) - days * 24 * 60 * 60, 0},
-                            {time(NULL) - days * 24 * 60 * 60, 0}};
-    EXPECT(utimes(path, tv) == 0);
+    backdate_snapshot_s(days * 24 * 60 * 60);
 }
 
 /* Poll the asynchronous refresh for at most three seconds. */
