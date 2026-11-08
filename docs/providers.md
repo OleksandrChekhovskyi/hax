@@ -177,7 +177,7 @@ opt-out before sending proprietary code.
 `llama.cpp` connects to a local `llama-server`, by default at `http://127.0.0.1:9931/v1`:
 
 ```sh
-llama-server -m /path/to/model.gguf -c 32768
+llama-server -m /path/to/model.gguf
 hax --provider=llama.cpp
 ```
 
@@ -194,9 +194,9 @@ server's catalog with load state, context size, and image capability. Selecting 
 loading it in the background, which can take a while; hax never loads a model you did not select.
 With `--no-models-autoload`, load models through llama.cpp's own tooling and pick a running one.
 
-Start the server with a context large enough for an agent session; the llama.cpp default is often
-too small once system instructions, project context, tool results, and the desired output are
-combined.
+hax reads the context size the server is running with, so no `context_limit` is needed.
+`llama-server` can choose a small one, for example to fit device memory; if it is too small for an
+agent session, restart the server with a larger `-c` / `--ctx-size`.
 
 ## Ollama
 
