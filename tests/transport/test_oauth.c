@@ -403,25 +403,60 @@ static void test_listener_timeout_and_cancel(void)
     oauth_listener_close(listener);
 }
 
+/* Listen on [::1] at a port whose 127.0.0.1 side is free. An ephemeral [::1] port alone is not
+ * enough: a TIME_WAIT left on 127.0.0.1 by an earlier loopback test blocks the v4 bind there, so
+ * the port comes from a 127.0.0.1 probe that never connects and so leaves nothing behind. Returns
+ * the squatter fd and sets *port, or returns -1 when [::1] is unavailable. */
+static int squat_v6_only(int *port)
+{
+    for (int attempt = 0; attempt < 20; attempt++) {
+        int probe = socket(AF_INET, SOCK_STREAM, 0);
+        struct sockaddr_in addr4;
+        memset(&addr4, 0, sizeof(addr4));
+        addr4.sin_family = AF_INET;
+        addr4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        socklen_t addr4_len = sizeof(addr4);
+        if (probe < 0 || bind(probe, (struct sockaddr *)&addr4, sizeof(addr4)) != 0 ||
+            getsockname(probe, (struct sockaddr *)&addr4, &addr4_len) != 0) {
+            if (probe >= 0)
+                close(probe);
+            return -1;
+        }
+
+        int squatter = socket(AF_INET6, SOCK_STREAM, 0);
+        if (squatter < 0) {
+            close(probe);
+            return -1;
+        }
+        struct sockaddr_in6 addr6;
+        memset(&addr6, 0, sizeof(addr6));
+        addr6.sin6_family = AF_INET6;
+        addr6.sin6_port = addr4.sin_port;
+        addr6.sin6_addr = in6addr_loopback;
+        int bound = bind(squatter, (struct sockaddr *)&addr6, sizeof(addr6)) == 0 &&
+                    listen(squatter, 1) == 0;
+        int bind_errno = errno;
+        close(probe);
+        if (bound) {
+            *port = ntohs(addr4.sin_port);
+            return squatter;
+        }
+        close(squatter);
+        if (bind_errno != EADDRINUSE)
+            return -1;
+    }
+    return -1;
+}
+
 /* A port whose [::1] side belongs to another service must be passed over — a browser resolving
  * localhost to ::1 would deliver the callback there — unless no candidate is fully free, where
  * v4-only coverage still beats failing. */
 static void test_listener_avoids_v6_conflict(void)
 {
-    int squatter = socket(AF_INET6, SOCK_STREAM, 0);
+    int taken_port = 0;
+    int squatter = squat_v6_only(&taken_port);
     if (squatter < 0)
-        T_SKIP("no IPv6 support");
-    struct sockaddr_in6 addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin6_family = AF_INET6;
-    addr.sin6_addr = in6addr_loopback;
-    if (bind(squatter, (struct sockaddr *)&addr, sizeof(addr)) != 0 || listen(squatter, 1) != 0) {
-        close(squatter);
         T_SKIP("cannot listen on ::1");
-    }
-    socklen_t addr_len = sizeof(addr);
-    EXPECT(getsockname(squatter, (struct sockaddr *)&addr, &addr_len) == 0);
-    int taken_port = ntohs(addr.sin6_port);
 
     int port = 0;
     const int ports[] = {taken_port, 0};
