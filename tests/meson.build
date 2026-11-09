@@ -36,6 +36,7 @@ test_sources = [
     'test_diag.c',
     'test_effort.c',
     'test_file_mention.c',
+    'test_goal.c',
     'test_history.c',
     'test_model_meta.c',
     'test_model_sort.c',
@@ -55,12 +56,15 @@ test_sources = [
     'test_turn.c',
     'test_xalloc.c',
 
+    'commands/test_goal_cmd.c',
     'commands/test_login.c',
     'commands/test_session_cmd.c',
     'commands/test_tasks.c',
 
+    'providers/test_anthropic_auth.c',
     'providers/test_anthropic_body.c',
     'providers/test_anthropic_events.c',
+    'providers/test_anthropic_login.c',
     'providers/test_anthropic_models.c',
     'providers/test_chat_body.c',
     'providers/test_chat_events.c',
@@ -71,6 +75,8 @@ test_sources = [
     'providers/test_deepseek.c',
     'providers/test_provider_config.c',
     'providers/test_http_provider.c',
+    'providers/test_kimi_auth.c',
+    'providers/test_kimi_login.c',
     'providers/test_llamacpp.c',
     'providers/test_mock.c',
     'providers/test_model_info.c',
@@ -179,6 +185,9 @@ endforeach
 # binary through the mock provider (see e2e/harness.py). Names mirror the C tests:
 # e2e/test_oneshot.py registers as e2e/oneshot, so `meson test 'e2e/*'` selects the group.
 e2e_scenarios = [
+    'anthropic',
+    'goal',
+    'kimi',
     'oneshot',
     'repl_complete',
     'repl_interrupt',

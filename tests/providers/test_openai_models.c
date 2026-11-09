@@ -9,8 +9,11 @@
 #include "harness.h"
 #include "loopback.h"
 #include "provider.h"
+#include "xalloc.h"
 #include "providers/http_provider.h"
+#include "providers/openai_models.h"
 #include "providers/registry.h"
+#include "transport/http.h"
 
 static void parse_context_length(const json_t *entry, struct model_info *out)
 {
@@ -131,8 +134,154 @@ static void test_malformed_entry_reports_error(void)
     free(error);
 }
 
+struct test_auth {
+    int prepares;
+    int refresh_allowed;
+    int recoveries;
+    int logged_out;
+};
+
+static struct test_auth auth_state;
+
+static int test_auth_prepare(void *auth, int allow_refresh, http_tick_cb tick, void *user)
+{
+    (void)tick;
+    (void)user;
+    struct test_auth *state = auth;
+    state->prepares++;
+    state->refresh_allowed = allow_refresh;
+    return state->logged_out ? -1 : 0;
+}
+
+static char **test_auth_headers(const void *auth, const char *session_id, int streaming)
+{
+    (void)session_id;
+    (void)streaming;
+    const struct test_auth *state = auth;
+    const char *headers[] = {state->recoveries ? "Authorization: Bearer new-token"
+                                               : "Authorization: Bearer old-token",
+                             NULL};
+    return string_array_concat(headers, NULL);
+}
+
+static int test_auth_recover(void *auth, int *retried, http_tick_cb tick, void *user)
+{
+    (void)tick;
+    (void)user;
+    if (*retried)
+        return 0;
+    *retried = 1;
+    ((struct test_auth *)auth)->recoveries++;
+    return 1;
+}
+
+static char *test_auth_message(void *auth)
+{
+    (void)auth;
+    return xstrdup("test login required");
+}
+
+static void test_auth_destroy(void *auth)
+{
+    (void)auth;
+}
+
+static int test_auth_source(const struct provider_def *def, struct http_auth_source *out)
+{
+    (void)def;
+    static const struct http_auth_ops ops = {
+        .prepare = test_auth_prepare,
+        .headers = test_auth_headers,
+        .recover = test_auth_recover,
+        .unauthorized_message = test_auth_message,
+        .destroy = test_auth_destroy,
+    };
+    out->ops = &ops;
+    out->state = &auth_state;
+    return 0;
+}
+
+static void test_dynamic_credentials_retried_once(void)
+{
+    static const char unauthorized[] = "HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n"
+                                       "Content-Length: 0\r\n\r\n";
+    for (int rejected = 0; rejected < 2; rejected++) {
+        auth_state = (struct test_auth){0};
+        struct loopback server = {.n_requests = 2};
+        server.responses[0] = unauthorized;
+        if (rejected)
+            server.responses[1] = unauthorized;
+        else
+            loopback_reply_ok(&server, 1, "{\"data\":[{\"id\":\"model\"}]}");
+        int port = loopback_start(&server);
+        if (port < 0) {
+            loopback_stop(&server);
+            T_SKIP("cannot run a loopback server here");
+        }
+        char base_url[64];
+        snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", port);
+        struct provider_def def = {
+            .id = "dynamic", .base_url = base_url, .auth_source = test_auth_source};
+        struct provider *provider = http_provider_new(&def);
+        EXPECT(provider != NULL);
+        if (provider) {
+            struct model_info *models = NULL;
+            size_t count = 0;
+            char *error = NULL;
+            EXPECT(provider->list_models(provider, &models, &count, &error, NULL, NULL) ==
+                   (rejected ? -1 : 0));
+            EXPECT(auth_state.prepares == 1);
+            EXPECT(auth_state.refresh_allowed == 1);
+            EXPECT(auth_state.recoveries == 1);
+            if (rejected)
+                EXPECT_STR_EQ(error, "test login required");
+            else
+                EXPECT(count == 1);
+            model_info_free(models, count);
+            free(error);
+            provider->destroy(provider);
+        }
+        loopback_stop(&server);
+        EXPECT(atomic_load(&server.served) == 2);
+        EXPECT(strstr(server.requests[0], "Authorization: Bearer old-token\r\n") != NULL);
+        EXPECT(strstr(server.requests[1], "Authorization: Bearer new-token\r\n") != NULL);
+    }
+}
+
+static void test_logged_out_metadata_does_not_send(void)
+{
+    auth_state = (struct test_auth){.logged_out = 1};
+    struct provider_def def = {
+        .id = "dynamic", .base_url = "http://example.invalid", .auth_source = test_auth_source};
+    struct provider *provider = http_provider_new(&def);
+    EXPECT(provider != NULL);
+    if (!provider)
+        return;
+    struct model_info *models = NULL;
+    size_t count = 0;
+    char *error = NULL;
+    EXPECT(provider->list_models(provider, &models, &count, &error, NULL, NULL) == -1);
+    EXPECT_STR_EQ(error, "test login required");
+    EXPECT(auth_state.prepares == 1);
+    EXPECT(auth_state.refresh_allowed == 1);
+    EXPECT(models == NULL);
+    EXPECT(count == 0);
+    free(error);
+    struct model_probe probe = {0};
+    EXPECT(openai_probe_model(provider, "model", &probe) == -1);
+    EXPECT(probe.url == NULL);
+    EXPECT(auth_state.refresh_allowed == 0);
+    auth_state.logged_out = 0;
+    EXPECT(openai_probe_model(provider, "model", &probe) == 0);
+    EXPECT(probe.url != NULL);
+    model_probe_clear(&probe);
+    provider->destroy(provider);
+}
+
 int main(void)
 {
+    test_dynamic_credentials_retried_once();
+    test_logged_out_metadata_does_not_send();
     test_lists_flat_models();
     test_null_data_is_empty_success();
     test_unrecognized_shape_reports_error();

@@ -42,6 +42,7 @@ struct wire_body_opts {
     enum chat_reasoning_format reasoning_format;
     int request_cost; /* request OpenRouter usage cost */
     /* anthropic */
+    const char *system_identity; /* optional standalone block before the context's system prompt */
     int max_tokens;
     enum anthropic_thinking_mode thinking_mode;
     int thinking_budget;       /* tokens; out-of-range values fall back to max_tokens - 1 */

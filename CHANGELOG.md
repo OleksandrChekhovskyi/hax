@@ -9,6 +9,14 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Added
 
+- Anthropic OAuth: `/login anthropic` signs in through a browser with PKCE; hax stores and
+  refreshes tokens automatically. `/logout anthropic` removes the local login and restores
+  configured API-key authentication.
+- Kimi Code OAuth: `/login kimi` signs in with a device code, including over ssh. The `kimi`
+  provider refreshes hax-owned tokens automatically; `/logout kimi` removes the local login.
+- `/goal <objective>` pursues an objective across progress-only responses until complete or
+  blocked. Esc pauses, Enter continues, and `/goal clear` cancels goal mode. Goals survive
+  compaction and session resume; an unlimited `max_turns` uses a 100-request goal safety cap.
 - Man pages for offline reference: `man hax` for usage, plus `hax-config(5)`, `hax-sessions(5)`,
   and `hax-providers(7)`. Packages and source builds install them; the prebuilt binaries do not.
 
@@ -25,6 +33,12 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 - The model now always knows that `--preset <name>` starts a subagent with one of your presets,
   so asking for a preset by name works even when no preset has a description. Presets with a
   description are still the only ones listed for the model to pick on its own.
+
+### Fixed
+
+- Anthropic OAuth requests now send the required standalone system identity block, avoiding
+  misleading HTTP 429 `rate_limit_error: Error` responses on accounts with available quota.
+  API-key requests keep their existing system prompt.
 
 ## [0.6.1] - 2026-10-15
 

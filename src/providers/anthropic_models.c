@@ -69,6 +69,11 @@ void anthropic_parse_model(const json_t *entry, struct model_info *out)
 int anthropic_probe_model(struct provider *provider, const char *model, struct model_probe *probe)
 {
     (void)model;
+    const struct http_auth_source *auth = http_provider_auth(provider);
+    if (auth->ops && auth->ops->prepare(auth->state, 0, NULL, NULL) != 0) {
+        http_provider_defer_probe(provider);
+        return -1;
+    }
 
     probe->url = xasprintf("%s/models?limit=%d", http_provider_base_url(provider),
                            ANTHROPIC_MODEL_PAGE_SIZE);
@@ -100,18 +105,33 @@ static int fetch_models_page(struct provider *provider, const char *after_id, ht
     char *url = after_id ? xasprintf("%s/models?limit=%d&after_id=%s", base_url,
                                      ANTHROPIC_MODEL_PAGE_SIZE, after_id)
                          : xasprintf("%s/models?limit=%d", base_url, ANTHROPIC_MODEL_PAGE_SIZE);
-    char **request_headers = http_provider_metadata_headers(provider);
+    const struct http_auth_source *auth = http_provider_auth(provider);
+    if (auth->ops && auth->ops->prepare(auth->state, 1, tick, tick_user) != 0) {
+        *error = auth->ops->unauthorized_message(auth->state);
+        free(url);
+        return -1;
+    }
 
     char *response_body = NULL;
     long status = 0;
-    int result = http_get(url, (const char *const *)request_headers, MODEL_LIST_TIMEOUT_S, 0, tick,
+    int result;
+    int retried = 0;
+    do {
+        free(response_body);
+        response_body = NULL;
+        char **headers = http_provider_metadata_headers(provider);
+        result = http_get(url, (const char *const *)headers, MODEL_LIST_TIMEOUT_S, 0, tick,
                           tick_user, &response_body, &status);
-    string_array_free(request_headers);
+        string_array_free(headers);
+    } while (status == 401 && auth->ops &&
+             auth->ops->recover(auth->state, &retried, tick, tick_user));
     free(url);
 
     if (result != 0) {
-        *error = format_model_list_error(provider->name, base_url,
-                                         http_provider_has_api_key(provider), status);
+        *error = (status == 401 || status == 403) && auth->ops
+                     ? auth->ops->unauthorized_message(auth->state)
+                     : format_model_list_error(provider->name, base_url,
+                                               http_provider_has_api_key(provider), status);
         free(response_body);
         return -1;
     }

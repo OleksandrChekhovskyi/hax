@@ -25,8 +25,7 @@ enum provider_field_class {
     /* Unpinned defs: a pinned provider's identity fields are fixed, so setting them must warn
      * rather than silently do nothing. */
     PROVIDER_FIELD_UNPINNED = 1 << 3,
-    /* Providers authenticating with a static API key; a def with an auth source manages its
-     * own credentials, so key fields must warn. */
+    /* Providers supporting a static API key, directly or as an auth source's fallback. */
     PROVIDER_FIELD_KEYED = 1 << 4,
     /* Defs whose base_url carries a "{port}" placeholder. */
     PROVIDER_FIELD_PORT_TEMPLATED = 1 << 5,

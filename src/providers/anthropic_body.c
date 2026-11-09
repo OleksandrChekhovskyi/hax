@@ -264,17 +264,21 @@ json_t *anthropic_build_body(const struct context *context, const char *provider
     json_t *body = json_pack("{s:s, s:i, s:b, s:o}", "model", model, "max_tokens", opts->max_tokens,
                              "stream", 1, "messages", messages);
 
+    json_t *system = json_array();
+    if (opts->system_identity)
+        json_array_append_new(system, build_text_block(opts->system_identity));
     if (context->system_prompt && *context->system_prompt) {
-        json_t *system_block =
-            json_pack("{s:s, s:s}", "type", "text", "text", context->system_prompt);
+        json_t *system_block = build_text_block(context->system_prompt);
         if (opts->cache_markers) {
             json_object_set_new(system_block, "cache_control",
                                 build_cache_control(opts->cache_ttl));
         }
-        json_t *system = json_array();
         json_array_append_new(system, system_block);
-        json_object_set_new(body, "system", system);
     }
+    if (json_array_size(system) > 0)
+        json_object_set_new(body, "system", system);
+    else
+        json_decref(system);
 
     if (context->n_tools > 0) {
         json_object_set_new(
