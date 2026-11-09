@@ -130,7 +130,6 @@ static const struct provider_def DEFS[] = {
     },
     {
         .id = "minimax",
-        .display_name = "MiniMax",
         .api = "anthropic-messages",
         .base_url = "https://api.minimax.io/anthropic/v1",
         .pinned = 1,
