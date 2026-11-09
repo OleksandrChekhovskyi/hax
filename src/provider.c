@@ -58,7 +58,8 @@ size_t items_context_floor(const struct item *items, size_t n_items)
 
 int item_is_typed_prompt(const struct item *item)
 {
-    return item->kind == ITEM_USER_MESSAGE && item->origin == ITEM_ORIGIN_NONE;
+    return item->kind == ITEM_USER_MESSAGE &&
+           (item->origin == ITEM_ORIGIN_NONE || item->origin == ITEM_ORIGIN_GOAL);
 }
 
 size_t items_user_turn_cut(const struct item *items, size_t n_items, size_t keep_user_turns)

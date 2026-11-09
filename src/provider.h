@@ -36,6 +36,8 @@ enum item_origin {
     ITEM_ORIGIN_SUMMARIZED,   /* TOOL_RESULT standing in for separately displayed output */
     ITEM_ORIGIN_TASK_NOTE,    /* synthetic USER_MESSAGE reporting finished background tasks */
     ITEM_ORIGIN_COMPACTION,   /* TURN_USAGE of a summarization request, not an agent turn */
+    ITEM_ORIGIN_GOAL,         /* typed USER_MESSAGE setting the active objective */
+    ITEM_ORIGIN_GOAL_END,     /* final ASSISTANT_MESSAGE or USER_MESSAGE cancelling goal mode */
 };
 
 /* One inline image carried by an item: base64 payload plus the metadata

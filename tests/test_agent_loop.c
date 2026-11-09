@@ -8,6 +8,7 @@
 #include "agent_loop.h"
 #include "agent_tool.h"
 #include "config.h"
+#include "goal.h"
 #include "harness.h"
 #include "provider.h"
 #include "session.h"
@@ -1391,6 +1392,153 @@ static void test_loop_injects_finished_task_note(void)
     task_registry_shutdown();
 }
 
+static int goal_requests;
+static int goal_complete_at;
+static int goal_tool_at;
+
+static int goal_stream(struct provider *provider, const struct context *context, const char *model,
+                       stream_cb callback, void *user, http_tick_cb tick, void *tick_user)
+{
+    (void)provider;
+    (void)model;
+    (void)tick;
+    (void)tick_user;
+    goal_requests++;
+    int saw_objective = 0;
+    for (size_t i = 0; i < context->n_items; i++)
+        if (context->items[i].text && strstr(context->items[i].text, "fix tests") &&
+            strstr(context->items[i].text, "[goal complete]"))
+            saw_objective = 1;
+    EXPECT(saw_objective);
+    emit_text(callback, user,
+              goal_requests == goal_complete_at ? "verified\n[goal complete]" : "progress only");
+    if (goal_requests == goal_tool_at) {
+        emit_text(callback, user, "\n[goal complete]");
+        emit_tool_call(callback, user, "goal-tool");
+    }
+    emit_done(callback, user, usage_tokens(10, 5));
+    return 0;
+}
+
+static void test_goal_continues_progress_and_tool_responses(void)
+{
+    struct agent_session session;
+    session_init(&session);
+    session_enable_tools(&session);
+    agent_session_append(&session, (struct item){.kind = ITEM_USER_MESSAGE,
+                                                 .text = xstrdup("fix tests"),
+                                                 .origin = ITEM_ORIGIN_GOAL});
+    struct provider provider = {.name = "test", .stream = goal_stream};
+    struct loop_test_ctx ctx = {0};
+    goal_requests = 0;
+    goal_complete_at = 3;
+    goal_tool_at = 2;
+    struct agent_loop_result result = run_chain(&session, &provider, &ctx, 0);
+    EXPECT(result.outcome == AGENT_LOOP_COMPLETE);
+    EXPECT(result.turns == 3);
+    EXPECT(ctx.tools_run == 1);
+    EXPECT(goal_current(&session) == NULL);
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+static void test_goal_pauses_and_resumes(void)
+{
+    struct agent_session session;
+    session_init(&session);
+    agent_session_append(&session, (struct item){.kind = ITEM_USER_MESSAGE,
+                                                 .text = xstrdup("fix tests"),
+                                                 .origin = ITEM_ORIGIN_GOAL});
+    struct provider provider = {.name = "test", .stream = goal_stream};
+    struct loop_test_ctx ctx = {.pause_at = 1};
+    goal_requests = 0;
+    goal_complete_at = 2;
+    goal_tool_at = 0;
+    struct agent_loop_result result = run_chain(&session, &provider, &ctx, 0);
+    EXPECT(result.outcome == AGENT_LOOP_PAUSED);
+    EXPECT(result.turns == 1);
+    EXPECT(goal_current(&session) != NULL);
+    agent_loop_result_destroy(&result);
+    ctx.pause_at = 0;
+    ctx.continued = 1;
+    result = run_chain(&session, &provider, &ctx, 0);
+    EXPECT(result.outcome == AGENT_LOOP_COMPLETE);
+    EXPECT(result.turns == 1);
+    EXPECT(goal_current(&session) == NULL);
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+static void goal_compact(void *user)
+{
+    struct agent_session *session = user;
+    agent_session_append(session, (struct item){.kind = ITEM_USER_MESSAGE,
+                                                .text = xstrdup("summary omitting the objective"),
+                                                .origin = ITEM_ORIGIN_COMPACT_SEED});
+}
+
+static void test_goal_reminded_after_tool_seam_compaction(void)
+{
+    config_set_override("compact.auto", "1");
+    config_set_override("compact.threshold", "50");
+    config_set_override("context_limit", "10");
+    struct agent_session session;
+    session_init(&session);
+    agent_session_append(&session, (struct item){.kind = ITEM_USER_MESSAGE,
+                                                 .text = xstrdup("fix tests"),
+                                                 .origin = ITEM_ORIGIN_GOAL});
+    struct provider provider = {.name = "test", .stream = goal_stream};
+    struct agent_loop_params params = {
+        .session = &session,
+        .provider = &provider,
+        .max_turns = 3,
+        .hooks = {.user = &session, .compact = goal_compact},
+    };
+    goal_requests = 0;
+    goal_complete_at = 2;
+    goal_tool_at = 1;
+    struct agent_loop_result result;
+    agent_loop_run(&params, &result);
+    EXPECT(result.outcome == AGENT_LOOP_COMPLETE);
+    EXPECT(result.turns == 2);
+    EXPECT(items_context_floor(session.items, session.n_items) > 0);
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+    config_set_override("context_limit", NULL);
+    config_set_override("compact.threshold", NULL);
+    config_set_override("compact.auto", NULL);
+}
+
+static void test_goal_request_limits_and_errors(void)
+{
+    const int limits[] = {0, 2};
+    for (size_t i = 0; i < sizeof(limits) / sizeof(limits[0]); i++) {
+        struct agent_session session;
+        session_init(&session);
+        agent_session_append(&session, (struct item){.kind = ITEM_USER_MESSAGE,
+                                                     .text = xstrdup("fix tests"),
+                                                     .origin = ITEM_ORIGIN_GOAL});
+        struct provider provider = {.name = "test", .stream = goal_stream};
+        struct loop_test_ctx ctx = {0};
+        goal_requests = 0;
+        goal_complete_at = 0;
+        goal_tool_at = 0;
+        struct agent_loop_result result = run_chain(&session, &provider, &ctx, limits[i]);
+        EXPECT(result.outcome == AGENT_LOOP_MAX_TURNS);
+        EXPECT(result.turns == (limits[i] ? limits[i] : 100));
+        EXPECT(goal_current(&session) != NULL);
+        agent_loop_result_destroy(&result);
+        provider.stream = scripted_stream;
+        script = SCRIPT_PARTIAL_ERROR;
+        result = run_chain(&session, &provider, &ctx, limits[i]);
+        EXPECT(result.outcome == AGENT_LOOP_PROVIDER_ERROR);
+        EXPECT(result.turns == 1);
+        EXPECT(goal_current(&session) != NULL);
+        agent_loop_result_destroy(&result);
+        agent_session_free(&session);
+    }
+}
+
 int main(void)
 {
     /* Outside any repository, so recorded sessions neither run git nor depend on the checkout. */
@@ -1431,5 +1579,9 @@ int main(void)
     test_loop_prestream_error_leaves_no_marker();
     test_loop_requests_mid_chain_compaction();
     test_loop_injects_finished_task_note();
+    test_goal_continues_progress_and_tool_responses();
+    test_goal_pauses_and_resumes();
+    test_goal_reminded_after_tool_seam_compaction();
+    test_goal_request_limits_and_errors();
     T_REPORT();
 }

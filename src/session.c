@@ -188,10 +188,16 @@ static const struct {
     enum item_origin origin;
     const char *name;
 } ORIGIN_NAMES[] = {
-    {ITEM_ORIGIN_COMPACT_SEED, "compact_seed"}, {ITEM_ORIGIN_CONTINUATION, "continuation"},
-    {ITEM_ORIGIN_INTERRUPTED, "interrupted"},   {ITEM_ORIGIN_SKIPPED, "skipped"},
-    {ITEM_ORIGIN_REFUSED, "refused"},           {ITEM_ORIGIN_SUMMARIZED, "summarized"},
-    {ITEM_ORIGIN_TASK_NOTE, "task_note"},       {ITEM_ORIGIN_COMPACTION, "compaction"},
+    {ITEM_ORIGIN_COMPACT_SEED, "compact_seed"},
+    {ITEM_ORIGIN_CONTINUATION, "continuation"},
+    {ITEM_ORIGIN_INTERRUPTED, "interrupted"},
+    {ITEM_ORIGIN_SKIPPED, "skipped"},
+    {ITEM_ORIGIN_REFUSED, "refused"},
+    {ITEM_ORIGIN_SUMMARIZED, "summarized"},
+    {ITEM_ORIGIN_TASK_NOTE, "task_note"},
+    {ITEM_ORIGIN_COMPACTION, "compaction"},
+    {ITEM_ORIGIN_GOAL, "goal"},
+    {ITEM_ORIGIN_GOAL_END, "goal_end"},
 };
 
 static const char *origin_to_str(enum item_origin origin)
@@ -1270,7 +1276,7 @@ static void label_take_user_message(struct session_label *out, const json_t *ite
     enum item_origin origin = json_get_item_origin(item);
     if (origin == ITEM_ORIGIN_COMPACT_SEED)
         *saw_compaction_seed = 1;
-    if (origin != ITEM_ORIGIN_NONE)
+    if (origin != ITEM_ORIGIN_NONE && origin != ITEM_ORIGIN_GOAL)
         return;
     char *flattened = flatten_for_display(json_string_value(json_object_get(item, "text")));
     out->prompt = truncate_for_display(flattened, (size_t)max_cells);

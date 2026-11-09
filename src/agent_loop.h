@@ -129,7 +129,7 @@ struct agent_loop_params {
     struct provider *provider;
     struct transcript_log *tlog;
     struct session_log *slog;
-    int max_turns; /* <= 0 means unlimited */
+    int max_turns; /* <= 0 means unlimited, or a 100-request safety cap with an active goal */
     /* Resuming an incomplete user turn with no new user input: the first round-trip continues
      * the previous seam rather than following a fresh user message, so it owes a turn boundary
      * like a follow-up turn does. */

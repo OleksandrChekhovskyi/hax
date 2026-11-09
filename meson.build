@@ -89,6 +89,7 @@ sources = files(
     'src/diag.c',
     'src/effort.c',
     'src/file_mention.c',
+    'src/goal.c',
     'src/history.c',
     'src/model_meta.c',
     'src/model_sort.c',
@@ -106,6 +107,7 @@ sources = files(
     'src/turn.c',
     'src/xalloc.c',
 
+    'src/commands/goal_cmd.c',
     'src/commands/login.c',
     'src/commands/session_cmd.c',
     'src/commands/tasks.c',
