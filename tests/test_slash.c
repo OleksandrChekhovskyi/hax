@@ -5,6 +5,7 @@
 
 #include "agent.h"
 #include "agent_core.h"
+#include "compact.h"
 #include "config.h"
 #include "harness.h"
 #include "output.h"
@@ -49,11 +50,11 @@ void agent_resume_session(struct agent_state *state, const char *path)
     (void)state;
     (void)path;
 }
-int agent_compact(struct agent_state *state, const char *instructions, int automatic)
+int agent_compact(struct agent_state *state, const char *instructions, enum compact_reason reason)
 {
     (void)state;
     (void)instructions;
-    (void)automatic;
+    (void)reason;
     return 0;
 }
 

@@ -685,6 +685,7 @@ static void reshape_after_cut(struct agent_state *state, size_t cut_index, size_
             item_free(&session->items[i]);
         session->n_items = cut_index;
     }
+    session->compact_failures = 0;
 
     transcript_log_reset(state->transcript, session->system_prompt, session->tools,
                          session->n_tools);
@@ -800,24 +801,26 @@ static void compact_notice(struct render_ctx *render, const char *format, ...)
 /* Run a compaction under whatever interrupt watch the caller holds, showing the "compacting..."
  * spinner and an outcome notice. The spinner stays up, relabeled "working...", for the work that
  * follows. Returns 1 only when a seed was appended. */
-static int compact_conversation(struct agent_state *state, const char *instructions, int automatic)
+static int compact_conversation(struct agent_state *state, const char *instructions,
+                                enum compact_reason reason)
 {
     struct agent_session *session = state->session;
     struct provider *provider = state->provider;
     struct render_ctx *render = state->render;
+    int manual = reason == COMPACT_MANUAL;
 
     if (!provider) {
-        if (!automatic)
+        if (manual)
             compact_notice(render, "no provider selected — use /provider");
         return 0;
     }
     if (!session->model || !*session->model) {
-        if (!automatic)
+        if (manual)
             compact_notice(render, "no model selected — use /model (or /provider)");
         return 0;
     }
     if (session->n_items == 0) {
-        if (!automatic)
+        if (manual)
             compact_notice(render, "nothing to compact");
         return 0;
     }
@@ -832,6 +835,7 @@ static int compact_conversation(struct agent_state *state, const char *instructi
         .session_log = state->session_log,
         .transcript_log = state->transcript,
         .instructions = instructions,
+        .reason = reason,
         .hooks =
             {
                 .user = state,
@@ -847,7 +851,7 @@ static int compact_conversation(struct agent_state *state, const char *instructi
 
     int compacted = result.outcome == COMPACT_COMPLETE;
     /* Manual compaction moves the model past the resumable tail; retract the empty-send offer. */
-    if (compacted && !automatic)
+    if (compacted && manual)
         clear_resume_state(state);
     switch (result.outcome) {
     case COMPACT_COMPLETE:
@@ -868,16 +872,19 @@ static int compact_conversation(struct agent_state *state, const char *instructi
     case COMPACT_EMPTY:
         break; /* ruled out by the checks above */
     }
+    if (result.auto_suspended)
+        compact_notice(render, "automatic compaction off after %d failures — /compact retries it",
+                       COMPACT_MAX_AUTO_FAILURES);
     compact_result_destroy(&result);
     return compacted;
 }
 
-int agent_compact(struct agent_state *state, const char *instructions, int automatic)
+int agent_compact(struct agent_state *state, const char *instructions, enum compact_reason reason)
 {
     /* Clear before the spinner shows: its pause label would report an Esc left from earlier. */
     interrupt_clear_requests();
     interrupt_arm();
-    int compacted = compact_conversation(state, instructions, automatic);
+    int compacted = compact_conversation(state, instructions, reason);
     interrupt_disarm();
     render_finish(state->render);
     return compacted;
@@ -914,7 +921,7 @@ static struct item repl_loop_tool_call(const struct item *call, enum agent_loop_
 /* Runs under the loop's interrupt watch, so an Esc latched here reaches its next checkpoint. */
 static int repl_loop_compact(void *user)
 {
-    return compact_conversation(user, NULL, 1);
+    return compact_conversation(user, NULL, COMPACT_THRESHOLD);
 }
 
 static void repl_loop_task_note(const char *text, void *user)
@@ -1110,8 +1117,8 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
 
         /* Compact before appending the prompt rather than when a user turn ends: only a send
          * proves the conversation continues. A failed pass lets the send proceed. */
-        if (compact_due(&session, current_provider)) {
-            agent_compact(&state, NULL, 1);
+        if (compact_due(&session, current_provider, line)) {
+            agent_compact(&state, NULL, COMPACT_THRESHOLD);
             /* An Esc during compaction stops the send as well: nothing launches after it, and
              * the prompt returns to the editor unsent. A compaction it cut short stays due. */
             if (agent_interrupt_signal() != AGENT_SIGNAL_NONE) {

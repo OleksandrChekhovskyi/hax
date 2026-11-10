@@ -385,12 +385,12 @@ static void loop_run_active(const struct agent_loop_params *params,
         }
 
         /* Compact only at a seam another turn follows, once calls, results, and footer are
-         * durable and before the next boundary; compact_due() reads that footer. After the last
-         * allowed turn, the run that continues compacts before its first request instead.
-         * Cancellation during the frontend transaction must stop continuation against old
-         * history. */
+         * durable and before the next boundary; compact_due() reads the footer and estimates the
+         * results it did not measure. After the last allowed turn, the run that continues
+         * compacts before its first request instead. Cancellation during the frontend
+         * transaction must stop continuation against old history. */
         int turns_left = params->max_turns <= 0 || turn_n + 1 < params->max_turns;
-        if (turns_left && hooks->compact && compact_due(session, params->provider)) {
+        if (turns_left && hooks->compact && compact_due(session, params->provider, NULL)) {
             if (hooks->compact(hooks->user))
                 result->last_context_tokens = -1;
             sig = loop_checkpoint(hooks);

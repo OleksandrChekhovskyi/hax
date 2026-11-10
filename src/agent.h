@@ -5,6 +5,7 @@
 /* Interactive frontend for running and mutating an agent REPL session. */
 
 #include "agent_core.h"
+#include "compact.h"
 #include "provider.h"
 
 struct transcript_log;
@@ -81,9 +82,9 @@ void agent_display_refresh(struct agent_state *state);
 
 /* Compact the conversation on its own: watch for Esc, append a summary seed that stands in for
  * the older history, and hide the "compacting..." spinner when done. `instructions` may be NULL.
- * Automatic calls suppress no-op notices. One Esc cancels only before the summary starts streaming
- * and otherwise stays latched for the caller; a second cancels. Returns 1 only when a seed was
- * appended. */
-int agent_compact(struct agent_state *state, const char *instructions, int automatic);
+ * Only COMPACT_MANUAL reports a compaction that cannot start. One Esc cancels only before the
+ * summary starts streaming and otherwise stays latched for the caller; a second cancels. Returns 1
+ * only when a seed was appended. */
+int agent_compact(struct agent_state *state, const char *instructions, enum compact_reason reason);
 
 #endif /* HAX_AGENT_H */

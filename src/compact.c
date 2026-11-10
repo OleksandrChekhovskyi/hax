@@ -62,10 +62,11 @@ static const char COMPACT_SEED_PREAMBLE[] =
     "below captures everything that happened before this point — treat it as established "
     "context and continue the work from here.";
 
-static int compact_auto_enabled(void)
-{
-    return config_bool("compact.auto");
-}
+/* Room for the summary request's prompt and reply, and for the ordinary reply that may land
+ * before the next check. A percentage alone leaves a small window too little: 15% of 32k is
+ * about 4.8k tokens. */
+#define COMPACT_RESERVE_TOKENS    16384L
+#define COMPACT_RESERVE_MAX_SHARE 4
 
 int compact_over_threshold(long context_tokens, long context_limit, int threshold_percent)
 {
@@ -76,22 +77,27 @@ int compact_over_threshold(long context_tokens, long context_limit, int threshol
     long threshold_tokens = context_limit / 100 * threshold_percent;
     long scaled_remainder = context_limit % 100 * threshold_percent;
     threshold_tokens += scaled_remainder / 100 + (scaled_remainder % 100 != 0);
+
+    long reserve = context_limit / COMPACT_RESERVE_MAX_SHARE;
+    if (reserve > COMPACT_RESERVE_TOKENS)
+        reserve = COMPACT_RESERVE_TOKENS;
+    if (threshold_tokens > context_limit - reserve)
+        threshold_tokens = context_limit - reserve;
     return context_tokens >= threshold_tokens;
 }
 
-static int compact_should_auto(long context_tokens, long context_limit)
+int compact_due(const struct agent_session *session, struct provider *provider,
+                const char *pending_prompt)
 {
-    if (!compact_auto_enabled())
+    if (!provider || !session->model || !config_bool("compact.auto") ||
+        session->compact_failures >= COMPACT_MAX_AUTO_FAILURES)
         return 0;
-    return compact_over_threshold(context_tokens, context_limit, config_int("compact.threshold"));
-}
-
-int compact_due(const struct agent_session *session, struct provider *provider)
-{
-    if (!provider || !session->model)
+    long tokens = agent_session_context_estimate(session);
+    if (tokens < 0)
         return 0;
-    return compact_should_auto(agent_session_last_context_tokens(session),
-                               model_meta_context(provider, session->model));
+    return compact_over_threshold(tokens + text_token_estimate(pending_prompt),
+                                  model_meta_context(provider, session->model),
+                                  config_int("compact.threshold"));
 }
 
 static char *build_summary_prompt(const char *instructions)
@@ -107,7 +113,10 @@ static char *build_summary_seed(const char *summary)
     return xasprintf("%s\n\n%s", COMPACT_SEED_PREAMBLE, summary);
 }
 
-#define COMPACT_MAX_ATTEMPTS 4
+/* The first request and one re-ask after rejected tool calls. A model that ignored both the
+ * leading instruction and the rejection rarely complies on a later try, while each re-ask grows
+ * the request; automatic compaction tries again before a later request instead. */
+#define COMPACT_MAX_ATTEMPTS 2
 
 struct summary_request {
     struct context base_context;
@@ -314,6 +323,9 @@ void compact_run(const struct compact_params *params, struct compact_result *res
             result->outcome = COMPACT_PROVIDER_ERROR;
         else
             result->outcome = COMPACT_NO_SUMMARY;
+        if (params->reason != COMPACT_MANUAL && !cancelled)
+            result->auto_suspended =
+                ++params->session->compact_failures == COMPACT_MAX_AUTO_FAILURES;
         append_attempt_usage(params, attempts, 0, attempts->count);
         agent_stream_destroy(&stream);
         flush_compaction_logs(params);
@@ -329,6 +341,7 @@ void compact_run(const struct compact_params *params, struct compact_result *res
     append_attempt_usage(params, attempts, accepted_usage_index, attempts->count);
     agent_stream_destroy(&stream);
     flush_compaction_logs(params);
+    params->session->compact_failures = 0;
     result->outcome = COMPACT_COMPLETE;
 }
 

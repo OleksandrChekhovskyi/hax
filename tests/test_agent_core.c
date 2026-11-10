@@ -772,6 +772,64 @@ static void test_last_context_tokens(void)
     agent_session_free(&session);
 }
 
+static void append_tool_turn(struct agent_session *session, const char *call_id, const char *output)
+{
+    agent_session_append(session, (struct item){.kind = ITEM_TOOL_CALL,
+                                                .call_id = xstrdup(call_id),
+                                                .tool_name = xstrdup("read"),
+                                                .tool_arguments_json = xstrdup("{}")});
+    agent_session_append(session, (struct item){.kind = ITEM_TOOL_RESULT,
+                                                .call_id = xstrdup(call_id),
+                                                .output = xstrdup(output)});
+    struct stream_usage usage = reported_usage();
+    agent_session_add_turn_usage(session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
+}
+
+/* The newest footer's total plus what its request could not include: the results of the calls
+ * it returned, recorded before the footer, and everything after it. Results of earlier turns
+ * were input to that request and are not counted again. */
+static void test_context_estimate(void)
+{
+    struct agent_session session = {0};
+    agent_session_add_user(&session, "hello");
+    EXPECT(agent_session_context_estimate(&session) == -1);
+
+    append_tool_turn(&session, "c1", "earlier result, already sent as input");
+    agent_session_add_boundary(&session);
+    append_tool_turn(&session, "c2", "0123456789abcdefghij"); /* 20 bytes */
+    EXPECT(agent_session_last_context_tokens(&session) == 110);
+    EXPECT(agent_session_context_estimate(&session) == 115);
+
+    agent_session_append(&session, (struct item){.kind = ITEM_USER_MESSAGE,
+                                                 .text = xstrdup("12345678"),
+                                                 .origin = ITEM_ORIGIN_TASK_NOTE});
+    EXPECT(agent_session_context_estimate(&session) == 117);
+
+    agent_session_free(&session);
+}
+
+/* A new configuration or conversation lets automatic compaction retry. */
+static void test_compact_failures_clear(void)
+{
+    unsetenv("HAX_MODEL");
+    setenv("HAX_SYSTEM_PROMPT", "", 1);
+    struct provider provider = {.name = "test"};
+    struct hax_opts opts = {0};
+    struct agent_session session;
+    agent_session_init(&session, &provider, &opts);
+
+    session.compact_failures = 3;
+    agent_session_reconfigure(&session, &provider);
+    EXPECT(session.compact_failures == 0);
+
+    session.compact_failures = 3;
+    agent_session_reset(&session);
+    EXPECT(session.compact_failures == 0);
+
+    agent_session_free(&session);
+    unsetenv("HAX_SYSTEM_PROMPT");
+}
+
 static void test_has_reported_usage(void)
 {
     struct agent_session session = {0};
@@ -884,6 +942,8 @@ int main(void)
     test_mark_interrupt_empty_session();
     test_resume_tail_classification();
     test_last_context_tokens();
+    test_context_estimate();
+    test_compact_failures_clear();
     test_has_reported_usage();
     test_prepare_resumed();
     T_REPORT();

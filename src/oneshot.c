@@ -52,34 +52,42 @@ static enum agent_signal oneshot_poll(void *user)
     return agent_interrupt_signal();
 }
 
-static int compact_context(struct oneshot_state *state)
+/* A failure is reported even under --json: the run goes on against the full window, and no
+ * record says why. A cancellation is reported by the run's own stop diagnostic. */
+static void report_compact_failure(const struct compact_result *result)
 {
+    if (result->outcome == COMPACT_PROVIDER_ERROR)
+        hax_warn("compaction failed: %s",
+                 result->error_message ? result->error_message : "stream failed");
+    else if (result->outcome == COMPACT_NO_SUMMARY)
+        hax_warn("compaction produced no summary");
+    if (result->auto_suspended)
+        hax_warn("automatic compaction off after %d failures", COMPACT_MAX_AUTO_FAILURES);
+}
+
+static int auto_compact(void *user)
+{
+    struct oneshot_state *state = user;
     struct compact_params params = {
         .session = &state->session,
         .provider = state->provider,
         .session_log = state->session_log,
         .transcript_log = state->transcript,
+        .reason = COMPACT_THRESHOLD,
         .hooks = {.user = state, .poll = oneshot_poll, .checkpoint = oneshot_poll},
     };
     struct compact_result result;
 
     compact_run(&params, &result);
     int completed = result.outcome == COMPACT_COMPLETE;
-    compact_result_destroy(&result);
-    return completed;
-}
-
-static int auto_compact(void *user)
-{
-    struct oneshot_state *state = user;
-
-    if (!compact_context(state))
-        return 0;
-    if (!state->json) {
+    if (!completed) {
+        report_compact_failure(&result);
+    } else if (!state->json) {
         int tty = isatty(fileno(stderr));
         fprintf(stderr, "%s[compacted context]%s\n", tty ? ANSI_DIM : "", tty ? ANSI_RESET : "");
     }
-    return 1;
+    compact_result_destroy(&result);
+    return completed;
 }
 
 /* The --json stream on stdout; docs/sessions.md is the record contract. On a write failure
@@ -574,7 +582,7 @@ int oneshot_run(struct provider *provider, const char *prompt, const struct hax_
 
     /* The REPL's compaction before a send: the loop compacts only at seams it reaches itself,
      * so a resumed record over the threshold is compacted here. */
-    if (compact_due(&state.session, state.provider))
+    if (compact_due(&state.session, state.provider, prompt))
         auto_compact(&state);
 
     struct agent_loop_result loop_result;

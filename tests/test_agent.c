@@ -6,6 +6,7 @@
 
 #include "agent.h"
 #include "agent_core.h"
+#include "compact.h"
 #include "config.h"
 #include "effort.h"
 #include "harness.h"
@@ -435,10 +436,13 @@ static void test_undo_reverts_history_and_file(void)
     session_log_append(f.state.session_log, f.session.items, f.session.n_items);
     char *path = xstrdup(session_log_path(f.state.session_log));
     EXPECT(agent_user_turn_count(&f.session) == 3);
+    f.session.compact_failures = COMPACT_MAX_AUTO_FAILURES;
 
     /* Revert to before turn 1: turn 0 survives, turns 1 and 2 drop. */
     struct history_mutation_call c = {.state = &f.state, .turn_index = 1};
     char *out = t_capture_stdout(do_undo, &c);
+    /* A shorter window may now summarize, so automatic compaction may retry. */
+    EXPECT(f.session.compact_failures == 0);
 
     EXPECT(agent_user_turn_count(&f.session) == 1);
     EXPECT_STR_EQ(agent_user_turn_text(&f.session, 0), "first");

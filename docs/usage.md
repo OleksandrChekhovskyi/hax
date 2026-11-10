@@ -270,10 +270,18 @@ switched; a resumed session shows the same totals. `/usage` asks the provider fo
 usage when supported. One-shot runs put equivalent stats on stderr.
 
 Automatic compaction summarizes the older part of the conversation near 85% of a known context
-window. It happens only when the conversation goes on, while hax is working or just before your
-next message is sent, so a conversation you leave is never summarized for nothing. Use `/compact`
-earlier when the conversation has accumulated obsolete exploration, optionally naming what the
-summary must preserve. Manual compaction works even when the model's context limit is unknown.
+window. Context use is the last reported usage plus an estimate of tool output since then and of
+the message being sent. Compaction always leaves 16k tokens free for the summary and the next
+reply, or a quarter of a window smaller than 64k, so a small window compacts earlier. It happens
+only when the conversation goes on, while hax is working or just before your next message is sent,
+so a conversation you leave is never summarized for nothing. Use `/compact` earlier when the
+conversation has accumulated obsolete exploration, optionally naming what the summary must
+preserve. Manual compaction works even when the model's context limit is unknown.
+
+After three automatic compactions fail with none succeeding in between, hax stops trying and says
+so, even if your conversation went on normally between the failures. A successful `/compact`, a
+change of provider, model, effort, or any `/config` setting, `/undo`, `/fork`, or a new conversation
+lets it try again.
 
 For local servers, configure a context window large enough for the system prompt, project context,
 conversation, and response. A small server-side context often appears as truncated answers rather

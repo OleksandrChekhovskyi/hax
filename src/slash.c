@@ -10,6 +10,7 @@
 #include "agent.h"
 #include "agent_core.h"
 #include "buf.h"
+#include "compact.h"
 #include "config.h"
 #include "file_mention.h"
 #include "provider.h"
@@ -800,7 +801,7 @@ static const char *config_later_usage(const char *preceding)
 
 static void run_compact(const struct command_call *call)
 {
-    agent_compact(call->state, call->argument, 0);
+    agent_compact(call->state, call->argument, COMPACT_MANUAL);
 }
 
 /* ---------- /copy ---------- */

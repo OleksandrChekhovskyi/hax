@@ -23,14 +23,20 @@ static void test_over_threshold(void)
     EXPECT(!compact_over_threshold(100, 1000, 0));
     EXPECT(!compact_over_threshold(100, 1000, 101));
 
-    EXPECT(!compact_over_threshold(8499, 10000, 85));
-    EXPECT(compact_over_threshold(8500, 10000, 85));
-    EXPECT(compact_over_threshold(9999, 10000, 85));
-    EXPECT(!compact_over_threshold(9999, 10000, 100));
-    EXPECT(compact_over_threshold(10000, 10000, 100));
+    /* A large window leaves the reserve free at the percentage, so the percentage decides. */
+    EXPECT(!compact_over_threshold(849999, 1000000, 85));
+    EXPECT(compact_over_threshold(850000, 1000000, 85));
+    EXPECT(!compact_over_threshold(500, 1001, 50)); /* 500.5 rounds up */
+    EXPECT(compact_over_threshold(501, 1001, 50));
 
-    EXPECT(!compact_over_threshold(LONG_MAX - 1, LONG_MAX, 100));
-    EXPECT(compact_over_threshold(LONG_MAX, LONG_MAX, 100));
+    /* Otherwise the reserve does: 16384 tokens, or a quarter of a small window. */
+    EXPECT(!compact_over_threshold(983615, 1000000, 100));
+    EXPECT(compact_over_threshold(983616, 1000000, 100));
+    EXPECT(!compact_over_threshold(7499, 10000, 85));
+    EXPECT(compact_over_threshold(7500, 10000, 85));
+
+    EXPECT(!compact_over_threshold(LONG_MAX - 16385, LONG_MAX, 100));
+    EXPECT(compact_over_threshold(LONG_MAX - 16384, LONG_MAX, 100));
 }
 
 static void add_window_usage(struct agent_session *session, long input_tokens)
@@ -52,36 +58,69 @@ static void test_due(void)
      * hermetic regardless of env / file config. */
     config_set_override("compact.auto", "1");
     config_set_override("compact.threshold", "90");
-    config_set_override("context_limit", "10000");
+    config_set_override("context_limit", "1000000");
     struct provider provider = {.name = "test"};
     struct agent_session session = {0};
     session.model = xstrdup("model");
     agent_session_add_user(&session, "hello");
 
-    EXPECT(!compact_due(&session, &provider)); /* nothing reported yet */
-    add_window_usage(&session, 8949);          /* 89.99% < 90% */
-    EXPECT(!compact_due(&session, &provider));
-    add_window_usage(&session, 8950); /* exactly 90% */
-    EXPECT(compact_due(&session, &provider));
-    EXPECT(!compact_due(&session, NULL));
+    EXPECT(!compact_due(&session, &provider, NULL)); /* nothing reported yet */
+    add_window_usage(&session, 899949);              /* 89.99% < 90% */
+    EXPECT(!compact_due(&session, &provider, NULL));
+    add_window_usage(&session, 899950); /* exactly 90% */
+    EXPECT(compact_due(&session, &provider, NULL));
+    EXPECT(!compact_due(&session, NULL, NULL));
 
     /* The live limit decides, so a larger window settles the debt without compacting. */
-    config_set_override("context_limit", "20000");
-    EXPECT(!compact_due(&session, &provider));
-    config_set_override("context_limit", "10000");
+    config_set_override("context_limit", "2000000");
+    EXPECT(!compact_due(&session, &provider, NULL));
+    config_set_override("context_limit", "1000000");
 
     /* Disabled via config: never auto-compacts, even when far over. */
     config_set_override("compact.auto", "0");
-    add_window_usage(&session, 100000);
-    EXPECT(!compact_due(&session, &provider));
+    add_window_usage(&session, 10000000);
+    EXPECT(!compact_due(&session, &provider, NULL));
 
     /* Out-of-range threshold falls back to the 85% default. */
     config_set_override("compact.auto", "1");
     config_set_override("compact.threshold", "0");
-    add_window_usage(&session, 8449);
-    EXPECT(!compact_due(&session, &provider));
-    add_window_usage(&session, 8450);
-    EXPECT(compact_due(&session, &provider));
+    add_window_usage(&session, 849949);
+    EXPECT(!compact_due(&session, &provider, NULL));
+    add_window_usage(&session, 849950);
+    EXPECT(compact_due(&session, &provider, NULL));
+
+    /* Automatic compaction stops asking after repeated failures. */
+    session.compact_failures = COMPACT_MAX_AUTO_FAILURES;
+    EXPECT(!compact_due(&session, &provider, NULL));
+
+    agent_session_free(&session);
+    config_set_override("context_limit", NULL);
+    config_set_override("compact.threshold", NULL);
+    config_set_override("compact.auto", NULL);
+}
+
+/* The prompt about to be sent and items the last footer did not measure both count. */
+static void test_due_counts_unsent_input(void)
+{
+    config_set_override("compact.auto", "1");
+    config_set_override("compact.threshold", "90");
+    config_set_override("context_limit", "1000000");
+    struct provider provider = {.name = "test"};
+    struct agent_session session = {0};
+    session.model = xstrdup("model");
+    agent_session_add_user(&session, "hello");
+    add_window_usage(&session, 899940); /* 10 tokens short */
+
+    char prompt[41];
+    memset(prompt, 'p', 40);
+    prompt[40] = '\0';
+    EXPECT(!compact_due(&session, &provider, prompt + 4));
+    EXPECT(compact_due(&session, &provider, prompt));
+
+    agent_session_append(&session, (struct item){.kind = ITEM_USER_MESSAGE,
+                                                 .text = xstrdup(prompt),
+                                                 .origin = ITEM_ORIGIN_TASK_NOTE});
+    EXPECT(compact_due(&session, &provider, NULL));
 
     agent_session_free(&session);
     config_set_override("context_limit", NULL);
@@ -231,14 +270,16 @@ static void init_session(struct agent_session *session)
                          (struct item){.kind = ITEM_USER_MESSAGE, .text = xstrdup("old history")});
 }
 
-static struct compact_result run_compaction(struct agent_session *session,
-                                            struct provider *provider,
-                                            struct session_log *session_log)
+static struct compact_result run_compaction_as(struct agent_session *session,
+                                               struct provider *provider,
+                                               struct session_log *session_log,
+                                               enum compact_reason reason)
 {
     struct compact_params params = {
         .session = session,
         .provider = provider,
         .session_log = session_log,
+        .reason = reason,
         .hooks =
             {
                 .poll = mock_signal,
@@ -248,6 +289,13 @@ static struct compact_result run_compaction(struct agent_session *session,
     struct compact_result result;
     compact_run(&params, &result);
     return result;
+}
+
+static struct compact_result run_compaction(struct agent_session *session,
+                                            struct provider *provider,
+                                            struct session_log *session_log)
+{
+    return run_compaction_as(session, provider, session_log, COMPACT_MANUAL);
 }
 
 static void test_applies_summary(void)
@@ -416,10 +464,11 @@ static void test_tool_call_retries_are_bounded(void)
 
     struct compact_result result = run_compaction(&session, &provider, NULL);
     EXPECT(result.outcome == COMPACT_NO_SUMMARY);
-    EXPECT(result.attempts == 4);
-    EXPECT(mock.stream_calls == 4);
-    EXPECT(mock.last_request_items == 11);
-    EXPECT(session.n_items == 5);
+    EXPECT(result.attempts == 2);
+    EXPECT(mock.stream_calls == 2);
+    /* History and prompt, then the rejected text, call, and result. */
+    EXPECT(mock.last_request_items == 5);
+    EXPECT(session.n_items == 3);
     EXPECT_STR_EQ(session.items[0].text, "old history");
     for (size_t i = 1; i < session.n_items; i++)
         EXPECT(session.items[i].kind == ITEM_TURN_USAGE);
@@ -478,6 +527,50 @@ static void test_preserves_failure(void)
     EXPECT(session.items[1].usage->usage.input_tokens == 150);
 
     compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+static void expect_auto_failure(struct agent_session *session, struct provider *provider,
+                                enum mock_script script, int failures, int suspended)
+{
+    reset_mock(script);
+    struct compact_result result = run_compaction_as(session, provider, NULL, COMPACT_THRESHOLD);
+    EXPECT(result.outcome != COMPACT_COMPLETE);
+    EXPECT(session->compact_failures == failures);
+    EXPECT(result.auto_suspended == suspended);
+    compact_result_destroy(&result);
+}
+
+/* Automatic failures count toward the breaker, while manual and cancelled ones do not, and any
+ * success clears it. */
+static void test_auto_failures_trip_breaker(void)
+{
+    struct agent_session session;
+    init_session(&session);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+
+    expect_auto_failure(&session, &provider, MOCK_ERROR, 1, 0);
+    reset_mock(MOCK_ERROR);
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    EXPECT(session.compact_failures == 1);
+    compact_result_destroy(&result);
+    reset_mock(MOCK_SUCCESS);
+    mock.signal_at_end = AGENT_SIGNAL_ABORT;
+    result = run_compaction_as(&session, &provider, NULL, COMPACT_THRESHOLD);
+    EXPECT(result.outcome == COMPACT_CANCELLED);
+    EXPECT(session.compact_failures == 1);
+    compact_result_destroy(&result);
+
+    expect_auto_failure(&session, &provider, MOCK_NO_SUMMARY, 2, 0);
+    expect_auto_failure(&session, &provider, MOCK_ERROR, 3, 1);
+    expect_auto_failure(&session, &provider, MOCK_ERROR, 4, 0);
+
+    reset_mock(MOCK_SUCCESS);
+    result = run_compaction(&session, &provider, NULL);
+    EXPECT(result.outcome == COMPACT_COMPLETE);
+    EXPECT(session.compact_failures == 0);
+    compact_result_destroy(&result);
+
     agent_session_free(&session);
 }
 
@@ -608,6 +701,7 @@ int main(void)
     setenv("XDG_STATE_HOME", t_tempdir(), 1);
     test_over_threshold();
     test_due();
+    test_due_counts_unsent_input();
     test_applies_summary();
     test_retried_attempt_usage_is_billed();
     test_cancelled_retry_usage_is_billed();
@@ -617,6 +711,7 @@ int main(void)
     test_resumed_session_floors_at_seed();
     test_preserves_failure();
     test_failure_without_message();
+    test_auto_failures_trip_breaker();
     test_rejects_empty_summary();
     test_rejects_incomplete_response();
     test_discards_cancelled_summary();

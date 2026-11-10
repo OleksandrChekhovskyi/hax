@@ -32,6 +32,10 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   the message goes back to the prompt unsent.
 - In one-shot mode, SIGUSR1 now pauses the way Esc does: it lets a compaction finish, and stops
   at once if the model has not started answering.
+- Automatic compaction now counts tool output and the message being sent, and keeps room for the
+  summary on small context windows, so it is less likely to start too late to fit. After three
+  failed attempts with no success between them, it stops retrying until something changes, such as
+  a successful `/compact` or a model switch. One-shot runs now report a failed compaction on stderr.
 
 ## [0.6.1] - 2026-10-15
 

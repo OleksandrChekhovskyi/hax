@@ -6,6 +6,7 @@
 
 #include "agent.h"
 #include "agent_core.h"
+#include "compact.h"
 #include "config.h"
 #include "diag.h"
 #include "effort.h"
@@ -99,13 +100,16 @@ static void reset(void)
 }
 
 static struct render_ctx g_render;
+static struct agent_session g_session;
 static struct agent_state g_state;
 
 static struct agent_state *fresh_state(void)
 {
     memset(&g_render, 0, sizeof g_render);
+    memset(&g_session, 0, sizeof g_session);
     memset(&g_state, 0, sizeof g_state);
     g_state.render = &g_render;
+    g_state.session = &g_session;
     return &g_state;
 }
 
@@ -176,6 +180,19 @@ static void test_set_and_default(void)
     EXPECT_STR_EQ(config_source("markdown"), "default");
     EXPECT(config_bool("markdown") == 1); /* registry default */
     free(out);
+}
+
+/* Turning automatic compaction back on, or changing what decides when it runs, must not leave it
+ * stopped by failures from before the change. */
+static void test_setting_change_rearms_compaction(void)
+{
+    reset();
+    struct agent_state *state = fresh_state();
+    state->session->compact_failures = COMPACT_MAX_AUTO_FAILURES;
+    free(run(state, "compact.auto off"));
+    free(run(state, "compact.auto on"));
+    EXPECT(state->session->compact_failures == 0);
+    config_set_override("compact.auto", NULL);
 }
 
 static void test_invalid_value(void)
@@ -804,6 +821,7 @@ int main(void)
     test_unknown_setting();
     test_readonly_paths();
     test_set_and_default();
+    test_setting_change_rearms_compaction();
     test_invalid_value();
     test_canonicalization();
     test_tristate_alias_normalizes();

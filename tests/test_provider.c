@@ -35,6 +35,29 @@ static void test_item_image_totals(void)
         item_free(&items[i]);
 }
 
+static void test_token_estimate(void)
+{
+    EXPECT(text_token_estimate(NULL) == 0);
+    EXPECT(text_token_estimate("") == 0);
+    EXPECT(text_token_estimate("abcd") == 1);
+    EXPECT(text_token_estimate("abcde") == 2);
+
+    /* Bytes add up across fields and items before rounding; opaque reasoning and boundaries are
+     * free, and an image costs the same however large its payload. */
+    struct item items[] = {
+        {.kind = ITEM_TOOL_CALL, .tool_name = "read", .tool_arguments_json = "{\"p\":1}"},
+        {.kind = ITEM_REASONING, .reasoning_text = "hmm", .reasoning_json = "{\"opaque\":1}"},
+        {.kind = ITEM_TURN_BOUNDARY},
+        {.kind = ITEM_TOOL_RESULT, .output = "ok"},
+    };
+    EXPECT(items_token_estimate(items, 4) == 4); /* 4 + 7 + 3 + 2 = 16 bytes */
+    EXPECT(items_token_estimate(NULL, 0) == 0);
+
+    struct item image = make_image_item(1000000);
+    EXPECT(items_token_estimate(&image, 1) == ITEM_IMAGE_TOKEN_ESTIMATE);
+    item_free(&image);
+}
+
 static void test_item_image_placeholder(void)
 {
     struct item_image image = {
@@ -245,6 +268,7 @@ static void test_provenance_matching(void)
 int main(void)
 {
     test_item_image_totals();
+    test_token_estimate();
     test_item_image_placeholder();
     test_item_free();
     test_model_info_lifecycle();

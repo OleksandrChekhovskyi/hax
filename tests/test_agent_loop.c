@@ -1321,7 +1321,7 @@ static void test_loop_skips_compaction_after_last_allowed_turn(void)
     struct agent_loop_result result = run_chain(&session, &provider, &ctx, 1);
     EXPECT(result.outcome == AGENT_LOOP_MAX_TURNS);
     EXPECT(ctx.compactions == 0);
-    EXPECT(compact_due(&session, &provider));
+    EXPECT(compact_due(&session, &provider, NULL));
 
     agent_loop_result_destroy(&result);
     agent_session_free(&session);

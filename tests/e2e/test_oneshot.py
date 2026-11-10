@@ -56,6 +56,32 @@ def test_tool_runs_in_workdir():
     harness.expect("Tool finished." in result.stdout, "final assistant text reaches stdout", result)
 
 
+def test_failed_compaction_is_reported():
+    """An automatic compaction that fails is reported on stderr, and the run goes on with the
+    full context."""
+    result = harness.run_oneshot(
+        "go",
+        """
+        tool bash {"command":"true"}
+        usage in=900 out=50
+        end-turn
+
+        end-turn
+
+        text Finished anyway.
+        end-turn
+        """,
+        extra_env={"HAX_CONTEXT_LIMIT": "1000"},
+    )
+    harness.expect(result.returncode == 0, "exit status is 0", result)
+    harness.expect(
+        "hax: compaction produced no summary" in result.stderr,
+        "the failed compaction is reported on stderr",
+        result,
+    )
+    harness.expect("Finished anyway." in result.stdout, "the run continues to its answer", result)
+
+
 def test_json_stream():
     """--json turns stdout into a JSONL stream: a session record, conversation records in
     session-file schema, and a terminal result record."""

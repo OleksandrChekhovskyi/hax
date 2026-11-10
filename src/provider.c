@@ -48,6 +48,38 @@ size_t items_image_count(const struct item *items, size_t n_items)
     return total;
 }
 
+#define TOKEN_ESTIMATE_BYTES 4
+
+static size_t text_bytes(const char *text)
+{
+    return text ? strlen(text) : 0;
+}
+
+static long bytes_token_estimate(size_t bytes)
+{
+    return (long)((bytes + TOKEN_ESTIMATE_BYTES - 1) / TOKEN_ESTIMATE_BYTES);
+}
+
+long text_token_estimate(const char *text)
+{
+    return bytes_token_estimate(text_bytes(text));
+}
+
+long items_token_estimate(const struct item *items, size_t n_items)
+{
+    size_t bytes = 0;
+    long tokens = 0;
+
+    for (size_t i = 0; i < n_items; i++) {
+        const struct item *item = &items[i];
+        bytes += text_bytes(item->text) + text_bytes(item->tool_name) +
+                 text_bytes(item->tool_arguments_json) + text_bytes(item->output) +
+                 text_bytes(item->reasoning_text);
+        tokens += (long)item->n_images * ITEM_IMAGE_TOKEN_ESTIMATE;
+    }
+    return tokens + bytes_token_estimate(bytes);
+}
+
 size_t items_context_floor(const struct item *items, size_t n_items)
 {
     for (size_t i = n_items; i-- > 0;)

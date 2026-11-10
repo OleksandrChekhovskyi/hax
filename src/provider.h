@@ -97,6 +97,14 @@ char *item_image_placeholder(const struct item_image *image);
 size_t items_image_base64_bytes(const struct item *items, size_t n_items);
 size_t items_image_count(const struct item *items, size_t n_items);
 
+/* Rough token counts for ordering and budgeting, never exact accounting: four bytes of text per
+ * token and a fixed cost per image, since providers bill images by dimensions rather than bytes.
+ * An item counts its message text, tool name, arguments, output, and readable reasoning; opaque
+ * reasoning state does not tokenize like text and is left out. `text` may be NULL. */
+#define ITEM_IMAGE_TOKEN_ESTIMATE 2000L
+long text_token_estimate(const char *text);
+long items_token_estimate(const struct item *items, size_t n_items);
+
 /* Index of the newest compaction seed, or 0 when there is none. Compaction summarizes a prefix
  * instead of discarding it, so a request built from `items` starts here, not at 0. */
 size_t items_context_floor(const struct item *items, size_t n_items);

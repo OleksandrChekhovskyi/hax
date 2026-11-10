@@ -1449,6 +1449,7 @@ static void commit_setting(struct agent_state *state, const struct config_settin
 {
     config_set_override(setting->key, value);
     agent_display_refresh(state);
+    state->session->compact_failures = 0;
     note_current_setting(state, setting);
 }
 

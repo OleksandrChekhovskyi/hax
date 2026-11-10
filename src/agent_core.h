@@ -65,6 +65,10 @@ struct agent_session {
     /* Wall time of completed user turns, as the session file records it. */
     long worked_ms;
     long last_user_turn_ms; /* -1 until a user turn completes */
+    /* Automatic compactions that failed since one last succeeded, however many turns apart.
+     * Reconfiguration, a settings change, a reset, or a history cut also clears it, since each
+     * can change whether a summary fits. Not persisted. */
+    int compact_failures;
 };
 
 /* Initialize a session. A missing model is valid so the interactive frontend can prompt for one. */
@@ -160,10 +164,14 @@ void agent_session_prepare_resumed(struct agent_session *session, struct provide
 
 /* Context-window size of the newest request a usage footer records in the model-visible
  * context, or -1 when none reports it. This is the recorded counterpart of a live run's
- * latest-usage snapshot, for continuation decisions such as compact-before-send; compaction's
- * own accounting, which describes the summarized request rather than the fresh seed's window,
- * is ignored. */
+ * latest-usage snapshot, as the stats display reports it; compaction's own accounting, which
+ * describes the summarized request rather than the fresh seed's window, is ignored. */
 long agent_session_last_context_tokens(const struct agent_session *session);
+
+/* agent_session_last_context_tokens() plus an items_token_estimate() of what that footer's
+ * request could not count: tool results answering its response and everything appended after
+ * it, such as task notes. -1 when no footer reports window use. */
+long agent_session_context_estimate(const struct agent_session *session);
 
 /* Whether any footer that model metadata can price or bound reports input or output tokens:
  * live footers, inherited or not, and retired footers of this session's own turns. */

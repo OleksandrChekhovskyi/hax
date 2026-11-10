@@ -254,6 +254,7 @@ void agent_session_reconfigure(struct agent_session *session, struct provider *p
     char *effort = resolve_effort(provider, session->model);
     free(session->effort);
     session->effort = effort;
+    session->compact_failures = 0;
     export_selection(provider, session);
 }
 
@@ -309,6 +310,7 @@ void agent_session_reset(struct agent_session *session)
     session->n_retired = 0;
     session->worked_ms = 0;
     session->last_user_turn_ms = -1;
+    session->compact_failures = 0;
 }
 
 void agent_session_retire(struct agent_session *session, size_t from)
@@ -437,28 +439,59 @@ enum agent_resume_tail agent_session_resume_tail(const struct agent_session *ses
     return AGENT_RESUME_TAIL_EMPTY;
 }
 
-long agent_session_last_context_tokens(const struct agent_session *session)
+static long footer_window_tokens(const struct item *item)
 {
-    struct context window = agent_session_context(session);
+    if (item->kind != ITEM_TURN_USAGE || !item->usage || item->origin == ITEM_ORIGIN_COMPACTION)
+        return -1;
+    const struct stream_usage *usage = &item->usage->usage;
+    if (usage->input_tokens < 0 || usage->output_tokens < 0)
+        return -1;
+    return usage->input_tokens + usage->output_tokens;
+}
+
+/* Index in `window` of the newest footer reporting the conversation's window use, or n_items. */
+static size_t window_usage_anchor(const struct context *window)
+{
     /* A summarization request reports the window it summarized, not the conversation's: reading
      * it after a successful compaction would immediately recompact the seed, and after a failed
      * one it would stand in for the last agent turn. Footers recorded before origins were
      * stamped are recognized by position, right after the seed. */
     size_t floor = 0;
-    if (window.n_items > 0 && window.items[0].origin == ITEM_ORIGIN_COMPACT_SEED) {
+    if (window->n_items > 0 && window->items[0].origin == ITEM_ORIGIN_COMPACT_SEED) {
         floor = 1;
-        while (floor < window.n_items && window.items[floor].kind == ITEM_TURN_USAGE)
+        while (floor < window->n_items && window->items[floor].kind == ITEM_TURN_USAGE)
             floor++;
     }
-    for (size_t i = window.n_items; i-- > floor;) {
-        const struct item *item = &window.items[i];
-        if (item->kind != ITEM_TURN_USAGE || !item->usage || item->origin == ITEM_ORIGIN_COMPACTION)
-            continue;
-        const struct stream_usage *usage = &item->usage->usage;
-        if (usage->input_tokens >= 0 && usage->output_tokens >= 0)
-            return usage->input_tokens + usage->output_tokens;
-    }
-    return -1;
+    for (size_t i = window->n_items; i-- > floor;)
+        if (footer_window_tokens(&window->items[i]) >= 0)
+            return i;
+    return window->n_items;
+}
+
+long agent_session_last_context_tokens(const struct agent_session *session)
+{
+    struct context window = agent_session_context(session);
+    size_t anchor = window_usage_anchor(&window);
+    return anchor < window.n_items ? footer_window_tokens(&window.items[anchor]) : -1;
+}
+
+long agent_session_context_estimate(const struct agent_session *session)
+{
+    struct context window = agent_session_context(session);
+    size_t anchor = window_usage_anchor(&window);
+    if (anchor == window.n_items)
+        return -1;
+
+    long tokens = footer_window_tokens(&window.items[anchor]);
+    /* A turn's footer follows the tool results that answer its response, so results between the
+     * turn's boundary and the footer were not part of the request it measures. */
+    size_t turn_start = anchor;
+    while (turn_start > 0 && window.items[turn_start - 1].kind != ITEM_TURN_BOUNDARY)
+        turn_start--;
+    for (size_t i = turn_start; i < anchor; i++)
+        if (window.items[i].kind == ITEM_TOOL_RESULT)
+            tokens += items_token_estimate(&window.items[i], 1);
+    return tokens + items_token_estimate(window.items + anchor + 1, window.n_items - anchor - 1);
 }
 
 static int footer_reports_tokens(const struct item *item)
