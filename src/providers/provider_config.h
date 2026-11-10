@@ -60,6 +60,11 @@ const char *provider_api_key(const char *config_prefix, const char *api_key_env)
  * Defaults to 1h, which suits an interactive agent's pauses better than the API's 5m. */
 const char *provider_cache_ttl(const char *config_prefix);
 
+/* Resolve <prefix>.overflow_phrases: an owned NULL-terminated array of the non-empty strings in
+ * that list, or NULL when there are none. A non-list value and non-string or empty members warn
+ * and drop. */
+char **provider_overflow_phrases(const char *config_prefix);
+
 /* Resolve <prefix>.extra_body: an owned object of raw JSON members a provider merges into each
  * request body it builds, or NULL. Protocol-owned members (model, messages, tools, ...) are
  * dropped with a warning, as is a non-object value. */

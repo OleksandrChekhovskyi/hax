@@ -24,6 +24,7 @@
 #include "providers/wire.h"
 #include "text/placeholder.h"
 #include "text/url.h"
+#include "transport/api_error.h"
 #include "transport/http.h"
 
 #define MESSAGES_DEFAULT_VERSION    "2023-06-01"
@@ -85,6 +86,7 @@ struct http_provider {
     int strict_signatures;
     char **extra_headers; /* "Name: value" templates; {session_id} expands per request */
     json_t *extra_body;
+    char **overflow_phrases;      /* NULL-terminated, or NULL */
     struct http_auth_source auth; /* zeroed ops: the api_key authenticates requests */
     /* A probe skipped on stale credentials, relaunched after the next authenticated stream. */
     int probe_deferred;
@@ -235,7 +237,9 @@ struct http_stream {
     const char *session_id;  /* the request's affinity id, never NULL */
     struct chat_cache_plan cache;
     union wire_events events;
-    int auth_retried; /* per-stream guard for the auth source's unauthorized recovery */
+    int auth_retried;   /* per-stream guard for the auth source's unauthorized recovery */
+    stream_cb callback; /* the caller's; receives errors classified */
+    void *callback_user;
 };
 
 static char **stream_build_headers(void *ctx)
@@ -285,6 +289,21 @@ static const struct stream_usage *stream_parser_usage(void *ctx)
     if (!stream->wire->events_usage)
         return NULL;
     return stream->wire->events_usage(&stream->events);
+}
+
+/* Rejections from the transport and failures inside the stream both pass here. What the wording
+ * means is provider policy, which the wires and the transport do not carry. */
+static int classify_stream_error(const struct stream_event *event, void *user)
+{
+    struct http_stream *stream = user;
+    if (event->kind != EV_ERROR)
+        return stream->callback(event, stream->callback_user);
+
+    struct stream_event classified = *event;
+    classified.u.error.kind =
+        api_error_classify(event->u.error.http_status, event->u.error.code, event->u.error.detail,
+                           (const char *const *)stream->provider->overflow_phrases);
+    return stream->callback(&classified, stream->callback_user);
 }
 
 static int stream_auth_recover(void *ctx, long http_status, http_tick_cb tick, void *tick_user)
@@ -448,7 +467,9 @@ static int http_provider_stream(struct provider *base, const struct context *con
         request.recover = stream_auth_recover;
         request.error_message = stream_auth_error_message;
     }
-    int result = stream_retry_run(&request, callback, callback_user, tick, tick_user);
+    stream.callback = callback;
+    stream.callback_user = callback_user;
+    int result = stream_retry_run(&request, classify_stream_error, &stream, tick, tick_user);
     free(endpoint);
     free(body);
     return result;
@@ -477,6 +498,7 @@ static void http_provider_destroy(struct provider *base)
     free(provider->reasoning_field);
     string_array_free(provider->extra_headers);
     json_decref(provider->extra_body);
+    string_array_free(provider->overflow_phrases);
     free(provider);
 }
 
@@ -997,6 +1019,7 @@ struct provider *http_provider_new(const struct provider_def *def)
             provider->extra_body = merged;
         }
     }
+    provider->overflow_phrases = provider_overflow_phrases(prefix);
 
     provider->length_hint = def->length_hint;
     /* Efforts are advisory offers narrowed by per-model metadata, so they default on; defs opt

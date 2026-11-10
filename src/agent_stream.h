@@ -5,6 +5,7 @@
 #include "agent_usage.h"
 #include "provider.h"
 #include "turn.h"
+#include "transport/api_error.h"
 
 /* One provider request as the agent consumes it: the turn assembled from its events, the usage
  * of every served attempt, and the user's stop request applied while it streams. Every agent
@@ -27,7 +28,8 @@ struct agent_stream {
     struct stream_usage usage;
     /* Every served attempt, retried ones included, of every request streamed into this record. */
     struct attempt_log attempts;
-    char *error_message; /* owned; the error the latest request failed with, or NULL */
+    char *error_message;            /* owned; the error the latest request failed with, or NULL */
+    enum api_error_kind error_kind; /* why the latest request failed; OTHER when it did not */
 };
 
 void agent_stream_init(struct agent_stream *stream);

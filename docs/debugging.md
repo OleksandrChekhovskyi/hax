@@ -73,6 +73,7 @@ space
 tool <name> <json>
 delay <ms>
 usage in=N out=M [cached=K] [cache_write=W] [cache_write_1h=H] [cost=D]
+overflow [limit=N]
 end-turn
 ```
 
@@ -81,6 +82,11 @@ end-turn
 delta. `delay` sets the pacing for later text, reasoning, space, and tool emissions; zero restores
 burst mode. `tool` takes a name and a single-line JSON object. `usage` sets the accounting on the
 turn's final event, and `end-turn` completes the turn. A final turn may end at EOF.
+
+`overflow` fails the request with a context-overflow error, as llama.cpp reports one, and ends the
+turn. With `limit=N` it fails only while the request's estimated size (system prompt and
+conversation, four bytes per token) exceeds N tokens, and a failed request leaves the turn to be
+replayed: the first request that fits gets the rest of it.
 
 `{{CWD}}` in text or tool arguments expands to the process working directory, allowing checked-in
 fixtures to exercise path normalization without hard-coding a machine-specific path.

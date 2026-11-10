@@ -15,6 +15,8 @@ struct captured_event {
     char *name;
     char *args_delta;
     char *message;
+    char *code;   /* EV_ERROR's */
+    char *detail; /* EV_ERROR's */
     char *response_id;
     char *served_model;
     int http_status;
@@ -70,6 +72,8 @@ static int capture_event(const struct stream_event *event, void *callback_user)
         break;
     case EV_ERROR:
         captured->message = strdup(event->u.error.message ? event->u.error.message : "");
+        captured->code = event->u.error.code ? strdup(event->u.error.code) : NULL;
+        captured->detail = event->u.error.detail ? strdup(event->u.error.detail) : NULL;
         captured->http_status = event->u.error.http_status;
         if (event->u.error.usage)
             captured->usage = *event->u.error.usage;
@@ -95,6 +99,8 @@ static void event_capture_free(struct event_capture *capture)
         free(capture->events[i].name);
         free(capture->events[i].args_delta);
         free(capture->events[i].message);
+        free(capture->events[i].code);
+        free(capture->events[i].detail);
         free(capture->events[i].response_id);
         free(capture->events[i].served_model);
     }
@@ -326,6 +332,28 @@ static void test_failed_with_message(void)
     EXPECT(fixture.capture.count == 1);
     EXPECT(fixture.capture.events[0].kind == EV_ERROR);
     EXPECT_STR_EQ(fixture.capture.events[0].message, "Bad Request");
+    fixture_free(&fixture);
+}
+
+/* A failure reports the server's code and text from wherever the event shape keeps them. */
+static void test_failed_reports_server_error(void)
+{
+    struct event_fixture fixture;
+    fixture_init(&fixture);
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"response.failed\",\"response\":{\"error\":"
+                          "{\"code\":\"context_length_exceeded\",\"message\":\"too big\"}}}");
+    EXPECT(fixture.capture.count == 1);
+    EXPECT_STR_EQ(fixture.capture.events[0].code, "context_length_exceeded");
+    EXPECT_STR_EQ(fixture.capture.events[0].detail, "too big");
+    fixture_free(&fixture);
+
+    fixture_init(&fixture);
+    responses_events_feed(&fixture.parser,
+                          "{\"type\":\"error\",\"code\":\"context_length_exceeded\"}");
+    EXPECT(fixture.capture.count == 1);
+    EXPECT_STR_EQ(fixture.capture.events[0].code, "context_length_exceeded");
+    EXPECT(fixture.capture.events[0].detail == NULL);
     fixture_free(&fixture);
 }
 
@@ -782,6 +810,7 @@ int main(void)
     test_incomplete_with_reason();
     test_incomplete_without_reason();
     test_failed_with_message();
+    test_failed_reports_server_error();
     test_failed_without_message_uses_fallback();
     test_stream_error_event();
     test_stream_error_falls_back_to_code();

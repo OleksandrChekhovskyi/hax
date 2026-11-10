@@ -99,13 +99,17 @@ int stream_retry_run(const struct stream_retry *request, stream_cb callback, voi
             const struct stream_usage *stranded_usage = NULL;
             if (status_2xx && incomplete && request->parser_usage)
                 stranded_usage = request->parser_usage(request->ctx);
+            struct api_error_body said = api_error_parse_body(response.error_body);
             struct stream_event error = {
                 .kind = EV_ERROR,
                 .u.error = {.message = message,
                             .http_status = (int)response.status,
+                            .code = said.code,
+                            .detail = said.detail,
                             .usage = stranded_usage},
             };
             callback(&error, callback_user);
+            api_error_body_free(&said);
             free(message);
         }
     }

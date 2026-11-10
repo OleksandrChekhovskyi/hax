@@ -17,6 +17,7 @@
 #include "xalloc.h"
 #include "providers/registry.h"
 #include "system/rand.h"
+#include "transport/api_error.h"
 #include "transport/http.h"
 
 #define TEXT_CHUNK_BYTES 16
@@ -28,7 +29,8 @@ struct mock_provider {
 };
 
 enum script_result {
-    SCRIPT_TURN_COMPLETE,
+    SCRIPT_TURN_PLAYED,
+    SCRIPT_TURN_REPLAY, /* failed without consuming the turn; the next request replays it */
     SCRIPT_EXHAUSTED,
     SCRIPT_ABORTED,
 };
@@ -333,13 +335,56 @@ static int emit_script_tool(const char *spec, const char *line, long delay_ms, s
     return rc;
 }
 
+/* `limit=N` makes the failure conditional on the request exceeding N estimated tokens. Anything
+ * else is reported and leaves the failure unconditional. */
+static long parse_overflow_limit(const char *argument, const char *line)
+{
+    static const char key[] = "limit=";
+    if (!*argument)
+        return 0;
+    long limit = strncmp(argument, key, sizeof(key) - 1) == 0
+                     ? parse_long_or(argument + sizeof(key) - 1, 0)
+                     : 0;
+    if (limit <= 0) {
+        fprintf(stderr, "hax mock: 'overflow' takes only limit=N with N > 0: %s\n", line);
+        return 0;
+    }
+    return limit;
+}
+
+static long request_token_estimate(const struct context *context)
+{
+    return text_token_estimate(context->system_prompt) +
+           items_token_estimate(context->items, context->n_items);
+}
+
+/* Fails the way llama.cpp does, naming the sizes when a limit is given. */
+static int emit_overflow(stream_cb callback, void *callback_user, long request_tokens,
+                         long limit_tokens)
+{
+    char *message =
+        limit_tokens > 0
+            ? xasprintf("request (%ld tokens) exceeds the available context size (%ld tokens), "
+                        "try increasing it",
+                        request_tokens, limit_tokens)
+            : xstrdup("the request exceeds the available context size, try increasing it");
+    struct stream_event event = {
+        .kind = EV_ERROR,
+        .u.error = {.message = message, .http_status = 400, .kind = API_ERROR_CONTEXT_OVERFLOW},
+    };
+    int rc = callback(&event, callback_user);
+    free(message);
+    return rc;
+}
+
 static enum script_result finish_script_turn(stream_cb callback, void *callback_user,
                                              struct stream_usage usage)
 {
-    return emit_done(callback, callback_user, usage) ? SCRIPT_ABORTED : SCRIPT_TURN_COMPLETE;
+    return emit_done(callback, callback_user, usage) ? SCRIPT_ABORTED : SCRIPT_TURN_PLAYED;
 }
 
-static enum script_result play_script_turn(FILE *script, stream_cb callback, void *callback_user,
+static enum script_result play_script_turn(FILE *script, const struct context *context,
+                                           stream_cb callback, void *callback_user,
                                            http_tick_cb tick, void *tick_user)
 {
     char line[8192];
@@ -384,6 +429,16 @@ static enum script_result play_script_turn(FILE *script, stream_cb callback, voi
                                   tick_user);
         } else if (match_directive(directive, "usage", &argument)) {
             usage = parse_usage(argument);
+        } else if (match_directive(directive, "overflow", &argument)) {
+            /* A conditional failure replays the turn, so the request that finally fits gets
+             * the rest of it, as from a server with that context size. */
+            long limit = parse_overflow_limit(argument, line);
+            long request_tokens = request_token_estimate(context);
+            if (limit == 0 || request_tokens > limit) {
+                if (emit_overflow(callback, callback_user, request_tokens, limit))
+                    return SCRIPT_ABORTED;
+                return limit ? SCRIPT_TURN_REPLAY : SCRIPT_TURN_PLAYED;
+            }
         } else {
             fprintf(stderr, "hax mock: unknown directive: %s\n", line);
         }
@@ -601,7 +656,8 @@ static int mock_stream(struct provider *provider, const struct context *context,
         return emit_script_exhausted(callback, callback_user, tick, tick_user);
     }
 
-    enum script_result result = play_script_turn(script, callback, callback_user, tick, tick_user);
+    enum script_result result =
+        play_script_turn(script, context, callback, callback_user, tick, tick_user);
     fclose(script);
 
     if (result == SCRIPT_EXHAUSTED)
@@ -609,7 +665,8 @@ static int mock_stream(struct provider *provider, const struct context *context,
     if (result == SCRIPT_ABORTED)
         return -1;
 
-    mock->next_script_turn++;
+    if (result != SCRIPT_TURN_REPLAY)
+        mock->next_script_turn++;
     return 0;
 }
 

@@ -20,6 +20,7 @@
 #include "providers/openai_models.h"
 #include "providers/provider_config.h"
 #include "providers/registry.h"
+#include "transport/api_error.h"
 #include "transport/http.h"
 
 /* The full ladder is the default offer; no_efforts opts a def out entirely. */
@@ -260,6 +261,7 @@ static void test_parse_model_probes_listing(void)
 struct error_log {
     int n_errors;
     char message[256];
+    enum api_error_kind kind;
 };
 
 static int log_error(const struct stream_event *event, void *user)
@@ -268,6 +270,7 @@ static int log_error(const struct stream_event *event, void *user)
     if (event->kind == EV_ERROR) {
         log->n_errors++;
         snprintf(log->message, sizeof(log->message), "%s", event->u.error.message);
+        log->kind = event->u.error.kind;
     }
     return 0;
 }
@@ -1078,6 +1081,47 @@ static void test_unsupported_protocol_reported(void)
     provider->destroy(provider);
 }
 
+/* Configured overflow wording reaches both the HTTP rejection and the in-band stream error. */
+static void test_overflow_phrases_classify_errors(void)
+{
+    struct loopback server = {
+        .responses =
+            {
+                "HTTP/1.1 400 Bad Request\r\nContent-Length: 37\r\nConnection: close\r\n\r\n"
+                "{\"error\":{\"message\":\"input too big\"}}",
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 45\r\n"
+                "Connection: close\r\n\r\n"
+                "data: {\"error\":{\"message\":\"input too big\"}}\n\n",
+            },
+        .n_requests = 2,
+    };
+    int port = loopback_start(&server);
+    EXPECT(port > 0);
+    if (port <= 0)
+        return;
+
+    EXPECT(config_load("{\"providers\": {\"x\": {\"overflow_phrases\": [\"Input Too Big\"]}}}") ==
+           0);
+    char base_url[64];
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", port);
+    struct provider_def def = {.id = "x", .base_url = base_url};
+    struct provider *provider = http_provider_new(&def);
+    EXPECT(provider != NULL);
+    if (provider) {
+        struct item items[] = {{.kind = ITEM_USER_MESSAGE, .text = "hello"}};
+        struct context context = {.items = items, .n_items = 1};
+        for (int i = 0; i < 2; i++) {
+            struct error_log log = {0};
+            provider->stream(provider, &context, "m", log_error, &log, NULL, NULL);
+            EXPECT(log.n_errors == 1);
+            EXPECT(log.kind == API_ERROR_CONTEXT_OVERFLOW);
+        }
+        provider->destroy(provider);
+    }
+    loopback_stop(&server);
+    EXPECT(config_load(NULL) == 0);
+}
+
 int main(void)
 {
     signal(SIGPIPE, SIG_IGN);
@@ -1098,5 +1142,6 @@ int main(void)
     test_config_only_routing_without_catalog_id();
     test_catalog_routing_warning();
     test_unsupported_protocol_reported();
+    test_overflow_phrases_classify_errors();
     T_REPORT();
 }

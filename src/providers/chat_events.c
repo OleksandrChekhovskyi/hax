@@ -462,6 +462,10 @@ static void handle_error(struct chat_events *parser, json_t *error)
 
     parser->terminal_emitted = 1;
     const char *message = json_string_value(json_object_get(error, "message"));
+    /* llama.cpp echoes the HTTP status as a numeric code and names the error in its type. */
+    const char *code = json_string_value(json_object_get(error, "code"));
+    if (!code)
+        code = json_string_value(json_object_get(error, "type"));
     struct stream_response response = response_of(parser);
     struct stream_event event = {
         .kind = EV_ERROR,
@@ -469,6 +473,8 @@ static void handle_error(struct chat_events *parser, json_t *error)
             {
                 .message = message ? message : "provider error",
                 .http_status = 0,
+                .code = code,
+                .detail = message,
                 .usage = &parser->usage,
                 .response = &response,
             },

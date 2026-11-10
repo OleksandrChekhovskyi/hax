@@ -8,6 +8,7 @@
 #include "provider.h"
 #include "turn.h"
 #include "xalloc.h"
+#include "transport/api_error.h"
 
 static const struct stream_usage UNREPORTED_USAGE = {-1, -1, -1, -1, -1, -1};
 
@@ -44,8 +45,10 @@ static int sink_on_event(const struct stream_event *event, void *user)
         stream->usage = event->u.done.usage;
         attempt_log_record(&stream->attempts, &event->u.done.usage, &event->u.done.response);
     } else if (event->kind == EV_ERROR) {
-        if (!stream->error_message && event->u.error.message)
+        if (!stream->error_message && event->u.error.message) {
             stream->error_message = xstrdup(event->u.error.message);
+            stream->error_kind = event->u.error.kind;
+        }
         if (event->u.error.usage) {
             stream->usage = *event->u.error.usage;
             attempt_log_record(&stream->attempts, event->u.error.usage, event->u.error.response);
@@ -74,6 +77,7 @@ void agent_stream_request(struct agent_stream *stream, struct provider *provider
     stream->usage = UNREPORTED_USAGE;
     free(stream->error_message);
     stream->error_message = NULL;
+    stream->error_kind = API_ERROR_OTHER;
     struct stream_sink sink = {
         .stream = stream,
         .observer = observer,

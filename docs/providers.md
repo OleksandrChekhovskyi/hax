@@ -310,6 +310,7 @@ Common fields:
 | `metadata_api` | `/models` dialect: `openai` (flat list) or `anthropic` (paginated); defaults to the request protocol's family. |
 | `extra_body` | Raw JSON members merged into every request body ([below](#request-passthrough)). |
 | `extra_headers` | HTTP headers sent on every request ([below](#request-passthrough)). |
+| `overflow_phrases` | Phrases in this provider's error messages that mean the conversation exceeds the model's context window, for servers whose wording hax does not already recognize. |
 
 A custom provider has no catalog identity until `catalog_id` names one, so a block for a local
 server or a private proxy never contacts models.dev. Set it to the models.dev provider id (for

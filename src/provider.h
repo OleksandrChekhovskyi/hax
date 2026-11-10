@@ -7,6 +7,7 @@
 
 #include "catalog.h"
 #include "effort.h"
+#include "transport/api_error.h"
 #include "transport/http.h"
 
 /* Flat, provider-independent conversation records. Adapters may group adjacent records when their
@@ -270,8 +271,14 @@ struct stream_event {
             struct stream_response response; /* zeroed when nothing was identified */
         } done;
         struct {
-            const char *message;
+            const char *message; /* for people: may be prefixed, truncated, or a fallback */
             int http_status;
+            /* What the server said, for the adapter to classify the failure: its native error
+             * code or type, and its own error text from a recognized error field (or a body
+             * that is not JSON). Either may be NULL; agent code must not branch on them. */
+            const char *code;
+            const char *detail;
+            enum api_error_kind kind; /* set by the adapter; API_ERROR_OTHER when unclassified */
             /* Usage the provider reported before the failure, or NULL.
              * Truncated responses (max_tokens/length) are billed like
              * complete ones, so translators that captured usage attach

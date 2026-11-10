@@ -316,6 +316,162 @@ static void test_model_list_error_null_name(void)
     free(message);
 }
 
+struct body_case {
+    const char *body;
+    const char *code;
+    const char *detail;
+};
+
+static int same_or_both_null(const char *got, const char *want)
+{
+    return got && want ? strcmp(got, want) == 0 : got == want;
+}
+
+/* The server's own error text comes only from a recognized field or a body that is not JSON. */
+static void test_parse_body(void)
+{
+    static const struct body_case cases[] = {
+        {NULL, NULL, NULL},
+        {"", NULL, NULL},
+        {"{\"error\":{\"message\":\"too big\",\"type\":\"invalid_request_error\","
+         "\"code\":\"context_length_exceeded\"}}",
+         "context_length_exceeded", "too big"},
+        /* llama.cpp: the numeric code yields to the type. */
+        {"{\"error\":{\"code\":400,\"message\":\"too big\","
+         "\"type\":\"exceed_context_size_error\"}}",
+         "exceed_context_size_error", "too big"},
+        {"{\"type\":\"error\",\"error\":{\"type\":\"request_too_large\",\"message\":\"big\"}}",
+         "request_too_large", "big"},
+        {"{\"error\":\"prompt too long\"}", NULL, "prompt too long"},
+        {"{\"code\":\"1261\",\"message\":\"Prompt too long\"}", "1261", "Prompt too long"},
+        {"event: error\ndata: {\"error\":{\"message\":\"too big\"}}\n\n", NULL, "too big"},
+        {"prompt is too long", NULL, "prompt is too long"},
+        /* A validation error echoing the conversation says nothing of its own. */
+        {"{\"detail\":[{\"msg\":\"invalid\",\"input\":\"why is the prompt too long?\"}]}", NULL,
+         NULL},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        struct api_error_body said = api_error_parse_body(cases[i].body);
+        if (!same_or_both_null(said.code, cases[i].code) ||
+            !same_or_both_null(said.detail, cases[i].detail))
+            FAIL("%s: got code %s, detail %s", cases[i].body ? cases[i].body : "(null)",
+                 said.code ? said.code : "(null)", said.detail ? said.detail : "(null)");
+        api_error_body_free(&said);
+    }
+}
+
+/* An echoing validation error longer than the transport keeps arrives cut short, so it no
+ * longer parses; its echoed text still must not read as the server's own. */
+static void test_parse_body_cut_json(void)
+{
+    char body[4097];
+    int prefix =
+        snprintf(body, sizeof(body),
+                 "{\"detail\":[{\"msg\":\"invalid\",\"input\":\"why is the prompt too long? ");
+    memset(body + prefix, 'x', sizeof(body) - 1 - (size_t)prefix);
+    body[sizeof(body) - 1] = '\0';
+
+    struct api_error_body said = api_error_parse_body(body);
+    EXPECT(said.code == NULL);
+    EXPECT(said.detail == NULL);
+    api_error_body_free(&said);
+}
+
+struct classify_case {
+    long status;
+    const char *code;
+    const char *detail;
+    enum api_error_kind kind;
+};
+
+static void expect_classified(const struct classify_case *cases, size_t n_cases,
+                              const char *const *overflow_phrases)
+{
+    for (size_t i = 0; i < n_cases; i++) {
+        const struct classify_case *c = &cases[i];
+        enum api_error_kind kind =
+            api_error_classify(c->status, c->code, c->detail, overflow_phrases);
+        if (kind != c->kind)
+            FAIL("HTTP %ld, code %s, detail %s: want kind %d, got %d", c->status,
+                 c->code ? c->code : "(null)", c->detail ? c->detail : "(null)", (int)c->kind,
+                 (int)kind);
+    }
+}
+
+#define N_CASES(cases) (sizeof(cases) / sizeof((cases)[0]))
+
+/* One case per built-in phrase, in the wording of the server it comes from. */
+static void test_classify_overflow(void)
+{
+    static const struct classify_case cases[] = {
+        {400, "context_length_exceeded", "x", API_ERROR_CONTEXT_OVERFLOW},
+        {400, "exceed_context_size_error", NULL, API_ERROR_CONTEXT_OVERFLOW},
+        {400, "invalid_request_error", "prompt is too long: 213462 tokens > 200000 maximum",
+         API_ERROR_CONTEXT_OVERFLOW},
+        {400, NULL, "prompt too long; exceeded max context length by 100 tokens",
+         API_ERROR_CONTEXT_OVERFLOW},
+        {400, NULL, "Your input exceeds the context window of this model.",
+         API_ERROR_CONTEXT_OVERFLOW},
+        {400, NULL,
+         "This model's maximum context length is 131072 tokens. However, you requested 140000 "
+         "tokens.",
+         API_ERROR_CONTEXT_OVERFLOW},
+        {400, NULL, "request (9000 tokens) exceeds the available context size (8192 tokens)",
+         API_ERROR_CONTEXT_OVERFLOW},
+        {400, NULL,
+         "The number of tokens to keep from the initial prompt is greater than the context length",
+         API_ERROR_CONTEXT_OVERFLOW},
+        {400, NULL, "The prompt is too large for the model's configured input limit",
+         API_ERROR_CONTEXT_OVERFLOW},
+        {400, NULL, "litellm.ContextWindowExceededError: Context Window exceeded for given call.",
+         API_ERROR_CONTEXT_OVERFLOW},
+        {400, NULL, "Context length exceeded", API_ERROR_CONTEXT_OVERFLOW},
+        /* Inside a stream there is no status. */
+        {0, "context_length_exceeded", NULL, API_ERROR_CONTEXT_OVERFLOW},
+        /* Overflow wording outweighs the status of a 413. */
+        {413, NULL, "maximum context length is 32000 tokens", API_ERROR_CONTEXT_OVERFLOW},
+    };
+    expect_classified(cases, N_CASES(cases), NULL);
+}
+
+static void test_classify_payload_too_large(void)
+{
+    static const struct classify_case cases[] = {
+        {413, NULL, NULL, API_ERROR_PAYLOAD_TOO_LARGE},
+        {413, "request_too_large", "Request exceeds the maximum size", API_ERROR_PAYLOAD_TOO_LARGE},
+    };
+    expect_classified(cases, N_CASES(cases), NULL);
+}
+
+/* Throttles, server failures, and other rejections are not overflows, whatever their wording. */
+static void test_classify_other(void)
+{
+    static const struct classify_case cases[] = {
+        {0, NULL, NULL, API_ERROR_OTHER},
+        {400, NULL, NULL, API_ERROR_OTHER},
+        {401, NULL, "Invalid API key", API_ERROR_OTHER},
+        {400, "invalid_request_error", "Invalid model: foo", API_ERROR_OTHER},
+        {429, NULL, "prompt is too long", API_ERROR_OTHER},
+        {500, NULL, "prompt is too long", API_ERROR_OTHER},
+        {0, "server_error", NULL, API_ERROR_OTHER},
+        {400, "invalid_request_error",
+         "max_tokens: 64001 > 64000, which is the maximum allowed number of output tokens",
+         API_ERROR_OTHER},
+    };
+    expect_classified(cases, N_CASES(cases), NULL);
+}
+
+static void test_classify_configured_phrases(void)
+{
+    static const char *const phrases[] = {"Input Too Big", NULL};
+    static const struct classify_case cases[] = {
+        {400, NULL, "sorry, input too big for this model", API_ERROR_CONTEXT_OVERFLOW},
+        {400, NULL, "sorry, input invalid", API_ERROR_OTHER},
+        {429, NULL, "input too big", API_ERROR_OTHER},
+    };
+    expect_classified(cases, N_CASES(cases), phrases);
+}
+
 int main(void)
 {
     test_empty_body();
@@ -350,5 +506,11 @@ int main(void)
     test_model_list_error_http_status();
     test_model_list_error_unreachable();
     test_model_list_error_null_name();
+    test_parse_body();
+    test_parse_body_cut_json();
+    test_classify_overflow();
+    test_classify_payload_too_large();
+    test_classify_other();
+    test_classify_configured_phrases();
     T_REPORT();
 }

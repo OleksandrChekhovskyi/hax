@@ -17,6 +17,8 @@ struct captured_event {
     char *args_delta;
     char *json;
     char *message;
+    char *code;   /* EV_ERROR's */
+    char *detail; /* EV_ERROR's */
     char *response_id;
     char *served_model;
     struct stream_usage usage;
@@ -72,6 +74,8 @@ static int capture_event(const struct stream_event *event, void *user)
         break;
     case EV_ERROR:
         captured->message = strdup(event->u.error.message ? event->u.error.message : "");
+        captured->code = event->u.error.code ? strdup(event->u.error.code) : NULL;
+        captured->detail = event->u.error.detail ? strdup(event->u.error.detail) : NULL;
         captured->usage = event->u.error.usage ? *event->u.error.usage
                                                : (struct stream_usage){-1, -1, -1, -1, -1, -1};
         break;
@@ -88,6 +92,8 @@ static void reset_capture(struct capture_state *capture)
         free(capture->events[i].args_delta);
         free(capture->events[i].json);
         free(capture->events[i].message);
+        free(capture->events[i].code);
+        free(capture->events[i].detail);
         free(capture->events[i].response_id);
         free(capture->events[i].served_model);
     }
@@ -315,6 +321,8 @@ static void test_error_event(void)
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_ERROR);
     EXPECT_STR_EQ(capture.events[0].message, "Overloaded");
+    EXPECT_STR_EQ(capture.events[0].code, "overloaded_error");
+    EXPECT_STR_EQ(capture.events[0].detail, "Overloaded");
     EXPECT(parser.terminal_emitted == 1);
     EVENTS_FIXTURE_FREE(capture, parser);
 }

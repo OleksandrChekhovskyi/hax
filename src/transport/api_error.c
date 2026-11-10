@@ -5,6 +5,7 @@
 #include <jansson.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "buf.h"
 #include "xalloc.h"
@@ -213,4 +214,103 @@ char *format_model_list_error(const char *name, const char *base_url, int has_ke
     if (status != 0)
         return xasprintf("listing %s models failed (HTTP %ld)", name, status);
     return xasprintf("could not reach %s at %s", name, base_url);
+}
+
+/* The returned pointer is borrowed from `root`. llama.cpp echoes the HTTP status as a numeric
+ * `error.code` and names the error in `error.type`, as Anthropic does. */
+static const char *extract_json_code(json_t *root)
+{
+    json_t *error = json_object_get(root, "error");
+    const char *code = json_string_value(json_object_get(error, "code"));
+    if (!code)
+        code = json_string_value(json_object_get(error, "type"));
+    if (!code)
+        code = json_string_value(json_object_get(root, "code"));
+    return code;
+}
+
+static int looks_like_json(const char *text)
+{
+    while (isspace((unsigned char)*text))
+        text++;
+    return *text == '{' || *text == '[';
+}
+
+struct api_error_body api_error_parse_body(const char *body)
+{
+    struct api_error_body parsed = {0};
+    if (!body || !*body)
+        return parsed;
+
+    char *sse_data = unwrap_sse_data(body);
+    const char *content = sse_data ? sse_data : body;
+    json_t *root = json_loads(content, 0, NULL);
+    if (root) {
+        const char *code = extract_json_code(root);
+        const char *message = extract_json_message(root);
+        parsed.code = code ? xstrdup(code) : NULL;
+        parsed.detail = message ? xstrdup(message) : NULL;
+        json_decref(root);
+    } else if (!looks_like_json(content)) {
+        /* The transport keeps only the start of an error body, so a long JSON one arrives cut
+         * short and unparseable, and its text may echo the request. */
+        parsed.detail = xstrdup(content);
+    }
+    free(sse_data);
+    return parsed;
+}
+
+void api_error_body_free(struct api_error_body *parsed)
+{
+    free(parsed->code);
+    free(parsed->detail);
+    *parsed = (struct api_error_body){0};
+}
+
+/* Wording that means the input exceeded the context window, matched case-insensitively against
+ * the error's codes and messages: the shipped providers, servers their gateways relay, and
+ * common local servers. A provider's configured phrases cover the rest. */
+static const char *const OVERFLOW_PHRASES[] = {
+    "context_length_exceeded",            /* OpenAI's code */
+    "exceed_context_size_error",          /* llama.cpp's code */
+    "prompt is too long",                 /* Anthropic */
+    "prompt too long",                    /* Ollama */
+    "exceeds the context window",         /* OpenAI */
+    "maximum context length",             /* OpenAI, DeepSeek, OpenRouter, vLLM */
+    "exceeds the available context size", /* llama.cpp */
+    "greater than the context length",    /* LM Studio */
+    "configured input limit",             /* OpenCode Go */
+    "context window exceeded",            /* LiteLLM */
+    "context length exceeded",
+    NULL,
+};
+
+static int contains_phrase(const char *text, const char *const *phrases)
+{
+    for (; text && phrases && *phrases; phrases++) {
+        size_t length = strlen(*phrases);
+        if (length == 0)
+            continue;
+        for (const char *cursor = text; *cursor; cursor++) {
+            if (strncasecmp(cursor, *phrases, length) == 0)
+                return 1;
+        }
+    }
+    return 0;
+}
+
+static int says_overflow(const char *text, const char *const *overflow_phrases)
+{
+    return contains_phrase(text, OVERFLOW_PHRASES) || contains_phrase(text, overflow_phrases);
+}
+
+enum api_error_kind api_error_classify(long status, const char *code, const char *detail,
+                                       const char *const *overflow_phrases)
+{
+    /* Only the request can be at fault, and a throttle is not, whatever its wording. */
+    if (status != 0 && (status < 400 || status >= 500 || status == 429))
+        return API_ERROR_OTHER;
+    if (says_overflow(code, overflow_phrases) || says_overflow(detail, overflow_phrases))
+        return API_ERROR_CONTEXT_OVERFLOW;
+    return status == 413 ? API_ERROR_PAYLOAD_TOO_LARGE : API_ERROR_OTHER;
 }

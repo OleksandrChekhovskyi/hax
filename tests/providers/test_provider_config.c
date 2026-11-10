@@ -68,6 +68,23 @@ static void test_cache_ttl_resolution(void)
     config_set_override("providers.ttltest.cache_ttl", NULL);
 }
 
+/* Non-empty strings resolve in order; other members warn and drop, as does a non-list value. */
+static void test_overflow_phrases(void)
+{
+    unsigned long diagnostics_before = hax_diag_sequence();
+    char **phrases = provider_overflow_phrases("providers.extras");
+    EXPECT(hax_diag_sequence() == diagnostics_before + 2);
+    EXPECT(phrases && phrases[0] && strcmp(phrases[0], "input too big") == 0 && !phrases[1]);
+    string_array_free(phrases);
+
+    EXPECT(provider_overflow_phrases("providers.myllm") == NULL);
+    EXPECT(provider_overflow_phrases(NULL) == NULL);
+    EXPECT(hax_diag_sequence() == diagnostics_before + 2);
+
+    EXPECT(provider_overflow_phrases("providers.keyed") == NULL);
+    EXPECT(hax_diag_sequence() == diagnostics_before + 3);
+}
+
 /* extra_body survives config-load scalar normalization with its JSON types intact and drops
  * protocol-owned members with one warning each. */
 static void test_extra_body(void)
@@ -266,7 +283,8 @@ static const char CONFIG_JSON[] =
     "        \"X-Del\": \"a\\u007Fb\","
     "        \"X-Empty\": \"\","
     "        \"X-Obj\": {\"no\": 1}"
-    "      }"
+    "      },"
+    "      \"overflow_phrases\": [\"input too big\", \"\", 3]"
     "    },"
     "    \"keyed\": {\"base_url\": \"http://127.0.0.1:9004/v1\","
     "               \"api_key_env\": \"HAX_TEST_KEYED_KEY\"},"
@@ -300,6 +318,7 @@ static const char CONFIG_JSON[] =
     "  \"providers.flatprov.base_url\": \"http://127.0.0.1:9001/v1\","
     "  \"providers.flatprov.extra_body\": {\"top_p\": 0.9},"
     "  \"providers.keyed.extra_body\": \"not an object\","
+    "  \"providers.keyed.overflow_phrases\": \"not a list\","
     "  \"extra_body\": {\"stray\": 5}"
     "}";
 
@@ -598,6 +617,7 @@ int main(void)
 
     expect_registry_projects_provider_fields();
     test_cache_ttl_resolution();
+    test_overflow_phrases();
     test_extra_body();
     test_extra_headers();
     test_headers_merge_and_expand();

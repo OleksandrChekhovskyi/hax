@@ -10,6 +10,7 @@
 #include "provider.h"
 #include "xalloc.h"
 #include "providers/registry.h"
+#include "transport/api_error.h"
 
 struct stream_capture {
     struct buf text;
@@ -19,6 +20,7 @@ struct stream_capture {
     int tool_call_count;
     int done_event_count;
     int error_event_count;
+    enum api_error_kind error_kind;
     int callback_result;
     struct stream_usage usage;
 };
@@ -67,6 +69,7 @@ static int capture_cb(const struct stream_event *ev, void *user)
         break;
     case EV_ERROR:
         c->error_event_count++;
+        c->error_kind = ev->u.error.kind;
         break;
     default:
         break;
@@ -271,6 +274,62 @@ static void test_scripted_missing_file(void)
     free(path);
 }
 
+static void expect_overflow(struct provider *provider, const struct context *context)
+{
+    struct stream_capture capture;
+    capture_init(&capture);
+    EXPECT(capture_stream(provider, context, &capture) == 0);
+    EXPECT(capture.error_event_count == 1);
+    EXPECT(capture.done_event_count == 0);
+    EXPECT(capture.text.len == 0);
+    EXPECT(capture.error_kind == API_ERROR_CONTEXT_OVERFLOW);
+    capture_free(&capture);
+}
+
+static void expect_text_turn(struct provider *provider, const struct context *context,
+                             const char *text)
+{
+    struct stream_capture capture;
+    capture_init(&capture);
+    EXPECT(capture_stream(provider, context, &capture) == 0);
+    EXPECT_STR_EQ(buf_str(&capture.text), text);
+    EXPECT(capture.done_event_count == 1);
+    capture_free(&capture);
+}
+
+static void test_scripted_overflow_consumes_turn(void)
+{
+    char *path = write_script("overflow\ntext never sent\nend-turn\ntext next\n");
+    struct provider *provider = new_scripted_provider(path);
+
+    expect_overflow(provider, NULL);
+    expect_text_turn(provider, NULL, "next");
+
+    provider->destroy(provider);
+    free(path);
+}
+
+/* An oversized request leaves the turn for the next one, which gets it once it fits. */
+static void test_scripted_overflow_over_limit_replays_turn(void)
+{
+    char *path = write_script("overflow limit=10\ntext fits\nend-turn\ntext next\n");
+    struct provider *provider = new_scripted_provider(path);
+    struct item items[1] = {{.kind = ITEM_USER_MESSAGE, .text = (char *)"0123456789"}};
+    struct context oversized = {
+        .system_prompt = "0123456789012345678901234567890123456789",
+        .items = items,
+        .n_items = 1,
+    };
+
+    expect_overflow(provider, &oversized);
+    expect_overflow(provider, &oversized);
+    expect_text_turn(provider, NULL, "fits");
+    expect_text_turn(provider, NULL, "next");
+
+    provider->destroy(provider);
+    free(path);
+}
+
 static struct provider *new_interactive_provider(void)
 {
     unsetenv("HAX_MOCK_SCRIPT");
@@ -378,6 +437,8 @@ int main(void)
     test_scripted_callback_minus_two_is_abort();
     test_scripted_final_turn_at_eof();
     test_scripted_missing_file();
+    test_scripted_overflow_consumes_turn();
+    test_scripted_overflow_over_limit_replays_turn();
     test_interactive_bash_call();
     test_interactive_read_call();
     test_interactive_echo_without_tools();

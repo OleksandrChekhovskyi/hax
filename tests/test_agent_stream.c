@@ -5,6 +5,7 @@
 #include "harness.h"
 #include "provider.h"
 #include "turn.h"
+#include "transport/api_error.h"
 #include "transport/http.h"
 
 static struct stream_usage usage_tokens(long input, long output)
@@ -62,7 +63,9 @@ static int scripted_stream(struct provider *p, const struct context *ctx, const 
     if (script == SCRIPT_ERROR) {
         struct stream_usage usage = usage_tokens(10, 0);
         struct stream_event error = {.kind = EV_ERROR,
-                                     .u.error = {.message = "overloaded", .usage = &usage}};
+                                     .u.error = {.message = "overloaded",
+                                                 .kind = API_ERROR_CONTEXT_OVERFLOW,
+                                                 .usage = &usage}};
         cb(&error, user);
         return 0;
     }
@@ -153,6 +156,7 @@ static void test_requests_accumulate(void)
     request(&stream, &provider);
     EXPECT(stream.assembly.state == TURN_FAILED);
     EXPECT_STR_EQ(stream.error_message, "overloaded");
+    EXPECT(stream.error_kind == API_ERROR_CONTEXT_OVERFLOW);
 
     script = SCRIPT_TICKED;
     request(&stream, &provider);
@@ -160,6 +164,7 @@ static void test_requests_accumulate(void)
     EXPECT(stream.usage.input_tokens == 100);
     EXPECT(stream.attempts.count == 2);
     EXPECT(stream.error_message == NULL);
+    EXPECT(stream.error_kind == API_ERROR_OTHER);
 
     script = SCRIPT_ERROR;
     request(&stream, &provider);

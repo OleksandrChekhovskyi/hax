@@ -46,6 +46,7 @@ static const struct provider_field PROVIDER_FIELDS[] = {
     {.leaf = "thinking_mode",       .classes = PROVIDER_FIELD_ANTHROPIC},
     {.leaf = "thinking_budget",     .classes = PROVIDER_FIELD_ANTHROPIC},
     {.leaf = "version",             .classes = PROVIDER_FIELD_ANTHROPIC},
+    {.leaf = "overflow_phrases",    .classes = FIELD_ANY},
     {.leaf = "extra_body",          .classes = FIELD_ANY},
     {.leaf = "extra_headers",       .classes = FIELD_ANY, .secret = 1},
 };
@@ -115,6 +116,37 @@ const char *provider_cache_ttl(const char *config_prefix)
         return "1h";
     hax_warn("unknown cache_ttl '%s' (5m or 1h) — using 1h", value);
     return "1h";
+}
+
+char **provider_overflow_phrases(const char *config_prefix)
+{
+    if (!config_prefix)
+        return NULL;
+    char *key = xasprintf("%s.overflow_phrases", config_prefix);
+    const json_t *node = config_json_node(key);
+    char **phrases = NULL;
+    size_t count = 0;
+    if (json_is_array(node)) {
+        phrases = xcalloc(json_array_size(node) + 1, sizeof(*phrases));
+        size_t index;
+        const json_t *member;
+        json_array_foreach(node, index, member)
+        {
+            const char *phrase = json_string_value(member);
+            if (phrase && *phrase)
+                phrases[count++] = xstrdup(phrase);
+            else
+                hax_warn("%s: entry %zu is not a non-empty string — ignoring it", key, index + 1);
+        }
+    } else if (node) {
+        hax_warn("%s must be a list of strings — ignoring it", key);
+    }
+    free(key);
+    if (count == 0) {
+        free(phrases);
+        return NULL;
+    }
+    return phrases;
 }
 
 /* Members whose value the request machinery owns: overriding them would desynchronize the

@@ -145,6 +145,8 @@ struct event_log {
     long retry_usage_input;
     long error_usage_input;
     int error_status;
+    char error_code[64];
+    char error_detail[128];
     char text[128];
     char error_message[256];
 };
@@ -166,6 +168,10 @@ static int log_event(const struct stream_event *event, void *user)
     case EV_ERROR:
         log->n_error++;
         log->error_status = event->u.error.http_status;
+        snprintf(log->error_code, sizeof(log->error_code), "%s",
+                 event->u.error.code ? event->u.error.code : "");
+        snprintf(log->error_detail, sizeof(log->error_detail), "%s",
+                 event->u.error.detail ? event->u.error.detail : "");
         if (event->u.error.usage)
             log->error_usage_input = event->u.error.usage->input_tokens;
         snprintf(log->error_message, sizeof(log->error_message), "%s", event->u.error.message);
@@ -273,6 +279,22 @@ static void test_non_retryable_error(void)
     EXPECT(fake.finalizes == 0);
     EXPECT(fake.inits == 1);
     EXPECT(fake.frees == 1);
+}
+
+/* The final rejection reports what the server said, for the adapter to classify. */
+static void test_rejection_reports_server_error(void)
+{
+    const char *responses[] = {
+        "HTTP/1.1 400 Bad Request\r\nContent-Length: 70\r\nConnection: close\r\n\r\n"
+        "{\"error\":{\"message\":\"input too big\",\"code\":\"context_length_exceeded\"}}",
+    };
+    struct fake_stream fake = {0};
+    struct event_log log = {0};
+    run_scripted(responses, 1, &fake, &log);
+
+    EXPECT(log.n_error == 1);
+    EXPECT_STR_EQ(log.error_code, "context_length_exceeded");
+    EXPECT_STR_EQ(log.error_detail, "input too big");
 }
 
 static void test_retry_budget_exhausted(void)
@@ -435,6 +457,7 @@ int main(void)
     test_success_first_attempt();
     test_retry_then_success();
     test_non_retryable_error();
+    test_rejection_reports_server_error();
     test_retry_budget_exhausted();
     test_recover_redoes_attempt();
     test_midstream_death_retried();
