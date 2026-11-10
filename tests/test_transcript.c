@@ -472,7 +472,7 @@ static struct turn_usage exact_usage(void)
     };
 }
 
-static void test_estimated_turn_usage_footer(void)
+static void test_estimated_turn_usage_line(void)
 {
     struct turn_usage usage = {
         .usage = {.input_tokens = 3072,
@@ -494,12 +494,12 @@ static void test_estimated_turn_usage_footer(void)
     EXPECT(contains(out, "42s · ~$0.157 · in 2k ~$0.025 · cache 1k ~$0.048 · out 512 ~$0.084"));
 
     const char *answer = strstr(out, "answer");
-    const char *footer = strstr(out, "42s ·");
-    EXPECT(answer && footer && answer < footer);
+    const char *usage_line = strstr(out, "42s ·");
+    EXPECT(answer && usage_line && answer < usage_line);
     free(out);
 }
 
-static void test_exact_turn_usage_footer(void)
+static void test_exact_turn_usage_line(void)
 {
     struct turn_usage usage = exact_usage();
     char *out = render_usage(&usage);
@@ -700,8 +700,8 @@ int main(void)
     test_tools_section_omitted_when_empty();
     test_reasoning_text_has_section_and_dimmed_lines();
     test_opaque_reasoning_shows_id_without_payload();
-    test_estimated_turn_usage_footer();
-    test_exact_turn_usage_footer();
+    test_estimated_turn_usage_line();
+    test_exact_turn_usage_line();
     test_overlapping_cache_usage_uses_precomputed_uncached_count();
     test_tiny_usage_cost_is_omitted();
     test_usage_without_rates_has_bare_counts();

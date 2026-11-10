@@ -590,7 +590,7 @@ static void test_turn_usage_provenance_records_distinct_identity(void)
     agent_session_free(&session);
 }
 
-/* Compaction footers stand in for no single stream. */
+/* Compaction usage records stand in for no single stream. */
 static void test_turn_usage_provenance_without_response(void)
 {
     struct agent_session session = {.provider_id = "openrouter", .model = xstrdup("m1")};
@@ -682,7 +682,7 @@ static void test_mark_interrupt_empty_session(void)
 
 /* The classification follows the tail as the conversation evolves through an unanswered
  * prompt, a finished seam, an abort marker, and a continuation, skipping inert trailing
- * usage footers and boundaries at every step. */
+ * usage records and boundaries at every step. */
 static void test_resume_tail_classification(void)
 {
     struct agent_session session = {0};
@@ -722,7 +722,7 @@ static void test_resume_tail_classification(void)
     agent_session_free(&session);
 }
 
-/* The newest reporting footer wins, unreported footers are skipped, and a compaction seed
+/* The newest reporting usage record wins, unreported ones are skipped, and a compaction seed
  * floors the scan: pre-compaction usage must not describe the summarized window. */
 static void test_last_context_tokens(void)
 {
@@ -743,7 +743,7 @@ static void test_last_context_tokens(void)
     agent_session_add_turn_usage(&session, NULL, &unreported, 1000, NULL, ITEM_ORIGIN_NONE);
     EXPECT(agent_session_last_context_tokens(&session) == 640);
 
-    /* Production order: the accepted summarization footer follows the seed and reports the
+    /* Production order: the accepted summarization usage record follows the seed and reports the
      * summarized request, so the fresh window still has no snapshot. */
     agent_session_append(&session, (struct item){.kind = ITEM_USER_MESSAGE,
                                                  .text = xstrdup("summary"),
@@ -753,7 +753,7 @@ static void test_last_context_tokens(void)
     agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
     EXPECT(agent_session_last_context_tokens(&session) == -1);
 
-    /* A continued turn's footer after the seed is the window snapshot again. */
+    /* A continued turn's usage record after the seed is the window snapshot again. */
     agent_session_add_boundary(&session);
     agent_session_append(&session,
                          (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("onward")});
@@ -762,7 +762,7 @@ static void test_last_context_tokens(void)
     agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
     EXPECT(agent_session_last_context_tokens(&session) == 150);
 
-    /* A compaction that produced no seed still left its footers; they describe the summary
+    /* A compaction that produced no seed still left its usage records; they describe the summary
      * request, so the agent turn before them stays the snapshot. */
     usage.input_tokens = 5000;
     usage.output_tokens = 10;
@@ -785,9 +785,9 @@ static void append_tool_turn(struct agent_session *session, const char *call_id,
     agent_session_add_turn_usage(session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
 }
 
-/* The newest footer's total plus what its request could not include: the results of the calls
- * it returned, recorded before the footer, and everything after it. Results of earlier turns
- * were input to that request and are not counted again. */
+/* The newest usage record's total plus what its request could not include: the results of the
+ * calls it returned, recorded before the usage record, and everything after it. Results of
+ * earlier turns were input to that request and are not counted again. */
 static void test_context_estimate(void)
 {
     struct agent_session session = {0};
@@ -838,7 +838,7 @@ static void test_has_reported_usage(void)
     agent_session_add_user(&session, "hello");
     EXPECT(!agent_session_has_reported_usage(&session));
 
-    /* A duration-only footer neither prices nor bounds anything. */
+    /* A duration-only usage record neither prices nor bounds anything. */
     struct stream_usage unreported = {-1, -1, -1, -1, -1, -1};
     agent_session_add_turn_usage(&session, NULL, &unreported, 1000, NULL, ITEM_ORIGIN_NONE);
     EXPECT(!agent_session_has_reported_usage(&session));
@@ -847,13 +847,13 @@ static void test_has_reported_usage(void)
     agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
     EXPECT(agent_session_has_reported_usage(&session));
 
-    /* An undone turn's footer still prices the session. */
+    /* An undone turn's usage record still prices the session. */
     agent_session_retire(&session, 1);
     EXPECT(session.n_items == 1);
     EXPECT(agent_session_has_reported_usage(&session));
     agent_session_free(&session);
 
-    /* A fork's inherited footer bounds the live window but, once undone, neither prices nor
+    /* A fork's inherited usage record bounds the live window but, once undone, neither prices nor
      * bounds anything. */
     struct agent_session fork = {0};
     agent_session_add_user(&fork, "hello");

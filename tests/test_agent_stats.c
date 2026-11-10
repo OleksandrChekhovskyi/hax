@@ -50,23 +50,23 @@ static void add_tool_call(struct agent_session *session, const char *name)
                                                 .tool_arguments_json = xstrdup("{}")});
 }
 
-/* A footer as a provider without rates leaves it: tokens and maybe a reported charge, no
+/* A usage record as a provider without rates leaves it: tokens and maybe a reported charge, no
  * category split. */
-static void add_footer(struct agent_session *session, const char *provider, const char *model,
-                       struct stream_usage usage, double cost_total, int estimated)
+static void add_usage_record(struct agent_session *session, const char *provider, const char *model,
+                             struct stream_usage usage, double cost_total, int estimated)
 {
-    struct turn_usage *footer = xcalloc(1, sizeof(*footer));
-    footer->usage = usage;
-    footer->elapsed_ms = 100;
-    footer->uncached_input_tokens = usage.input_tokens > 0 ? usage.input_tokens : 0;
-    footer->cost_input = -1;
-    footer->cost_cache_read = -1;
-    footer->cost_cache_write = -1;
-    footer->cost_output = -1;
-    footer->cost_total = cost_total;
-    footer->cost_estimated = estimated;
+    struct turn_usage *record = xcalloc(1, sizeof(*record));
+    record->usage = usage;
+    record->elapsed_ms = 100;
+    record->uncached_input_tokens = usage.input_tokens > 0 ? usage.input_tokens : 0;
+    record->cost_input = -1;
+    record->cost_cache_read = -1;
+    record->cost_cache_write = -1;
+    record->cost_output = -1;
+    record->cost_total = cost_total;
+    record->cost_estimated = estimated;
     agent_session_append(session, (struct item){.kind = ITEM_TURN_USAGE,
-                                                .usage = footer,
+                                                .usage = record,
                                                 .provider = xstrdup(provider),
                                                 .model = xstrdup(model)});
 }
@@ -77,10 +77,10 @@ static void test_counts_user_turns_tools_and_requests(void)
     add_prompt(&session, "one");
     add_tool_call(&session, "bash");
     add_tool_call(&session, "read");
-    add_footer(&session, "prov", "m", tokens(1000, 100, 0.01), 0.01, 0);
+    add_usage_record(&session, "prov", "m", tokens(1000, 100, 0.01), 0.01, 0);
     add_prompt(&session, "two");
     add_tool_call(&session, "bash");
-    add_footer(&session, "prov", "m", tokens(2000, 200, 0.02), 0.02, 0);
+    add_usage_record(&session, "prov", "m", tokens(2000, 200, 0.02), 0.02, 0);
     agent_session_add_worked(&session, 4000);
     agent_session_add_worked(&session, 6000);
 
@@ -104,7 +104,7 @@ static void test_counts_user_turns_tools_and_requests(void)
     EXPECT(stats.n_models == 1);
     EXPECT_STR_EQ(stats.models[0].model, "m");
 
-    /* A range excludes earlier history but never the conversation's own footers after it. */
+    /* A range excludes earlier history but never the conversation's own usage records after it. */
     agent_stats_collect(&session, 6, 0, NULL, &stats);
     EXPECT(stats.user_turns == 1);
     EXPECT(stats.total.requests == 1);
@@ -116,10 +116,10 @@ static void test_retired_items_stay_on_the_bill(void)
 {
     struct agent_session session = {0};
     add_prompt(&session, "kept");
-    add_footer(&session, "prov", "m", tokens(1000, 100, 0.01), 0.01, 0);
+    add_usage_record(&session, "prov", "m", tokens(1000, 100, 0.01), 0.01, 0);
     add_prompt(&session, "undone");
     add_tool_call(&session, "bash");
-    add_footer(&session, "prov", "m", tokens(2000, 200, 0.02), 0.02, 0);
+    add_usage_record(&session, "prov", "m", tokens(2000, 200, 0.02), 0.02, 0);
     agent_session_retire(&session, items_user_turn_cut(session.items, session.n_items, 1));
 
     /* The conversation shrank to one user turn and no tool calls; the bill did not. */
@@ -141,16 +141,16 @@ static void test_retired_items_stay_on_the_bill(void)
     agent_session_free(&session);
 }
 
-static void test_models_are_split_by_footer_identity(void)
+static void test_models_are_split_by_record_identity(void)
 {
     struct agent_session session = {0};
     add_prompt(&session, "a");
-    add_footer(&session, "prov", "small", tokens(1000, 100, 0.01), 0.01, 0);
+    add_usage_record(&session, "prov", "small", tokens(1000, 100, 0.01), 0.01, 0);
     add_prompt(&session, "b");
-    add_footer(&session, "prov", "large", tokens(2000, 200, 0.10), 0.10, 0);
+    add_usage_record(&session, "prov", "large", tokens(2000, 200, 0.10), 0.10, 0);
     add_prompt(&session, "c");
-    add_footer(&session, "prov", "large", tokens(3000, 300, 0.20), 0.20, 0);
-    /* Labels stored with the footer name the row, not the wire id. */
+    add_usage_record(&session, "prov", "large", tokens(3000, 300, 0.20), 0.20, 0);
+    /* Labels stored with the usage record name the row, not the wire id. */
     session.items[session.n_items - 1].usage->provenance.model_label = xstrdup("Large");
 
     struct agent_stats stats;
@@ -165,13 +165,13 @@ static void test_models_are_split_by_footer_identity(void)
     agent_session_free(&session);
 }
 
-static void test_estimates_and_unpriced_footers_mark_spend(void)
+static void test_estimates_and_unpriced_records_mark_spend(void)
 {
     install_catalog();
     struct agent_session session = {0};
-    add_footer(&session, "prov", "m", tokens(1000, 50, 0.01), 0.01, 0);
-    /* Recorded as an estimate by the footer itself. */
-    add_footer(&session, "prov", "m", tokens(1000, 50, -1), 0.02, 1);
+    add_usage_record(&session, "prov", "m", tokens(1000, 50, 0.01), 0.01, 0);
+    /* Recorded as an estimate by the usage record itself. */
+    add_usage_record(&session, "prov", "m", tokens(1000, 50, -1), 0.02, 1);
     struct agent_stats stats;
     agent_stats_collect(&session, 0, 0, NULL, &stats);
     EXPECT(stats.total.spend == 0.03);
@@ -182,25 +182,26 @@ static void test_estimates_and_unpriced_footers_mark_spend(void)
      * provider, and the estimate splits into categories. */
     struct provider provider = {.name = "prov", .catalog_id = "prov"};
     setenv("HAX_PROVIDER", "prov", 1);
-    add_footer(&session, provider_stable_id(&provider), "m", tokens(1000000, 1000000, -1), -1, 0);
+    add_usage_record(&session, provider_stable_id(&provider), "m", tokens(1000000, 1000000, -1), -1,
+                     0);
     agent_stats_collect(&session, 0, 0, &provider, &stats);
     EXPECT(stats.total.spend == 10.03);
     EXPECT(stats.total.spend_estimated);
     EXPECT(!stats.total.unpriced);
     EXPECT(stats.total.split_available);
-    /* Category estimates cover the reported footers too, at the same rates. */
+    /* Category estimates cover the reported usage records too, at the same rates. */
     EXPECT(fabs(stats.total.split.cost_input - 2.004) < 1e-9);
     EXPECT(fabs(stats.total.split.cost_output - 8.0008) < 1e-9);
 
     /* A response that reported neither tokens nor cost has nothing to price: it is a request,
      * not a gap in the estimate, so no caller waits on the catalog for it. */
-    add_footer(&session, "prov", "m", tokens(-1, -1, -1), -1, 0);
+    add_usage_record(&session, "prov", "m", tokens(-1, -1, -1), -1, 0);
     agent_stats_collect(&session, 0, 0, &provider, &stats);
     EXPECT(stats.total.requests == 4);
     EXPECT(!stats.total.unpriced);
 
-    /* A footer nothing can price is missing real usage: the total stays a lower bound. */
-    add_footer(&session, "elsewhere", "unknown", tokens(500, 5, -1), -1, 0);
+    /* A usage record nothing can price is missing real usage: the total stays a lower bound. */
+    add_usage_record(&session, "elsewhere", "unknown", tokens(500, 5, -1), -1, 0);
     agent_stats_collect(&session, 0, 0, &provider, &stats);
     EXPECT(stats.total.spend == 10.03);
     EXPECT(stats.total.unpriced);
@@ -213,11 +214,11 @@ static void test_inherited_items_are_context_not_bill(void)
 {
     struct agent_session session = {0};
     add_prompt(&session, "parent");
-    add_footer(&session, "prov", "m", tokens(1000, 100, 0.05), 0.05, 0);
+    add_usage_record(&session, "prov", "m", tokens(1000, 100, 0.05), 0.05, 0);
     for (size_t i = 0; i < session.n_items; i++)
         session.items[i].inherited = 1;
     add_prompt(&session, "own");
-    add_footer(&session, "prov", "m", tokens(2000, 200, 0.02), 0.02, 0);
+    add_usage_record(&session, "prov", "m", tokens(2000, 200, 0.02), 0.02, 0);
 
     struct agent_stats stats;
     agent_stats_collect(&session, 0, 0, NULL, &stats);
@@ -270,8 +271,8 @@ int main(void)
     test_format_stats_segments();
     test_counts_user_turns_tools_and_requests();
     test_retired_items_stay_on_the_bill();
-    test_models_are_split_by_footer_identity();
-    test_estimates_and_unpriced_footers_mark_spend();
+    test_models_are_split_by_record_identity();
+    test_estimates_and_unpriced_records_mark_spend();
     test_inherited_items_are_context_not_bill();
     T_REPORT();
 }

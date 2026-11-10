@@ -190,8 +190,8 @@ static void loop_observe_tools(const struct agent_loop_params *params, size_t fr
             params->hooks.tool_seen(&params->session->items[i], params->hooks.user);
 }
 
-/* One footer per served attempt. An aborted turn keeps only attempts that reported usage; a
- * completed one also records a terminal response the provider left unmeasured. */
+/* One usage record per served attempt. An aborted turn keeps only attempts that reported usage;
+ * a completed one also records a terminal response the provider left unmeasured. */
 static void loop_add_usage(const struct agent_loop_params *params,
                            const struct agent_stream *loop_turn, int aborted)
 {
@@ -263,8 +263,8 @@ static void loop_run_active(const struct agent_loop_params *params,
         if (loop_turn.assembly.state == TURN_FAILED) {
             /* Provider failure wins over a simultaneous frontend cancel: it supplies the
              * diagnostic. The boundary is owed exactly when something lands after it — the
-             * partial text repair keeps and/or a billable-usage footer — so it neither dangles
-             * empty nor lets the footer read as part of the preceding turn. */
+             * partial text repair keeps and/or a billable usage record — so it neither dangles
+             * empty nor lets the record read as part of the preceding turn. */
             if (owes_boundary &&
                 (assembly_has_text(&loop_turn.assembly) || agent_stream_has_usage(&loop_turn)))
                 agent_session_add_boundary(session);
@@ -290,7 +290,7 @@ static void loop_run_active(const struct agent_loop_params *params,
         enum agent_signal sig = loop_checkpoint(hooks);
         if (sig == AGENT_SIGNAL_ABORT) {
             /* The boundary is owed exactly when the cancel leaves something after it — repaired
-             * items with their marker, or a billable-usage footer. An evaporating turn (nothing
+             * items with their marker, or a billable usage record. An evaporating turn (nothing
              * but truncated thinking) leaves no trace at all. */
             if (owes_boundary && (assembly_survives_cancel(&loop_turn.assembly) ||
                                   agent_stream_has_usage(&loop_turn)))
@@ -312,7 +312,7 @@ static void loop_run_active(const struct agent_loop_params *params,
 
         /* A pre-empted request — the pause cut the stream before any content, so no terminal
          * event and nothing assembled — leaves no trace; the resume re-sends it. Anything a
-         * turn does leave (items, a footer — even just banked usage from a pause landing
+         * turn does leave (items, a usage record — even just banked usage from a pause landing
          * mid-retry) owes the boundary. */
         int paused_empty = pause_pending && agent_stream_cut_by(&loop_turn, AGENT_SIGNAL_PAUSE);
         if (owes_boundary && (!paused_empty || agent_stream_has_usage(&loop_turn)))
@@ -320,7 +320,7 @@ static void loop_run_active(const struct agent_loop_params *params,
         struct agent_absorb_result absorbed = agent_session_absorb(session, &loop_turn.assembly);
         /* Freeze the streamed slice before appending results: tool results must never be
          * mistaken for more calls, and frontends need the final turn range without its
-         * synthesized results or usage footer. */
+         * synthesized results or usage record. */
         size_t response_to = session->n_items;
         loop_observe_tools(params, absorbed.items_from, response_to);
         result->final_items_from = absorbed.items_from;
@@ -357,8 +357,8 @@ static void loop_run_active(const struct agent_loop_params *params,
         }
 
         /* The final checkpoint catches cancellation raised by the last tool, when there is no
-         * next call to sample it. Place the marker before the footer so usage remains the turn's
-         * trailing item. */
+         * next call to sample it. Place the marker before the usage record so it remains the
+         * turn's trailing item. */
         sig = loop_checkpoint(hooks);
         if (sig == AGENT_SIGNAL_ABORT)
             agent_session_mark_interrupt(session);
@@ -374,18 +374,18 @@ static void loop_run_active(const struct agent_loop_params *params,
         if (sig == AGENT_SIGNAL_PAUSE)
             pause_pending = 1;
 
-        /* The seam is the pause point: calls, results, and footer are durable and no marker is
-         * owed — history reads as a finished provider turn a later run can continue verbatim.
-         * Deliberately before the compact seam: a pause returns control without launching new
-         * work, and an over-threshold seam is instead compacted by the run that continues it,
-         * before its first request (the frontend's re-entry path owns that check). */
+        /* The seam is the pause point: calls, results, and usage record are durable and no
+         * marker is owed — history reads as a finished provider turn a later run can continue
+         * verbatim. Deliberately before the compact seam: a pause returns control without
+         * launching new work, and an over-threshold seam is instead compacted by the run that
+         * continues it, before its first request (the frontend's re-entry path owns that check). */
         if (pause_pending) {
             result->outcome = AGENT_LOOP_PAUSED;
             return;
         }
 
-        /* Compact only at a seam another turn follows, once calls, results, and footer are
-         * durable and before the next boundary; compact_due() reads the footer and estimates the
+        /* Compact only at a seam another turn follows, once calls, results, and usage record are
+         * durable and before the next boundary; compact_due() reads the record and estimates the
          * results it did not measure. After the last allowed turn, the run that continues
          * compacts before its first request instead. Cancellation during the frontend
          * transaction must stop continuation against old history. */

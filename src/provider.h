@@ -278,7 +278,7 @@ struct stream_event {
              * it here and the agent accounts it exactly as EV_DONE's. */
             const struct stream_usage *usage;
             /* Identity captured before the failure, or NULL; a retained
-             * footer owes the same attribution as EV_DONE's. */
+             * usage record owes the same attribution as EV_DONE's. */
             const struct stream_response *response;
         } error;
     } u;

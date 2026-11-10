@@ -119,8 +119,8 @@ void agent_session_add_continuation(struct agent_session *session);
 /* Append a boundary between provider round-trips in one user turn. */
 void agent_session_add_boundary(struct agent_session *session);
 
-/* Append an owned usage footer for one provider round-trip. `response` is the identity the
- * provider reported for it, or NULL when the footer stands in for no single stream. `origin` is
+/* Append an owned usage record for one provider round-trip. `response` is the identity the
+ * provider reported for it, or NULL when the record stands in for no single stream. `origin` is
  * ITEM_ORIGIN_COMPACTION for a summarization request, whose window is not the conversation's. */
 void agent_session_add_turn_usage(struct agent_session *session, const struct provider *provider,
                                   const struct stream_usage *usage, long elapsed_ms,
@@ -162,19 +162,19 @@ void agent_session_prepare_resumed(struct agent_session *session, struct provide
                                    const char *path, const struct session_meta *recorded,
                                    struct transcript_log *transcript, struct agent_resumed *out);
 
-/* Context-window size of the newest request a usage footer records in the model-visible
+/* Context-window size of the newest request a usage record reports in the model-visible
  * context, or -1 when none reports it. This is the recorded counterpart of a live run's
  * latest-usage snapshot, as the stats display reports it; compaction's own accounting, which
  * describes the summarized request rather than the fresh seed's window, is ignored. */
 long agent_session_last_context_tokens(const struct agent_session *session);
 
-/* agent_session_last_context_tokens() plus an items_token_estimate() of what that footer's
- * request could not count: tool results answering its response and everything appended after
- * it, such as task notes. -1 when no footer reports window use. */
+/* agent_session_last_context_tokens() plus an items_token_estimate() of what that usage
+ * record's request could not count: tool results answering its response and everything appended
+ * after it, such as task notes. -1 when no usage record reports window use. */
 long agent_session_context_estimate(const struct agent_session *session);
 
-/* Whether any footer that model metadata can price or bound reports input or output tokens:
- * live footers, inherited or not, and retired footers of this session's own turns. */
+/* Whether any usage record that model metadata can price or bound reports input or output
+ * tokens: live records, inherited or not, and retired records of this session's own turns. */
 int agent_session_has_reported_usage(const struct agent_session *session);
 
 struct turn;

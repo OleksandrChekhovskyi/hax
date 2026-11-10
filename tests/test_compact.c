@@ -99,7 +99,7 @@ static void test_due(void)
     config_set_override("compact.auto", NULL);
 }
 
-/* The prompt about to be sent and items the last footer did not measure both count. */
+/* The prompt about to be sent and items the last usage record did not measure both count. */
 static void test_due_counts_unsent_input(void)
 {
     config_set_override("compact.auto", "1");
@@ -308,7 +308,7 @@ static void test_applies_summary(void)
     struct compact_result result = run_compaction(&session, &provider, NULL);
     EXPECT(result.outcome == COMPACT_COMPLETE);
     EXPECT(result.attempts == 1);
-    /* The summarized history stays; the seed and its usage footer are appended after it. */
+    /* The summarized history stays; the seed and its usage record are appended after it. */
     EXPECT(session.n_items == 4);
     EXPECT_STR_EQ(session.items[0].text, "old history");
     EXPECT(session.items[1].kind == ITEM_TURN_BOUNDARY);
@@ -337,8 +337,8 @@ static void test_retried_attempt_usage_is_billed(void)
     reset_mock(MOCK_STREAM_RETRY);
 
     struct compact_result result = run_compaction(&session, &provider, NULL);
-    /* The dead attempt was a served request of its own: its footer belongs to the summarized
-     * prefix, and only the accepted attempt's footer follows the seed. */
+    /* The dead attempt was a served request of its own: its usage record belongs to the
+     * summarized prefix, and only the accepted attempt's record follows the seed. */
     EXPECT(result.outcome == COMPACT_COMPLETE);
     EXPECT(session.n_items == 5);
     EXPECT(session.items[1].kind == ITEM_TURN_USAGE);
@@ -359,7 +359,7 @@ static void test_cancelled_retry_usage_is_billed(void)
     reset_mock(MOCK_STREAM_RETRY_INCOMPLETE);
 
     struct compact_result result = run_compaction(&session, &provider, NULL);
-    /* No terminal event ever arrived, but the banked usage still gets a footer. */
+    /* No terminal event ever arrived, but the banked usage is still recorded. */
     EXPECT(result.outcome == COMPACT_NO_SUMMARY);
     EXPECT(session.n_items == 2);
     EXPECT(session.items[1].kind == ITEM_TURN_USAGE);
@@ -386,7 +386,8 @@ static void test_compacts_twice(void)
 
     struct compact_result second = run_compaction(&session, &provider, NULL);
     EXPECT(second.outcome == COMPACT_COMPLETE);
-    /* The first seed and its footer plus the prompt — the summarized prefix is not re-read. */
+    /* The first seed and its usage record plus the prompt — the summarized prefix is not
+     * re-read. */
     EXPECT(mock.last_request_items == 3);
     EXPECT(session.n_items == 7);
     EXPECT_STR_EQ(session.items[0].text, "old history");
@@ -431,8 +432,8 @@ static void test_keeps_one_session(void)
     EXPECT(result.attempts == 2);
     EXPECT_STR_EQ(path, session_log_path(session_log));
 
-    /* The rejected attempt's footer belongs to the summarized prefix; only the accepted
-     * attempt's footer follows the seed. */
+    /* The rejected attempt's usage record belongs to the summarized prefix; only the accepted
+     * attempt's record follows the seed. */
     EXPECT(session.n_items == 5);
     EXPECT(session.items[1].kind == ITEM_TURN_USAGE);
     EXPECT(session.items[1].usage->usage.input_tokens == 100);
@@ -601,7 +602,7 @@ static void test_rejects_empty_summary(void)
     struct compact_result result = run_compaction(&session, &provider, NULL);
     EXPECT(result.outcome == COMPACT_NO_SUMMARY);
     /* A clean but empty response is still a completed, billed attempt; it gets
-     * a footer without replacing usable history. */
+     * a usage record without replacing usable history. */
     EXPECT(session.n_items == 2);
     EXPECT_STR_EQ(session.items[0].text, "old history");
     EXPECT(session.items[1].kind == ITEM_TURN_USAGE);
@@ -637,7 +638,7 @@ static void test_discards_cancelled_summary(void)
     struct compact_result result = run_compaction(&session, &provider, NULL);
     EXPECT(result.outcome == COMPACT_CANCELLED);
     /* A late abort wins over a complete summary: old history survives and
-     * the completed attempt still receives its footer. */
+     * the completed attempt still receives its usage record. */
     EXPECT(session.n_items == 2);
     EXPECT_STR_EQ(session.items[0].text, "old history");
     EXPECT(session.items[1].kind == ITEM_TURN_USAGE);

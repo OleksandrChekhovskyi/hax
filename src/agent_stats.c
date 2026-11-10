@@ -18,10 +18,10 @@ static int strings_equal(const char *a, const char *b)
     return strcmp(a, b) == 0;
 }
 
-/* Footers recorded before the catalog answered carry no price; a footer's own provider and model
- * still identify the rates once they are known. */
-static int footer_rates(const struct item *item, const struct provider *provider,
-                        struct catalog_entry *rates)
+/* Usage records written before the catalog answered carry no price; a record's own provider and
+ * model still identify the rates once they are known. */
+static int usage_rates(const struct item *item, const struct provider *provider,
+                       struct catalog_entry *rates)
 {
     if (!item->model || !*item->model)
         return 0;
@@ -39,37 +39,37 @@ static void add_reported(long *sum, long value)
         *sum += value;
 }
 
-static void account_footer(struct agent_stats_totals *totals, const struct item *item,
-                           const struct provider *provider)
+static void account_usage(struct agent_stats_totals *totals, const struct item *item,
+                          const struct provider *provider)
 {
-    const struct turn_usage *footer = item->usage;
-    const struct stream_usage *usage = &footer->usage;
+    const struct turn_usage *record = item->usage;
+    const struct stream_usage *usage = &record->usage;
 
     totals->requests++;
     add_reported(&totals->input_tokens, usage->input_tokens);
     add_reported(&totals->output_tokens, usage->output_tokens);
     add_reported(&totals->cached_tokens, usage->cached_tokens);
     add_reported(&totals->cache_write_tokens, usage->cache_write_tokens);
-    add_reported(&totals->uncached_input_tokens, footer->uncached_input_tokens);
+    add_reported(&totals->uncached_input_tokens, record->uncached_input_tokens);
 
-    /* Nothing reported, nothing to price: a duration-only footer neither estimates nor waits
+    /* Nothing reported, nothing to price: a duration-only record neither estimates nor waits
      * for rates that could never apply to it. */
-    if (usage->input_tokens < 0 && usage->output_tokens < 0 && footer->cost_total < 0)
+    if (usage->input_tokens < 0 && usage->output_tokens < 0 && record->cost_total < 0)
         return;
 
-    double total = footer->cost_total;
-    int estimated = footer->cost_estimated;
+    double total = record->cost_total;
+    int estimated = record->cost_estimated;
     struct catalog_split split = {
-        .cost_input = footer->cost_input,
-        .cost_cache_read = footer->cost_cache_read,
-        .cost_cache_write = footer->cost_cache_write,
-        .cost_output = footer->cost_output,
+        .cost_input = record->cost_input,
+        .cost_cache_read = record->cost_cache_read,
+        .cost_cache_write = record->cost_cache_write,
+        .cost_output = record->cost_output,
     };
-    int split_known = footer->cost_input >= 0 && footer->cost_output >= 0;
+    int split_known = record->cost_input >= 0 && record->cost_output >= 0;
 
     struct catalog_entry rates;
     if ((total < 0 || !split_known) && (usage->input_tokens >= 0 || usage->output_tokens >= 0) &&
-        footer_rates(item, provider, &rates)) {
+        usage_rates(item, provider, &rates)) {
         struct catalog_split priced;
         double estimate =
             catalog_price(&rates, usage->input_tokens, usage->output_tokens, usage->cached_tokens,
@@ -147,7 +147,7 @@ static void account_item(struct agent_stats *stats, const struct item *item,
         if (item_is_typed_prompt(item))
             stats->inherited_user_turns++;
         else if (item->kind == ITEM_TURN_USAGE && item->usage)
-            account_footer(&stats->inherited, item, provider);
+            account_usage(&stats->inherited, item, provider);
         return;
     }
 
@@ -161,10 +161,10 @@ static void account_item(struct agent_stats *stats, const struct item *item,
         if (live)
             count_tool_call(stats, item->tool_name);
     } else if (item->kind == ITEM_TURN_USAGE && item->usage) {
-        account_footer(&stats->total, item, provider);
+        account_usage(&stats->total, item, provider);
         struct agent_stats_totals *bucket = model_bucket(stats, item);
         if (bucket)
-            account_footer(bucket, item, provider);
+            account_usage(bucket, item, provider);
     }
 }
 

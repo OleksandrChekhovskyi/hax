@@ -679,7 +679,7 @@ static void test_native_finish_error_on_close_without_sentinel(void)
     EVENTS_FIXTURE_FREE(capture, parser);
 }
 
-/* An upstream failure still leaves a usage footer, which owes the same attribution. */
+/* An upstream failure still leaves a usage record, which owes the same attribution. */
 static void test_response_identity_survives_native_error(void)
 {
     EVENTS_FIXTURE(capture, parser);
@@ -908,7 +908,7 @@ static void test_response_identity_survives_finalize_without_terminal(void)
     EVENTS_FIXTURE_FREE(capture, parser);
 }
 
-/* A truncated response still leaves a usage footer, which owes the same attribution. */
+/* A truncated response still leaves a usage record, which owes the same attribution. */
 static void test_response_identity_survives_truncation_error(void)
 {
     EVENTS_FIXTURE(capture, parser);

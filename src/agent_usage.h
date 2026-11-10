@@ -7,7 +7,7 @@
 #include "provider.h"
 
 /* Accounting for one provider response: usage arithmetic, the attempts one stream() call
- * served, and the priced usage footer appended to the conversation. Conversation totals are
+ * served, and the priced usage record appended to the conversation. Conversation totals are
  * agent_stats; display formatting is text/fmt. */
 
 #define ATTEMPT_LOG_MAX 8
@@ -55,7 +55,7 @@ int agent_usage_is_reported(const struct stream_usage *usage);
  * cost drops the aggregate to the estimated path. */
 void agent_usage_add(struct stream_usage *sum, const struct stream_usage *extra);
 
-/* Build an owned transcript footer payload. Returns NULL when neither usage nor duration was
+/* Build an owned usage record payload. Returns NULL when neither usage nor duration was
  * reported. The total uses reported cost when available; category costs are always estimates. */
 struct turn_usage *agent_turn_usage_new(const struct stream_usage *usage, long elapsed_ms,
                                         const struct provider *provider, const char *model);

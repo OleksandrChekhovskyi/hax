@@ -530,9 +530,9 @@ static struct agent_loop_result run_chain_hookless(struct agent_session *session
     return result;
 }
 
-/* A served retry is its own request: the loop appends one footer per attempt, the terminal
- * response's last, so the newest footer still measures the context window. */
-static void test_loop_records_footer_per_served_attempt(void)
+/* A served retry is its own request: the loop appends one usage record per attempt, the terminal
+ * response's last, so the newest usage record still measures the context window. */
+static void test_loop_records_usage_per_served_attempt(void)
 {
     struct agent_session session;
     session_init(&session);
@@ -598,7 +598,7 @@ static void test_loop_runs_tool_chain(void)
     EXPECT(result.last_context_tokens == 22);
     EXPECT(ctx.tools_seen == 1 && ctx.tools_run == 1);
     /* The returned range is presentation-safe: final streamed text only, not
-     * its usage footer or any prior call/result items. */
+     * its usage record or any prior call/result items. */
     EXPECT(result.final_items_to == result.final_items_from + 1);
     EXPECT_STR_EQ(session.items[result.final_items_from].text, "finished");
 
@@ -610,7 +610,7 @@ static void test_loop_runs_tool_chain(void)
         tool_results += session.items[i].kind == ITEM_TOOL_RESULT;
         usage_items += session.items[i].kind == ITEM_TURN_USAGE;
     }
-    /* Transcript structure stays one boundary and one footer per provider
+    /* Transcript structure stays one boundary and one usage record per provider
      * turn, with a matching result for every call. */
     EXPECT(boundaries == 2);
     EXPECT(tool_results == 1);
@@ -662,7 +662,7 @@ static void test_loop_cancels_tool_batch(void)
     EXPECT(ctx.tools_seen == 2);
     EXPECT(ctx.tools_run == 1);
     EXPECT(ctx.tools_skipped == 1);
-    /* The interrupted result carries the stop marker; the footer remains last
+    /* The interrupted result carries the stop marker; the usage record remains last
      * so it continues to describe the complete provider turn. */
     EXPECT_STR_EQ(session.items[session.n_items - 2].output, INTERRUPT_MARKER);
     EXPECT(session.items[session.n_items - 1].kind == ITEM_TURN_USAGE);
@@ -761,7 +761,7 @@ static void test_loop_pause_runs_whole_batch(void)
     EXPECT(!result.abort_marker_placed);
 
     /* The seam is clean: every call paired, no interrupt markers anywhere,
-     * usage footer trailing — history a later run can continue verbatim. */
+     * usage record trailing — history a later run can continue verbatim. */
     int calls = 0;
     int results = 0;
     for (size_t i = 0; i < session.n_items; i++) {
@@ -857,7 +857,7 @@ static void test_loop_pause_preempts_follow_up_leaves_no_boundary(void)
     struct agent_loop_result result = run_chain(&session, &provider, &ctx, 4);
     /* The pre-empted follow-up turn must leave no trace: no dangling
      * boundary (which the transcript would render as an empty turn), no
-     * marker, no footer — history still ends at turn 1's seam. */
+     * marker, no usage record — history still ends at turn 1's seam. */
     EXPECT(result.outcome == AGENT_LOOP_PAUSED);
     EXPECT(session.items[session.n_items - 1].kind == ITEM_TURN_USAGE);
 
@@ -946,7 +946,7 @@ static void test_loop_paused_retry_usage_keeps_boundary(void)
 
     struct agent_loop_result result = run_chain(&session, &provider, &ctx, 4);
     /* The pre-empted follow-up assembled nothing, but its dead attempt banked billable
-     * usage: that footer is retained and owes its boundary, or it would read as part of
+     * usage: that record is retained and owes its boundary, or it would read as part of
      * turn 1. */
     EXPECT(result.outcome == AGENT_LOOP_PAUSED);
     EXPECT(session.items[session.n_items - 1].kind == ITEM_TURN_USAGE);
@@ -1023,7 +1023,7 @@ static void test_loop_cancelled_retry_usage_keeps_boundary(void)
 
     struct agent_loop_result result = run_chain(&session, &provider, &ctx, 4);
     /* The cancelled follow-up assembled nothing, but its dead attempt banked
-     * billable usage: that footer is retained and owes its boundary, or it
+     * billable usage: that record is retained and owes its boundary, or it
      * would read as part of turn 1. */
     EXPECT(result.outcome == AGENT_LOOP_INTERRUPTED);
     EXPECT(!result.abort_marker_placed);
@@ -1065,7 +1065,7 @@ static void test_loop_empty_completion_keeps_boundary(void)
 
     struct agent_loop_result result = run_chain(&session, &provider, &ctx, 4);
     /* An empty but *completed* follow-up is a real round-trip: it owes its
-     * own boundary so its usage footer isn't attributed to the preceding
+     * own boundary so its usage record isn't attributed to the preceding
      * tool turn — only a pause-cancelled stream (no EV_DONE) leaves no
      * trace. */
     EXPECT(result.outcome == AGENT_LOOP_COMPLETE);
@@ -1079,7 +1079,7 @@ static void test_loop_empty_completion_keeps_boundary(void)
     }
     EXPECT(boundaries == 2);
     EXPECT(usage_items == 2);
-    /* The empty turn's representation is exactly boundary + footer. */
+    /* The empty turn's representation is exactly boundary + usage record. */
     EXPECT(session.items[session.n_items - 2].kind == ITEM_TURN_BOUNDARY);
     EXPECT(session.items[session.n_items - 1].kind == ITEM_TURN_USAGE);
 
@@ -1169,7 +1169,7 @@ static void test_loop_error_with_usage_keeps_boundary(void)
 
     struct agent_loop_result result = run_chain(&session, &provider, &ctx, 4);
     /* The failed follow-up produced no content but its reported usage is
-     * retained as a footer — which owes the boundary, or the footer would
+     * retained as a usage record — which owes the boundary, or the record would
      * read as part of the preceding tool turn. */
     EXPECT(result.outcome == AGENT_LOOP_PROVIDER_ERROR);
     EXPECT(!result.abort_marker_placed);
@@ -1205,7 +1205,7 @@ static void test_loop_reports_provider_error(void)
     struct agent_loop_result result;
     agent_loop_run(&params, &result);
     /* A billed partial failure is resumable: preserve and mark its text, expose
-     * the diagnostic, and retain the usage footer without continuing. */
+     * the diagnostic, and retain the usage record without continuing. */
     EXPECT(result.outcome == AGENT_LOOP_PROVIDER_ERROR);
     EXPECT_STR_EQ(result.error_message, "stream failed");
     EXPECT(result.turns == 1);
@@ -1404,7 +1404,7 @@ int main(void)
     test_cancel_of_thinking_only_turn_leaves_no_trace();
     test_cancel_keeps_text_but_drops_reasoning();
     test_cancel_keeps_sealed_reasoning_with_tool_call();
-    test_loop_records_footer_per_served_attempt();
+    test_loop_records_usage_per_served_attempt();
     test_empty_cancel_leaves_no_trace();
     test_loop_runs_tool_chain();
     test_loop_enforces_max_turns();

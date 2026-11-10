@@ -16,17 +16,17 @@ struct provider;
 #define AGENT_STATS_MAX_TOOLS  8
 #define AGENT_STATS_MAX_MODELS 8
 
-/* Token and spend totals over a set of usage footers. Token counters sum reported values. */
+/* Token and spend totals over a set of usage records. Token counters sum reported values. */
 struct agent_stats_totals {
-    long requests; /* footers, one per request the provider served */
+    long requests; /* usage records, one per request the provider served */
     long input_tokens;
     long output_tokens;
     long cached_tokens;
     long cache_write_tokens;
     long uncached_input_tokens;
-    double spend;        /* USD; exact when no footer is estimated */
-    int spend_estimated; /* some footer lacks a reported cost, or could not be priced at all */
-    int unpriced;        /* some footer has neither a reported cost nor rates to estimate one */
+    double spend;        /* USD; exact when no record is estimated */
+    int spend_estimated; /* some record lacks a reported cost, or could not be priced at all */
+    int unpriced;        /* some record has neither a reported cost nor rates to estimate one */
     struct catalog_split split; /* category estimates; valid when split_available */
     int split_available;
 };
@@ -69,7 +69,7 @@ int agent_format_stats_segments(char segments[][AGENT_STATS_SEGMENT_LEN], long c
 /* Derive the accounting of a session from its items: the live conversation from `from_item` on
  * and the retired items from `from_retired` on, so a run scoped to what it appended passes the
  * counts it started with. Inherited items feed only `inherited`. `provider` may be NULL; when it
- * produced a footer that was recorded before rates were known, its live rates price it. Borrowed
+ * produced a usage record written before rates were known, its live rates price it. Borrowed
  * strings in `out` stay valid until the session's items change. */
 void agent_stats_collect(const struct agent_session *session, size_t from_item, size_t from_retired,
                          const struct provider *provider, struct agent_stats *out);

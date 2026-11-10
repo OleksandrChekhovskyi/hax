@@ -15,7 +15,7 @@ static void print_report(void *state)
     session_command(state);
 }
 
-/* One user turn: prompt, reply, and a footer whose costs are given directly, as a provider
+/* One user turn: prompt, reply, and a usage record whose costs are given directly, as a provider
  * that reports charges would leave them. */
 static void add_priced_user_turn(struct agent_session *session, const char *provider,
                                  const char *model, long input, long output, long cached,

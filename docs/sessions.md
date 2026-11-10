@@ -74,11 +74,11 @@ Conversation records, in order. `kind` is one of:
 | `tool_result` | The paired result: `call_id`, `output`, and optionally `images`. |
 | `reasoning` | Provider reasoning state (`reasoning_json`/`reasoning_text`) with its `provider`/`model`; `reasoning_field` names the Chat Completions field the text streamed in. |
 | `turn_boundary` | Separates provider round-trips ("turns"). The first one precedes the user prompt. |
-| `turn_usage` | Usage footer for one round-trip; see below. |
+| `turn_usage` | Token usage, timing, and cost of one round-trip; see below. |
 
 `origin` marks synthetic records: `compact_seed` (a compaction summary), `continuation`,
 `interrupted`, `skipped`, `refused`, `summarized`, `task_note` (a background-task report), and
-`compaction` (a `turn_usage` footer for a summarization request rather than an agent turn).
+`compaction` (a `turn_usage` record for a summarization request rather than an agent turn).
 Items without `origin` are ordinary typed or streamed content. `inherited: true` marks items
 `/fork` copied from the source session: context this conversation reads but did not pay for.
 
@@ -86,8 +86,8 @@ A `turn_usage` item carries `provider`, `model`, and a `usage` object: token cou
 `output`, `cached`, `cache_write`, and `in_tokens` for uncached input), `elapsed_ms`, a cost
 breakdown ending in `cost_total` (`cost_estimated: true` when derived from catalog prices), and
 provenance such as `served_model`, `route`, and `response_id`. Unknown values are omitted. One
-footer is written per request the provider served: an attempt that died mid-stream and was
-retried gets its own footer ahead of the terminal response's.
+`turn_usage` record is written per request the provider served: an attempt that died mid-stream
+and was retried gets its own record ahead of the terminal response's.
 
 ## The one-shot `--json` stream
 

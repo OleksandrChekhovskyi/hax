@@ -402,8 +402,8 @@ void agent_session_add_boundary(struct agent_session *session)
 
 void agent_session_mark_interrupt(struct agent_session *session)
 {
-    /* Look past inert trailing items (usage footers, boundaries) to the
-     * last *content* item — footer emission between the tool batch and
+    /* Look past inert trailing items (usage records, boundaries) to the
+     * last *content* item — a usage record between the tool batch and
      * this check must not hide an already-marked result and provoke a
      * duplicate marker. */
     size_t i = session->n_items;
@@ -439,22 +439,13 @@ enum agent_resume_tail agent_session_resume_tail(const struct agent_session *ses
     return AGENT_RESUME_TAIL_EMPTY;
 }
 
-static long footer_window_tokens(const struct item *item)
-{
-    if (item->kind != ITEM_TURN_USAGE || !item->usage || item->origin == ITEM_ORIGIN_COMPACTION)
-        return -1;
-    const struct stream_usage *usage = &item->usage->usage;
-    if (usage->input_tokens < 0 || usage->output_tokens < 0)
-        return -1;
-    return usage->input_tokens + usage->output_tokens;
-}
-
-/* Index in `window` of the newest footer reporting the conversation's window use, or n_items. */
-static size_t window_usage_anchor(const struct context *window)
+/* Window use the newest usage record in `window` reports, or -1 when none does. `at`, when
+ * non-NULL, receives the record's index. */
+static long last_context_tokens(const struct context *window, size_t *at)
 {
     /* A summarization request reports the window it summarized, not the conversation's: reading
      * it after a successful compaction would immediately recompact the seed, and after a failed
-     * one it would stand in for the last agent turn. Footers recorded before origins were
+     * one it would stand in for the last agent turn. Usage records written before origins were
      * stamped are recognized by position, right after the seed. */
     size_t floor = 0;
     if (window->n_items > 0 && window->items[0].origin == ITEM_ORIGIN_COMPACT_SEED) {
@@ -462,39 +453,46 @@ static size_t window_usage_anchor(const struct context *window)
         while (floor < window->n_items && window->items[floor].kind == ITEM_TURN_USAGE)
             floor++;
     }
-    for (size_t i = window->n_items; i-- > floor;)
-        if (footer_window_tokens(&window->items[i]) >= 0)
-            return i;
-    return window->n_items;
+    for (size_t i = window->n_items; i-- > floor;) {
+        const struct item *item = &window->items[i];
+        if (item->kind != ITEM_TURN_USAGE || !item->usage || item->origin == ITEM_ORIGIN_COMPACTION)
+            continue;
+        const struct stream_usage *usage = &item->usage->usage;
+        if (usage->input_tokens >= 0 && usage->output_tokens >= 0) {
+            if (at)
+                *at = i;
+            return usage->input_tokens + usage->output_tokens;
+        }
+    }
+    return -1;
 }
 
 long agent_session_last_context_tokens(const struct agent_session *session)
 {
     struct context window = agent_session_context(session);
-    size_t anchor = window_usage_anchor(&window);
-    return anchor < window.n_items ? footer_window_tokens(&window.items[anchor]) : -1;
+    return last_context_tokens(&window, NULL);
 }
 
 long agent_session_context_estimate(const struct agent_session *session)
 {
     struct context window = agent_session_context(session);
-    size_t anchor = window_usage_anchor(&window);
-    if (anchor == window.n_items)
+    size_t at;
+    long tokens = last_context_tokens(&window, &at);
+    if (tokens < 0)
         return -1;
 
-    long tokens = footer_window_tokens(&window.items[anchor]);
-    /* A turn's footer follows the tool results that answer its response, so results between the
-     * turn's boundary and the footer were not part of the request it measures. */
-    size_t turn_start = anchor;
+    /* A turn's usage record follows the tool results that answer its response, so results
+     * between the turn's boundary and the record were not part of the request it measures. */
+    size_t turn_start = at;
     while (turn_start > 0 && window.items[turn_start - 1].kind != ITEM_TURN_BOUNDARY)
         turn_start--;
-    for (size_t i = turn_start; i < anchor; i++)
+    for (size_t i = turn_start; i < at; i++)
         if (window.items[i].kind == ITEM_TOOL_RESULT)
             tokens += items_token_estimate(&window.items[i], 1);
-    return tokens + items_token_estimate(window.items + anchor + 1, window.n_items - anchor - 1);
+    return tokens + items_token_estimate(window.items + at + 1, window.n_items - at - 1);
 }
 
-static int footer_reports_tokens(const struct item *item)
+static int usage_reports_tokens(const struct item *item)
 {
     if (item->kind != ITEM_TURN_USAGE || !item->usage)
         return 0;
@@ -505,12 +503,12 @@ static int footer_reports_tokens(const struct item *item)
 int agent_session_has_reported_usage(const struct agent_session *session)
 {
     for (size_t i = 0; i < session->n_items; i++) {
-        if (footer_reports_tokens(&session->items[i]))
+        if (usage_reports_tokens(&session->items[i]))
             return 1;
     }
-    /* A retired inherited footer is neither this session's context nor its bill. */
+    /* A retired inherited usage record is neither this session's context nor its bill. */
     for (size_t i = 0; i < session->n_retired; i++) {
-        if (!session->retired[i].inherited && footer_reports_tokens(&session->retired[i]))
+        if (!session->retired[i].inherited && usage_reports_tokens(&session->retired[i]))
             return 1;
     }
     return 0;

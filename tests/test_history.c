@@ -779,7 +779,7 @@ static void test_empty_and_out_of_range_slices(void)
 }
 
 /* Turn plumbing is deliberately not part of this view — boundaries and
- * usage footers belong to the transcript and /session. Pinned so a later
+ * usage records belong to the transcript and /session. Pinned so a later
  * change doesn't start leaking per-turn accounting into the conversation. */
 static void test_turn_plumbing_not_rendered(void)
 {

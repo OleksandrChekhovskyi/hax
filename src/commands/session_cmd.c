@@ -177,7 +177,7 @@ void session_command(struct agent_state *state)
      * tokens billed at different rates. */
     if (stats.total.input_tokens > 0 || stats.total.output_tokens > 0) {
         if (stats.n_models > 1) {
-            /* Each row reads like a transcript footer: the model's spend, then its tokens. */
+            /* Each row reads like a turn's usage line: the model's spend, then its tokens. */
             for (size_t i = 0; i < stats.n_models; i++) {
                 const struct agent_stats_model *entry = &stats.models[i];
                 char tokens[200];

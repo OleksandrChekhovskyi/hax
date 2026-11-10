@@ -169,7 +169,7 @@ static void test_tab_expanded_to_four_spaces(void)
     EXPECT(strstr(out, "        hello") != NULL);
 }
 
-static void test_head_only_exceeds_cap_emits_footer(void)
+static void test_head_only_exceeds_cap_emits_marker(void)
 {
     char in[8000];
     size_t n = 0;
@@ -408,7 +408,7 @@ static void test_head_tail_blank_only_suppression_no_phantom_marker(void)
     EXPECT(strstr(out, "more byte") == NULL);
 }
 
-static void test_blank_lines_after_cap_dont_emit_phantom_footer(void)
+static void test_blank_lines_after_cap_dont_emit_phantom_marker(void)
 {
     char in[256];
     size_t n = 0;
@@ -567,7 +567,7 @@ int main(void)
     test_whitespace_only_lines_elided();
     test_indented_content_preserved();
     test_tab_expanded_to_four_spaces();
-    test_head_only_exceeds_cap_emits_footer();
+    test_head_only_exceeds_cap_emits_marker();
     test_head_tail_under_cap_shows_all_lines();
     test_head_tail_exceeds_cap_emits_marker_and_tail();
     test_head_tail_modest_overflow_replays_inline();
@@ -585,7 +585,7 @@ int main(void)
     test_ctrl_bytes_dropped_before_render();
     test_emit_callback_sets_flag();
     test_finalize_is_idempotent();
-    test_blank_lines_after_cap_dont_emit_phantom_footer();
+    test_blank_lines_after_cap_dont_emit_phantom_marker();
     test_head_tail_blank_only_suppression_no_phantom_marker();
     test_head_tail_renders_long_suppressed_line();
     test_head_only_partial_trailing_counted_as_one_line();
