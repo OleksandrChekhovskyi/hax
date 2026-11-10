@@ -92,7 +92,6 @@ void render_stream_begin(struct render_ctx *render)
     render_retry_end(render);
     render->retry.next_attempt = 0;
     render->retry.max_attempts = 0;
-    render->stream.content_seen = 0;
     render->stream.answer_started = 0;
     render->stream.output_rendered = 0;
 
@@ -124,7 +123,6 @@ void render_stream_retry(struct render_ctx *render, int failed_attempt, int max_
         disp_putc(&render->disp, '\n');
         render_set_mode(render, RENDER_WAITING);
     }
-    render->stream.content_seen = 0;
     render->stream.answer_started = 0;
     render->stream.output_rendered = 0;
     if (render->md)

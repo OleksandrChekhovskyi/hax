@@ -2,6 +2,7 @@
 #ifndef HAX_COMPACT_H
 #define HAX_COMPACT_H
 
+#include "agent_stream.h"
 #include "provider.h"
 
 struct agent_session;
@@ -21,13 +22,14 @@ enum compact_outcome {
     COMPACT_NO_SUMMARY,
 };
 
-/* `on_event` is for frontend accounting; its return value is ignored. `is_cancelled` is sampled
- * after streaming and may reject an otherwise complete summary. All callbacks are optional. */
+/* The user's stop request while compacting. `poll` is sampled while a summary streams, and a
+ * signal cuts it when agent_signal_stops() says so. `checkpoint` settles the request once
+ * streaming ends: an abort then rejects even a complete summary, a pause only a request it cut.
+ * Both are optional. */
 struct compact_hooks {
     void *user;
-    stream_cb on_event;
-    http_tick_cb tick;
-    int (*is_cancelled)(void *user);
+    agent_signal_cb poll;
+    agent_signal_cb checkpoint;
 };
 
 /* All pointers are borrowed for the duration of compact_run. `session` must be non-NULL;
@@ -49,18 +51,17 @@ struct compact_result {
 
 /* Summarize the current model-visible context and append a seed on success. Every attempt's
  * reported usage is appended to the session and both logs are flushed. The result owns
- * `error_message`. */
+ * `error_message`, which is NULL unless the provider reported one. */
 void compact_run(const struct compact_params *params, struct compact_result *result);
 void compact_result_destroy(struct compact_result *result);
-
-/* Read the compact.auto setting. Manual compaction does not consult it. */
-int compact_auto_enabled(void);
 
 /* Return whether `context_tokens` is at least `threshold_percent` of `context_limit`. Invalid token
  * counts, a non-positive limit, or a percentage outside 1..100 do not trigger compaction. */
 int compact_over_threshold(long context_tokens, long context_limit, int threshold_percent);
 
-/* Apply compact.auto and compact.threshold to the latest context usage. */
-int compact_should_auto(long context_tokens, long context_limit);
+/* Whether the next request should be preceded by compaction: compact.auto and
+ * compact.threshold applied to the session's latest recorded window use against the current
+ * model's context limit. `provider` may be NULL. */
+int compact_due(const struct agent_session *session, struct provider *provider);
 
 #endif /* HAX_COMPACT_H */

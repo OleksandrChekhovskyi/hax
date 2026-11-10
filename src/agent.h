@@ -30,7 +30,6 @@ struct agent_state {
     char *pending_recall;  /* owned prompt to add to editor recall after a slash command */
     char *pending_preseed; /* owned text to seed into the next prompt */
     enum agent_resume_reason resume_reason;
-    int compaction_deferred; /* settle before appending the next prompt */
 };
 
 /* Run the interactive REPL. A provider switch destroys the old provider and updates *provider_io.
@@ -80,8 +79,11 @@ void agent_apply_settings(struct agent_state *state, struct provider *provider,
 /* Rebuild display settings between provider streams. */
 void agent_display_refresh(struct agent_state *state);
 
-/* Replace history with a streamed summary. `instructions` may be NULL. Automatic calls suppress
- * no-op notices. Returns 1 only when history was replaced. */
+/* Compact the conversation on its own: watch for Esc, append a summary seed that stands in for
+ * the older history, and hide the "compacting..." spinner when done. `instructions` may be NULL.
+ * Automatic calls suppress no-op notices. One Esc cancels only before the summary starts streaming
+ * and otherwise stays latched for the caller; a second cancels. Returns 1 only when a seed was
+ * appended. */
 int agent_compact(struct agent_state *state, const char *instructions, int automatic);
 
 #endif /* HAX_AGENT_H */

@@ -5,12 +5,12 @@
 #include <string.h>
 
 #include "agent_core.h"
+#include "agent_stream.h"
 #include "agent_usage.h"
 #include "config.h"
 #include "model_meta.h"
 #include "provider.h"
 #include "session.h"
-#include "transcript.h"
 #include "turn.h"
 #include "xalloc.h"
 
@@ -62,7 +62,7 @@ static const char COMPACT_SEED_PREAMBLE[] =
     "below captures everything that happened before this point — treat it as established "
     "context and continue the work from here.";
 
-int compact_auto_enabled(void)
+static int compact_auto_enabled(void)
 {
     return config_bool("compact.auto");
 }
@@ -79,11 +79,19 @@ int compact_over_threshold(long context_tokens, long context_limit, int threshol
     return context_tokens >= threshold_tokens;
 }
 
-int compact_should_auto(long context_tokens, long context_limit)
+static int compact_should_auto(long context_tokens, long context_limit)
 {
     if (!compact_auto_enabled())
         return 0;
     return compact_over_threshold(context_tokens, context_limit, config_int("compact.threshold"));
+}
+
+int compact_due(const struct agent_session *session, struct provider *provider)
+{
+    if (!provider || !session->model)
+        return 0;
+    return compact_should_auto(agent_session_last_context_tokens(session),
+                               model_meta_context(provider, session->model));
 }
 
 static char *build_summary_prompt(const char *instructions)
@@ -101,13 +109,6 @@ static char *build_summary_seed(const char *summary)
 
 #define COMPACT_MAX_ATTEMPTS 4
 
-struct compact_sink {
-    struct turn turn;
-    struct attempt_log attempt_log;
-    const struct compact_hooks *hooks;
-    char *error_message;
-};
-
 struct summary_request {
     struct context base_context;
     struct item *items;
@@ -115,32 +116,6 @@ struct summary_request {
     size_t capacity;
     size_t borrowed_count;
 };
-
-static int compact_sink_on_event(const struct stream_event *event, void *user)
-{
-    struct compact_sink *sink = user;
-    const struct stream_usage *usage = NULL;
-    const struct stream_response *response = NULL;
-
-    if (event->kind == EV_DONE) {
-        usage = &event->u.done.usage;
-        response = &event->u.done.response;
-    } else if (event->kind == EV_ERROR) {
-        if (!sink->error_message)
-            sink->error_message =
-                xstrdup(event->u.error.message ? event->u.error.message : "stream failed");
-        usage = event->u.error.usage;
-        response = event->u.error.response;
-    } else if (event->kind == EV_RETRY) {
-        attempt_log_retry(&sink->attempt_log, event->u.retry.usage, event->u.retry.delay_ms);
-    }
-    if (usage)
-        attempt_log_record(&sink->attempt_log, usage, response);
-    if (sink->hooks->on_event)
-        sink->hooks->on_event(event, sink->hooks->user);
-    turn_consume(&sink->turn, event);
-    return 0;
-}
 
 /* Ownership of `item` transfers to `request`. */
 static void summary_request_append(struct summary_request *request, struct item item)
@@ -231,7 +206,7 @@ static void append_rejected_response(struct summary_request *request, struct ite
     }
 }
 
-static char *generate_summary(const struct compact_params *params, struct compact_sink *sink,
+static char *generate_summary(const struct compact_params *params, struct agent_stream *stream,
                               int *attempt_count)
 {
     struct summary_request request;
@@ -245,15 +220,14 @@ static char *generate_summary(const struct compact_params *params, struct compac
         context.items = request.items;
         context.n_items = request.count;
         (*attempt_count)++;
-        params->provider->stream(params->provider, &context, params->session->model,
-                                 compact_sink_on_event, sink, params->hooks.tick,
-                                 params->hooks.user);
+        agent_stream_request(stream, params->provider, &context, params->session->model, NULL, NULL,
+                             params->hooks.poll, params->hooks.user);
 
-        if (sink->turn.state != TURN_DONE)
+        if (stream->assembly.state != TURN_DONE)
             break;
 
         size_t response_count;
-        struct item *response = turn_take_items(&sink->turn, &response_count);
+        struct item *response = turn_take_items(&stream->assembly, &response_count);
         if (!response_has_tool_call(response, response_count)) {
             summary = extract_summary(response, response_count);
             free_items(response, response_count);
@@ -265,7 +239,6 @@ static char *generate_summary(const struct compact_params *params, struct compac
         }
 
         append_rejected_response(&request, response, response_count);
-        turn_reset(&sink->turn);
     }
 
     summary_request_destroy(&request);
@@ -285,23 +258,16 @@ static void append_summary_seed(struct agent_session *session, const char *summa
 
 static void flush_compaction_logs(const struct compact_params *params)
 {
-    transcript_log_append(params->transcript_log, params->session->items, params->session->n_items);
-    session_log_append(params->session_log, params->session->items, params->session->n_items);
+    agent_flush_logs(params->transcript_log, params->session_log, params->session->items,
+                     params->session->n_items);
 }
 
 static void append_attempt_usage(const struct compact_params *params, const struct attempt_log *log,
                                  size_t first, size_t end)
 {
-    for (size_t i = first; i < end; i++) {
-        struct stream_response response = {
-            .id = log->attempts[i].response_id,
-            .model = log->attempts[i].served_model,
-            .route = log->attempts[i].route,
-        };
-        agent_session_add_turn_usage(params->session, params->provider, &log->attempts[i].usage,
-                                     log->attempts[i].elapsed_ms, &response,
-                                     ITEM_ORIGIN_COMPACTION);
-    }
+    for (size_t i = first; i < end; i++)
+        agent_session_add_attempt_usage(params->session, params->provider, &log->attempts[i],
+                                        ITEM_ORIGIN_COMPACTION);
 }
 
 void compact_run(const struct compact_params *params, struct compact_result *result)
@@ -326,39 +292,42 @@ void compact_run(const struct compact_params *params, struct compact_result *res
                              params->session->model, params->session->model_label,
                              params->session->effort, config_str("preset"));
 
-    struct compact_sink sink = {.hooks = &params->hooks};
-    turn_init(&sink.turn);
-    attempt_log_init(&sink.attempt_log);
-    char *summary = generate_summary(params, &sink, &result->attempts);
-    int cancelled = params->hooks.is_cancelled && params->hooks.is_cancelled(params->hooks.user);
+    struct agent_stream stream;
+    agent_stream_init(&stream);
+    char *summary = generate_summary(params, &stream, &result->attempts);
+    /* An abort rejects even a complete summary; a pause rejects only the request it cut. */
+    enum agent_signal signal =
+        params->hooks.checkpoint ? params->hooks.checkpoint(params->hooks.user) : AGENT_SIGNAL_NONE;
+    int cancelled = signal == AGENT_SIGNAL_ABORT || agent_stream_cut_by(&stream, signal);
     if (cancelled) {
         free(summary);
         summary = NULL;
     }
-    turn_reset(&sink.turn);
-    result->error_message = sink.error_message;
+    result->error_message = stream.error_message;
+    stream.error_message = NULL;
+    const struct attempt_log *attempts = &stream.attempts;
 
     if (!summary || !*summary) {
-        append_attempt_usage(params, &sink.attempt_log, 0, sink.attempt_log.count);
-        attempt_log_free(&sink.attempt_log);
-        flush_compaction_logs(params);
-        free(summary);
         if (cancelled)
             result->outcome = COMPACT_CANCELLED;
-        else if (result->error_message)
+        else if (stream.assembly.state == TURN_FAILED)
             result->outcome = COMPACT_PROVIDER_ERROR;
         else
             result->outcome = COMPACT_NO_SUMMARY;
+        append_attempt_usage(params, attempts, 0, attempts->count);
+        agent_stream_destroy(&stream);
+        flush_compaction_logs(params);
+        free(summary);
         return;
     }
 
     /* Rejected attempts are part of the summarized prefix; accepted usage follows the seed. */
-    size_t accepted_usage_index = sink.attempt_log.count ? sink.attempt_log.count - 1 : 0;
-    append_attempt_usage(params, &sink.attempt_log, 0, accepted_usage_index);
+    size_t accepted_usage_index = attempts->count ? attempts->count - 1 : 0;
+    append_attempt_usage(params, attempts, 0, accepted_usage_index);
     append_summary_seed(params->session, summary);
     free(summary);
-    append_attempt_usage(params, &sink.attempt_log, accepted_usage_index, sink.attempt_log.count);
-    attempt_log_free(&sink.attempt_log);
+    append_attempt_usage(params, attempts, accepted_usage_index, attempts->count);
+    agent_stream_destroy(&stream);
     flush_compaction_logs(params);
     result->outcome = COMPACT_COMPLETE;
 }

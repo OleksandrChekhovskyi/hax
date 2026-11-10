@@ -37,7 +37,6 @@ struct render_ctx {
     } retry;
 
     struct {
-        int content_seen; /* the current stream has content a pause must preserve */
         int answer_started;
         int output_rendered; /* the current attempt wrote text or reasoning to the terminal */
     } stream;

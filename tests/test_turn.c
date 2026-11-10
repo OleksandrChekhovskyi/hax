@@ -516,6 +516,33 @@ static void test_reset_before_done_frees_partial_state(void)
     EXPECT(t.n_pending_calls == 0);
 }
 
+static void test_has_content(void)
+{
+    struct turn t;
+    turn_init(&t);
+    EXPECT(!turn_has_content(&t));
+    feed_reasoning(&t, "");
+    EXPECT(!turn_has_content(&t)); /* an empty delta carries nothing */
+    feed_reasoning(&t, "thinking");
+    EXPECT(turn_has_content(&t));
+    turn_reset(&t);
+
+    feed_tool_start(&t, "c1", "bash");
+    EXPECT(turn_has_content(&t)); /* a call still pending */
+    turn_reset(&t);
+
+    feed_text(&t, "partial");
+    EXPECT(turn_has_content(&t));
+    struct stream_event retry = {.kind = EV_RETRY};
+    turn_consume(&t, &retry);
+    EXPECT(!turn_has_content(&t)); /* the retry re-streams from scratch */
+
+    feed_text(&t, "answer");
+    feed_done(&t);
+    EXPECT(turn_has_content(&t)); /* flushed into an item */
+    turn_reset(&t);
+}
+
 int main(void)
 {
     test_empty_stream();
@@ -545,5 +572,6 @@ int main(void)
     test_take_items_zeros_vector();
     test_reset_after_take_is_noop_for_items();
     test_reset_before_done_frees_partial_state();
+    test_has_content();
     T_REPORT();
 }

@@ -147,7 +147,6 @@ static void test_stream_begin_resets_per_stream_state(void)
     fixture.render.retry.deadline_ms = 20;
     fixture.render.retry.next_attempt = 2;
     fixture.render.retry.max_attempts = 3;
-    fixture.render.stream.content_seen = 1;
     fixture.render.stream.answer_started = 1;
     render_stream_begin(&fixture.render);
 
@@ -155,7 +154,6 @@ static void test_stream_begin_resets_per_stream_state(void)
     EXPECT(fixture.render.retry.deadline_ms == 0);
     EXPECT(fixture.render.retry.next_attempt == 0);
     EXPECT(fixture.render.retry.max_attempts == 0);
-    EXPECT(!fixture.render.stream.content_seen);
     EXPECT(!fixture.render.stream.answer_started);
     fixture_destroy(&fixture);
 }
@@ -169,13 +167,13 @@ static void test_stream_begin_preserves_tool_cluster(void)
     render_set_mode(&fixture.render, RENDER_TOOL_CLUSTER);
     fixture.render.cluster.last_tool = "read";
     fixture.render.cluster.line_open = 1;
-    fixture.render.stream.content_seen = 1;
+    fixture.render.stream.answer_started = 1;
     render_stream_begin(&fixture.render);
 
     EXPECT(fixture.render.mode == RENDER_TOOL_CLUSTER);
     EXPECT_STR_EQ(fixture.render.cluster.last_tool, "read");
     EXPECT(fixture.render.cluster.line_open);
-    EXPECT(!fixture.render.stream.content_seen);
+    EXPECT(!fixture.render.stream.answer_started);
     fixture_destroy(&fixture);
 }
 
@@ -191,7 +189,6 @@ static void test_stream_retry_marks_rendered_output(void)
 
     EXPECT(strstr(fixture_output(&fixture), "[unexpected end]") != NULL);
     EXPECT(fixture.render.mode == RENDER_WAITING);
-    EXPECT(!fixture.render.stream.content_seen);
     EXPECT(!fixture.render.stream.answer_started);
     EXPECT(!fixture.render.stream.output_rendered);
     fixture_destroy(&fixture);
@@ -203,12 +200,12 @@ static void test_stream_retry_silent_without_output(void)
     if (!fixture_init(&fixture))
         return;
 
-    fixture.render.stream.content_seen = 1;
+    fixture.render.stream.answer_started = 1;
     render_stream_retry(&fixture.render, 1, 3, 1000);
 
     EXPECT_STR_EQ(fixture_output(&fixture), "");
     EXPECT(fixture.render.mode == RENDER_IDLE);
-    EXPECT(!fixture.render.stream.content_seen);
+    EXPECT(!fixture.render.stream.answer_started);
     fixture_destroy(&fixture);
 }
 

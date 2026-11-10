@@ -5,9 +5,9 @@
 #include <string.h>
 
 #include "agent_env.h"
+#include "agent_stream.h"
 #include "agent_usage.h"
 #include "buf.h"
-#include "compact.h"
 #include "config.h"
 #include "diag.h"
 #include "effort.h"
@@ -19,6 +19,7 @@
 #include "turn.h"
 #include "xalloc.h"
 #include "providers/registry.h"
+#include "terminal/interrupt.h"
 #include "tools/bash_env.h"
 #include "tools/task_registry.h"
 
@@ -506,11 +507,6 @@ void agent_session_prepare_resumed(struct agent_session *session, struct provide
 
     settle_resumed_metadata(provider, session);
     out->tail = agent_session_resume_tail(session);
-    /* A pause stops before the loop's compact seam, so the record may end over the threshold;
-     * the run that continues it owes the pre-send pass. */
-    if (provider && session->model)
-        out->compact_owed = compact_should_auto(agent_session_last_context_tokens(session),
-                                                model_meta_context(provider, session->model));
 }
 
 /* An ordinary session then stores nothing extra, while a renamed provider or a gguf path still
@@ -577,6 +573,18 @@ struct agent_absorb_result agent_session_absorb(struct agent_session *session, s
     return result;
 }
 
+void agent_session_add_attempt_usage(struct agent_session *session, const struct provider *provider,
+                                     const struct attempt *attempt, enum item_origin origin)
+{
+    struct stream_response response = {
+        .id = attempt->response_id,
+        .model = attempt->served_model,
+        .route = attempt->route,
+    };
+    agent_session_add_turn_usage(session, provider, &attempt->usage, attempt->elapsed_ms, &response,
+                                 origin);
+}
+
 void agent_flush_logs(struct transcript_log *tlog, struct session_log *slog,
                       const struct item *items, size_t n_items)
 {
@@ -600,4 +608,14 @@ void agent_finalize_tasks(struct agent_session *session, struct transcript_log *
     session_log_discard_selection(slog);
     agent_flush_logs(tlog, slog, session->items, session->n_items);
     task_registry_shutdown();
+}
+
+enum agent_signal agent_interrupt_signal(void)
+{
+    /* An abort latches a pause too, so read it first. */
+    if (interrupt_abort_requested())
+        return AGENT_SIGNAL_ABORT;
+    if (interrupt_pause_requested())
+        return AGENT_SIGNAL_PAUSE;
+    return AGENT_SIGNAL_NONE;
 }

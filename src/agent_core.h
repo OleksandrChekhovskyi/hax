@@ -4,6 +4,7 @@
 
 #include <stddef.h>
 
+#include "agent_stream.h"
 #include "provider.h"
 #include "tool.h"
 
@@ -11,7 +12,7 @@
  * the canonical flat item log (struct agent_session) with its views and mutators, and the
  * helpers that keep the record consistent with its logs and background tasks. Anything here
  * must behave identically in both frontends and needs no live provider stream — provider
- * round-trips belong in agent_loop, presentation in the frontends. */
+ * round-trips belong in agent_stream and agent_loop, presentation in the frontends. */
 
 /* Synthetic history content used to keep interrupted or refused tool turns well formed. */
 #define INTERRUPT_MARKER "[interrupted]"
@@ -121,6 +122,10 @@ void agent_session_add_turn_usage(struct agent_session *session, const struct pr
                                   const struct stream_usage *usage, long elapsed_ms,
                                   const struct stream_response *response, enum item_origin origin);
 
+/* As agent_session_add_turn_usage, for one served attempt of a request. */
+void agent_session_add_attempt_usage(struct agent_session *session, const struct provider *provider,
+                                     const struct attempt *attempt, enum item_origin origin);
+
 /* Add an interrupt marker unless the latest content is an already-marked tool result. */
 void agent_session_mark_interrupt(struct agent_session *session);
 
@@ -142,7 +147,6 @@ struct transcript_log;
 struct agent_resumed {
     struct session_log *session_log; /* owned; NULL unless recording reopened the file */
     enum agent_resume_tail tail;
-    int compact_owed; /* the record ends over the compaction threshold: compact before sending */
 };
 
 /* Bind an adopted record at `path` to the run continuing it: reopen the file for appending when
@@ -189,5 +193,8 @@ void agent_flush_logs(struct transcript_log *tlog, struct session_log *slog,
  * shutdown destroys, and no completion is announced into an unrelated conversation. */
 void agent_finalize_tasks(struct agent_session *session, struct transcript_log *tlog,
                           struct session_log *slog);
+
+/* The latched interrupt requests as a stop signal. */
+enum agent_signal agent_interrupt_signal(void);
 
 #endif /* HAX_AGENT_CORE_H */

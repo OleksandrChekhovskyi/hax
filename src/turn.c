@@ -173,6 +173,11 @@ static void finish_tool_call(struct turn *turn, const char *id)
     turn->n_pending_calls--;
 }
 
+int turn_has_content(const struct turn *turn)
+{
+    return turn->n_items > 0 || turn->has_text || turn->has_reasoning || turn->n_pending_calls > 0;
+}
+
 void turn_consume(struct turn *turn, const struct stream_event *event)
 {
     if (turn->state != TURN_STREAMING)

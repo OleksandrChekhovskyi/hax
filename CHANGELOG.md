@@ -25,6 +25,13 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 - The model now always knows that `--preset <name>` starts a subagent with one of your presets,
   so asking for a preset by name works even when no preset has a description. Presets with a
   description are still the only ones listed for the model to pick on its own.
+- Automatic compaction waits until the conversation goes on instead of running as soon as a
+  reply ends, so a conversation you leave is never summarized for nothing.
+- A single Esc no longer discards a compaction once its summary has started: hax finishes it,
+  then pauses. Press Esc again to cancel it. If the compaction ran for a message you just sent,
+  the message goes back to the prompt unsent.
+- In one-shot mode, SIGUSR1 now pauses the way Esc does: it lets a compaction finish, and stops
+  at once if the model has not started answering.
 
 ## [0.6.1] - 2026-10-15
 

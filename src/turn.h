@@ -55,6 +55,10 @@ void turn_discard_reasoning(struct turn *turn);
  * calls that never ran misleads the model on the retry. */
 void turn_keep_text(struct turn *turn);
 
+/* True once the current attempt has streamed assistant text, reasoning, or a tool call, open or
+ * assembled. A retry discards the dead attempt's content. */
+int turn_has_content(const struct turn *turn);
+
 /* Transfer the assembled item vector to the caller. `out_count` may be NULL. */
 struct item *turn_take_items(struct turn *turn, size_t *out_count);
 

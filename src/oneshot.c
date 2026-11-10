@@ -12,6 +12,7 @@
 #include "agent_core.h"
 #include "agent_loop.h"
 #include "agent_stats.h"
+#include "agent_stream.h"
 #include "buf.h"
 #include "catalog.h"
 #include "compact.h"
@@ -37,7 +38,6 @@ struct oneshot_state {
     /* Resumed history, live and undone, precedes this run's own records. */
     size_t run_from_item;
     size_t run_from_retired;
-    int compact_owed; /* the resumed record ends over the threshold: compact before sending */
     long started_ms;
     long context_tokens;
     int json;           /* stream conversation records as JSONL on stdout */
@@ -45,12 +45,11 @@ struct oneshot_state {
     int json_errno;     /* first stream-write failure; 0 while the stream is healthy */
 };
 
-/* Compaction has no pause seam, so either latched request cancels the retriable transaction;
- * the loop checkpoint that follows turns it into the run's pause or abort. */
-static int compact_cancelled(void *user)
+/* Signals latch synchronously, so polling and settling a stop request are the same read. */
+static enum agent_signal oneshot_poll(void *user)
 {
     (void)user;
-    return interrupt_abort_requested() || interrupt_pause_requested();
+    return agent_interrupt_signal();
 }
 
 static int compact_context(struct oneshot_state *state)
@@ -60,7 +59,7 @@ static int compact_context(struct oneshot_state *state)
         .provider = state->provider,
         .session_log = state->session_log,
         .transcript_log = state->transcript,
-        .hooks = {.user = state, .tick = compact_cancelled, .is_cancelled = compact_cancelled},
+        .hooks = {.user = state, .poll = oneshot_poll, .checkpoint = oneshot_poll},
     };
     struct compact_result result;
 
@@ -70,14 +69,17 @@ static int compact_context(struct oneshot_state *state)
     return completed;
 }
 
-static void auto_compact(void *user)
+static int auto_compact(void *user)
 {
     struct oneshot_state *state = user;
 
-    if (!compact_context(state) || state->json)
-        return;
-    int tty = isatty(fileno(stderr));
-    fprintf(stderr, "%s[compacted context]%s\n", tty ? ANSI_DIM : "", tty ? ANSI_RESET : "");
+    if (!compact_context(state))
+        return 0;
+    if (!state->json) {
+        int tty = isatty(fileno(stderr));
+        fprintf(stderr, "%s[compacted context]%s\n", tty ? ANSI_DIM : "", tty ? ANSI_RESET : "");
+    }
+    return 1;
 }
 
 /* The --json stream on stdout; docs/sessions.md is the record contract. On a write failure
@@ -123,17 +125,9 @@ static void json_tool_seen(const struct item *call, void *user)
     emit_json_items(user);
 }
 
-/* Provider wait/chunk hook: a latched abort (first SIGINT/SIGTERM) cancels the in-flight
- * stream; a pause lets it finish and stops at the seam. */
-static int loop_tick(void *user)
-{
-    (void)user;
-    return interrupt_abort_requested();
-}
-
 /* Seams sample the signal-latched requests and, in --json mode, stream freshly appended
  * records — tool results land mid-batch — without delaying them to the next turn. */
-static int loop_checkpoint(void *user)
+static enum agent_signal loop_checkpoint(void *user)
 {
     struct oneshot_state *state = user;
 
@@ -143,15 +137,10 @@ static int loop_checkpoint(void *user)
         emit_json_items(state);
         /* A dead stream means nobody is supervising the run: stop launching tools. */
         if (state->json_errno)
-            return AGENT_LOOP_SIG_ABORT;
+            return AGENT_SIGNAL_ABORT;
     }
-    /* Sample abort after the emission too: an interrupt latches both requests, so reading only
-     * the pause half of one that landed during a blocking write would misreport it. */
-    if (interrupt_abort_requested())
-        return AGENT_LOOP_SIG_ABORT;
-    if (interrupt_pause_requested())
-        return AGENT_LOOP_SIG_PAUSE;
-    return AGENT_LOOP_SIG_NONE;
+    /* Sample after the emission too: a signal may land during a blocking write. */
+    return agent_interrupt_signal();
 }
 
 /* The run's identity in the file-header schema: the session id when recording, and the live
@@ -261,7 +250,6 @@ static int open_session(struct oneshot_state *state, const struct hax_opts *opti
                                       state->transcript, &resumed);
         session_loaded_free(&loaded);
         state->session_log = resumed.session_log;
-        state->compact_owed = resumed.compact_owed;
     } else if (agent_recording_enabled(provider)) {
         state->session_log =
             session_log_open(agent_provider_log_name(provider), session->model,
@@ -503,7 +491,7 @@ static void run_user_turn(struct oneshot_state *state, const char *prompt, int m
         .hooks =
             {
                 .user = state,
-                .tick = loop_tick,
+                .poll = oneshot_poll,
                 .checkpoint = loop_checkpoint,
                 .compact = auto_compact,
             },
@@ -584,17 +572,18 @@ int oneshot_run(struct provider *provider, const char *prompt, const struct hax_
     interrupt_clear_requests();
     interrupt_install_request_signal_handlers();
 
-    /* The REPL's deferred compaction before a send: the loop compacts only at seams it reaches
-     * itself, so a resumed record over the threshold is compacted here. */
-    if (state.compact_owed)
+    /* The REPL's compaction before a send: the loop compacts only at seams it reaches itself,
+     * so a resumed record over the threshold is compacted here. */
+    if (compact_due(&state.session, state.provider))
         auto_compact(&state);
 
     struct agent_loop_result loop_result;
-    if (interrupt_abort_requested() || interrupt_pause_requested()) {
+    enum agent_signal stop = agent_interrupt_signal();
+    if (stop != AGENT_SIGNAL_NONE) {
         /* The stop belongs to the compaction and cancels the whole send, like the REPL's
          * pre-send transaction: nothing is appended and no turn launches. */
-        loop_result_stopped(&loop_result, interrupt_abort_requested() ? AGENT_LOOP_INTERRUPTED
-                                                                      : AGENT_LOOP_PAUSED);
+        loop_result_stopped(&loop_result, stop == AGENT_SIGNAL_ABORT ? AGENT_LOOP_INTERRUPTED
+                                                                     : AGENT_LOOP_PAUSED);
     } else {
         run_user_turn(&state, prompt, max_turns, &loop_result);
     }

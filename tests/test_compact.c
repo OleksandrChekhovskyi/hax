@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include "agent_core.h"
+#include "agent_stream.h"
 #include "compact.h"
 #include "config.h"
 #include "harness.h"
@@ -32,26 +33,60 @@ static void test_over_threshold(void)
     EXPECT(compact_over_threshold(LONG_MAX, LONG_MAX, 100));
 }
 
-static void test_should_auto(void)
+static void add_window_usage(struct agent_session *session, long input_tokens)
+{
+    struct stream_usage usage = {
+        .input_tokens = input_tokens,
+        .output_tokens = 50,
+        .cached_tokens = -1,
+        .cache_write_tokens = -1,
+        .cache_write_1h_tokens = -1,
+        .cost = -1,
+    };
+    agent_session_add_turn_usage(session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
+}
+
+static void test_due(void)
 {
     /* Drive the config tiers via runtime overrides so the test is
      * hermetic regardless of env / file config. */
     config_set_override("compact.auto", "1");
     config_set_override("compact.threshold", "90");
+    config_set_override("context_limit", "10000");
+    struct provider provider = {.name = "test"};
+    struct agent_session session = {0};
+    session.model = xstrdup("model");
+    agent_session_add_user(&session, "hello");
 
-    EXPECT(!compact_should_auto(8999, 10000)); /* 89.99% < 90% */
-    EXPECT(compact_should_auto(9000, 10000));  /* exactly 90% */
-    EXPECT(!compact_should_auto(9999, 0));     /* unknown window */
+    EXPECT(!compact_due(&session, &provider)); /* nothing reported yet */
+    add_window_usage(&session, 8949);          /* 89.99% < 90% */
+    EXPECT(!compact_due(&session, &provider));
+    add_window_usage(&session, 8950); /* exactly 90% */
+    EXPECT(compact_due(&session, &provider));
+    EXPECT(!compact_due(&session, NULL));
+
+    /* The live limit decides, so a larger window settles the debt without compacting. */
+    config_set_override("context_limit", "20000");
+    EXPECT(!compact_due(&session, &provider));
+    config_set_override("context_limit", "10000");
 
     /* Disabled via config: never auto-compacts, even when far over. */
     config_set_override("compact.auto", "0");
-    EXPECT(!compact_should_auto(100000, 10000));
+    add_window_usage(&session, 100000);
+    EXPECT(!compact_due(&session, &provider));
 
     /* Out-of-range threshold falls back to the 85% default. */
     config_set_override("compact.auto", "1");
     config_set_override("compact.threshold", "0");
-    EXPECT(!compact_should_auto(8499, 10000));
-    EXPECT(compact_should_auto(8500, 10000));
+    add_window_usage(&session, 8449);
+    EXPECT(!compact_due(&session, &provider));
+    add_window_usage(&session, 8450);
+    EXPECT(compact_due(&session, &provider));
+
+    agent_session_free(&session);
+    config_set_override("context_limit", NULL);
+    config_set_override("compact.threshold", NULL);
+    config_set_override("compact.auto", NULL);
 }
 
 enum mock_script {
@@ -59,6 +94,7 @@ enum mock_script {
     MOCK_RETRY_ONCE,
     MOCK_ALWAYS_TOOL_CALL,
     MOCK_ERROR,
+    MOCK_ERROR_WITHOUT_MESSAGE,
     MOCK_NO_SUMMARY,
     MOCK_INCOMPLETE,
     MOCK_STREAM_RETRY,
@@ -68,8 +104,10 @@ enum mock_script {
 struct mock_state {
     enum mock_script script;
     int stream_calls;
-    int cancel_requested;
-    int observed_events;
+    /* What poll and checkpoint report; the later fields take over once the stream reaches them. */
+    enum agent_signal signal;
+    enum agent_signal signal_after_text;
+    enum agent_signal signal_at_end;
     size_t last_request_items;
 };
 
@@ -136,8 +174,6 @@ static int mock_stream(struct provider *provider, const struct context *ctx, con
 {
     (void)provider;
     (void)model;
-    (void)tick;
-    (void)tick_user;
     EXPECT(ctx != NULL);
     mock.last_request_items = ctx->n_items;
     mock.stream_calls++;
@@ -147,6 +183,10 @@ static int mock_stream(struct provider *provider, const struct context *ctx, con
         emit_text(cb, user, "I'll inspect the files");
         emit_tool_call(cb, user);
         emit_done(cb, user, 100);
+        return 0;
+    }
+    if (mock.script == MOCK_ERROR_WITHOUT_MESSAGE) {
+        emit_error(cb, user, NULL, NULL);
         return 0;
     }
     if (mock.script == MOCK_ERROR) {
@@ -162,26 +202,24 @@ static int mock_stream(struct provider *provider, const struct context *ctx, con
         if (mock.script == MOCK_STREAM_RETRY_INCOMPLETE)
             return 0;
     }
+    if (tick && tick(tick_user))
+        return 0;
     if (mock.script != MOCK_NO_SUMMARY)
         emit_text(cb, user, "## Goal\n- continue");
-    if (mock.script == MOCK_INCOMPLETE)
+    if (mock.signal_after_text)
+        mock.signal = mock.signal_after_text;
+    if (mock.script == MOCK_INCOMPLETE || (tick && tick(tick_user)))
         return 0;
     emit_done(cb, user, mock.stream_calls == 1 ? 100 : 200);
+    if (mock.signal_at_end)
+        mock.signal = mock.signal_at_end;
     return 0;
 }
 
-static int observe_event(const struct stream_event *event, void *user)
-{
-    (void)event;
-    (void)user;
-    mock.observed_events++;
-    return 0;
-}
-
-static int is_cancelled(void *user)
+static enum agent_signal mock_signal(void *user)
 {
     (void)user;
-    return mock.cancel_requested;
+    return mock.signal;
 }
 
 static void init_session(struct agent_session *session)
@@ -203,8 +241,8 @@ static struct compact_result run_compaction(struct agent_session *session,
         .session_log = session_log,
         .hooks =
             {
-                .on_event = observe_event,
-                .is_cancelled = is_cancelled,
+                .poll = mock_signal,
+                .checkpoint = mock_signal,
             },
     };
     struct compact_result result;
@@ -222,7 +260,6 @@ static void test_applies_summary(void)
     struct compact_result result = run_compaction(&session, &provider, NULL);
     EXPECT(result.outcome == COMPACT_COMPLETE);
     EXPECT(result.attempts == 1);
-    EXPECT(mock.observed_events == 2);
     /* The summarized history stays; the seed and its usage footer are appended after it. */
     EXPECT(session.n_items == 4);
     EXPECT_STR_EQ(session.items[0].text, "old history");
@@ -444,6 +481,23 @@ static void test_preserves_failure(void)
     agent_session_free(&session);
 }
 
+/* A failure is a provider error whether or not the provider explained it. */
+static void test_failure_without_message(void)
+{
+    struct agent_session session;
+    init_session(&session);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_ERROR_WITHOUT_MESSAGE);
+
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    EXPECT(result.outcome == COMPACT_PROVIDER_ERROR);
+    EXPECT(result.error_message == NULL);
+    EXPECT(session.n_items == 1);
+
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
 static void test_rejects_empty_summary(void)
 {
     struct agent_session session;
@@ -485,15 +539,63 @@ static void test_discards_cancelled_summary(void)
     init_session(&session);
     struct provider provider = {.name = "test", .stream = mock_stream};
     reset_mock(MOCK_SUCCESS);
-    mock.cancel_requested = 1;
+    mock.signal_at_end = AGENT_SIGNAL_ABORT;
 
     struct compact_result result = run_compaction(&session, &provider, NULL);
     EXPECT(result.outcome == COMPACT_CANCELLED);
-    /* A late cancel wins over a complete summary: old history survives and
+    /* A late abort wins over a complete summary: old history survives and
      * the completed attempt still receives its footer. */
     EXPECT(session.n_items == 2);
     EXPECT_STR_EQ(session.items[0].text, "old history");
     EXPECT(session.items[1].kind == ITEM_TURN_USAGE);
+
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+static void test_pause_before_summary_cancels(void)
+{
+    struct agent_session session;
+    init_session(&session);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_SUCCESS);
+    mock.signal = AGENT_SIGNAL_PAUSE;
+
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    EXPECT(result.outcome == COMPACT_CANCELLED);
+    EXPECT(session.n_items == 1);
+
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+static void test_pause_after_summary_starts_keeps_it(void)
+{
+    struct agent_session session;
+    init_session(&session);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_SUCCESS);
+    mock.signal_after_text = AGENT_SIGNAL_PAUSE;
+
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    EXPECT(result.outcome == COMPACT_COMPLETE);
+    EXPECT(session.items[2].origin == ITEM_ORIGIN_COMPACT_SEED);
+
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+static void test_abort_mid_summary_cancels(void)
+{
+    struct agent_session session;
+    init_session(&session);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_SUCCESS);
+    mock.signal_after_text = AGENT_SIGNAL_ABORT;
+
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    EXPECT(result.outcome == COMPACT_CANCELLED);
+    EXPECT(session.n_items == 1);
 
     compact_result_destroy(&result);
     agent_session_free(&session);
@@ -505,7 +607,7 @@ int main(void)
     EXPECT(chdir(t_tempdir()) == 0);
     setenv("XDG_STATE_HOME", t_tempdir(), 1);
     test_over_threshold();
-    test_should_auto();
+    test_due();
     test_applies_summary();
     test_retried_attempt_usage_is_billed();
     test_cancelled_retry_usage_is_billed();
@@ -514,8 +616,12 @@ int main(void)
     test_tool_call_retries_are_bounded();
     test_resumed_session_floors_at_seed();
     test_preserves_failure();
+    test_failure_without_message();
     test_rejects_empty_summary();
     test_rejects_incomplete_response();
     test_discards_cancelled_summary();
+    test_pause_before_summary_cancels();
+    test_pause_after_summary_starts_keeps_it();
+    test_abort_mid_summary_cancels();
     T_REPORT();
 }

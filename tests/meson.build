@@ -23,6 +23,7 @@ test_sources = [
     'test_agent_env.c',
     'test_agent_loop.c',
     'test_agent_stats.c',
+    'test_agent_stream.c',
     'test_agent_tool.c',
     'test_agent_usage.c',
     'test_banner.c',
@@ -180,6 +181,7 @@ endforeach
 # e2e/test_oneshot.py registers as e2e/oneshot, so `meson test 'e2e/*'` selects the group.
 e2e_scenarios = [
     'oneshot',
+    'repl_compact',
     'repl_complete',
     'repl_interrupt',
     'repl_resize',

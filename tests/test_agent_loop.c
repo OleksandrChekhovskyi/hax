@@ -6,7 +6,9 @@
 
 #include "agent_core.h"
 #include "agent_loop.h"
+#include "agent_stream.h"
 #include "agent_tool.h"
+#include "compact.h"
 #include "config.h"
 #include "harness.h"
 #include "provider.h"
@@ -31,7 +33,6 @@ enum script_mode {
 };
 
 static enum script_mode script;
-static int observer_events;
 
 static struct stream_usage usage_tokens(long input, long output)
 {
@@ -155,45 +156,10 @@ static int scripted_stream(struct provider *p, const struct context *ctx, const 
     return 0;
 }
 
-static int observe(const struct stream_event *ev, void *user)
-{
-    (void)ev;
-    (void)user;
-    observer_events++;
-    return 0;
-}
-
 static void session_init(struct agent_session *session)
 {
     memset(session, 0, sizeof(*session));
     session->model = xstrdup("model");
-}
-
-static void test_loop_turn_collects_success(void)
-{
-    struct agent_session session;
-    session_init(&session);
-    struct provider provider = {.name = "test", .stream = scripted_stream};
-    struct agent_loop_turn loop_turn;
-    script = SCRIPT_COMPLETE;
-    observer_events = 0;
-
-    agent_loop_turn_run(&loop_turn, &session, &provider, NULL, observe, NULL, NULL, NULL);
-    /* Collection is authoritative even with a presentation observer: terminal
-     * usage, timing, and assembled text cannot depend on frontend behavior. */
-    EXPECT(loop_turn.assembly.state == TURN_DONE);
-    EXPECT(loop_turn.usage.input_tokens == 100);
-    EXPECT(loop_turn.usage.output_tokens == 20);
-    EXPECT(observer_events == 2);
-
-    struct agent_absorb_result absorbed = agent_session_absorb(&session, &loop_turn.assembly);
-    EXPECT(absorbed.items_from == 0);
-    EXPECT(!absorbed.had_tool_call);
-    EXPECT(session.n_items == 1);
-    EXPECT_STR_EQ(session.items[0].text, "partial");
-
-    agent_loop_turn_destroy(&loop_turn);
-    agent_session_free(&session);
 }
 
 static void test_partial_error_is_preserved(void)
@@ -201,7 +167,7 @@ static void test_partial_error_is_preserved(void)
     struct agent_session session;
     session_init(&session);
     struct provider provider = {.name = "test", .stream = scripted_stream};
-    struct agent_loop_turn loop_turn;
+    struct agent_stream loop_turn;
     script = SCRIPT_PARTIAL_ERROR;
 
     agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL, NULL);
@@ -218,7 +184,7 @@ static void test_partial_error_is_preserved(void)
     EXPECT(session.n_items == 1);
     EXPECT_STR_EQ(session.items[0].text, "partial\n" INTERRUPT_MARKER);
 
-    agent_loop_turn_destroy(&loop_turn);
+    agent_stream_destroy(&loop_turn);
     agent_session_free(&session);
 }
 
@@ -227,7 +193,7 @@ static void test_prestream_error_adds_no_marker(void)
     struct agent_session session;
     session_init(&session);
     struct provider provider = {.name = "test", .stream = scripted_stream};
-    struct agent_loop_turn loop_turn;
+    struct agent_stream loop_turn;
     script = SCRIPT_PRESTREAM_ERROR;
 
     agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL, NULL);
@@ -238,7 +204,7 @@ static void test_prestream_error_adds_no_marker(void)
     EXPECT(!out.marker_placed);
     EXPECT(session.n_items == 0);
 
-    agent_loop_turn_destroy(&loop_turn);
+    agent_stream_destroy(&loop_turn);
     agent_session_free(&session);
 }
 
@@ -247,7 +213,7 @@ static void test_cancelled_tool_call_gets_result(void)
     struct agent_session session;
     session_init(&session);
     struct provider provider = {.name = "test", .stream = scripted_stream};
-    struct agent_loop_turn loop_turn;
+    struct agent_stream loop_turn;
     script = SCRIPT_TOOL_ERROR;
 
     agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL, NULL);
@@ -263,7 +229,7 @@ static void test_cancelled_tool_call_gets_result(void)
     EXPECT_STR_EQ(session.items[2].call_id, "c1");
     EXPECT_STR_EQ(session.items[2].output, INTERRUPT_MARKER);
 
-    agent_loop_turn_destroy(&loop_turn);
+    agent_stream_destroy(&loop_turn);
     agent_session_free(&session);
 }
 
@@ -272,7 +238,7 @@ static void test_provider_error_drops_tool_call(void)
     struct agent_session session;
     session_init(&session);
     struct provider provider = {.name = "test", .stream = scripted_stream};
-    struct agent_loop_turn loop_turn;
+    struct agent_stream loop_turn;
     script = SCRIPT_TOOL_ERROR;
 
     agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL, NULL);
@@ -288,7 +254,7 @@ static void test_provider_error_drops_tool_call(void)
     EXPECT_STR_EQ(session.items[0].text, "before\n" INTERRUPT_MARKER);
     EXPECT(session.items[0].origin == ITEM_ORIGIN_INTERRUPTED);
 
-    agent_loop_turn_destroy(&loop_turn);
+    agent_stream_destroy(&loop_turn);
     agent_session_free(&session);
 }
 
@@ -297,7 +263,7 @@ static void test_provider_error_drops_reasoning(void)
     struct agent_session session;
     session_init(&session);
     struct provider provider = {.name = "test", .stream = scripted_stream};
-    struct agent_loop_turn loop_turn;
+    struct agent_stream loop_turn;
     script = SCRIPT_REASONING_ERROR;
 
     agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL, NULL);
@@ -309,7 +275,7 @@ static void test_provider_error_drops_reasoning(void)
     EXPECT(!out.marker_placed);
     EXPECT(session.n_items == 0);
 
-    agent_loop_turn_destroy(&loop_turn);
+    agent_stream_destroy(&loop_turn);
     agent_session_free(&session);
 }
 
@@ -318,7 +284,7 @@ static void test_cancel_of_thinking_only_turn_leaves_no_trace(void)
     struct agent_session session;
     session_init(&session);
     struct provider provider = {.name = "test", .stream = scripted_stream};
-    struct agent_loop_turn loop_turn;
+    struct agent_stream loop_turn;
     script = SCRIPT_REASONING_CANCELLED;
 
     agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL, NULL);
@@ -329,7 +295,7 @@ static void test_cancel_of_thinking_only_turn_leaves_no_trace(void)
     EXPECT(!out.marker_placed);
     EXPECT(session.n_items == 0);
 
-    agent_loop_turn_destroy(&loop_turn);
+    agent_stream_destroy(&loop_turn);
     agent_session_free(&session);
 }
 
@@ -338,7 +304,7 @@ static void test_cancel_keeps_text_but_drops_reasoning(void)
     struct agent_session session;
     session_init(&session);
     struct provider provider = {.name = "test", .stream = scripted_stream};
-    struct agent_loop_turn loop_turn;
+    struct agent_stream loop_turn;
     script = SCRIPT_REASONING_TEXT_CANCELLED;
 
     agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL, NULL);
@@ -355,7 +321,7 @@ static void test_cancel_keeps_text_but_drops_reasoning(void)
     EXPECT(session.items[1].kind == ITEM_ASSISTANT_MESSAGE);
     EXPECT_STR_EQ(session.items[1].text, "partial\n" INTERRUPT_MARKER);
 
-    agent_loop_turn_destroy(&loop_turn);
+    agent_stream_destroy(&loop_turn);
     agent_session_free(&session);
 }
 
@@ -364,7 +330,7 @@ static void test_cancel_keeps_sealed_reasoning_with_tool_call(void)
     struct agent_session session;
     session_init(&session);
     struct provider provider = {.name = "test", .stream = scripted_stream};
-    struct agent_loop_turn loop_turn;
+    struct agent_stream loop_turn;
     script = SCRIPT_SEALED_REASONING_TOOL_CANCELLED;
 
     agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL, NULL);
@@ -380,35 +346,7 @@ static void test_cancel_keeps_sealed_reasoning_with_tool_call(void)
     EXPECT(session.items[2].kind == ITEM_TOOL_RESULT);
     EXPECT_STR_EQ(session.items[2].output, INTERRUPT_MARKER);
 
-    agent_loop_turn_destroy(&loop_turn);
-    agent_session_free(&session);
-}
-
-static void test_retry_usage_accumulates(void)
-{
-    struct agent_session session;
-    session_init(&session);
-    struct provider provider = {.name = "test", .stream = scripted_stream};
-    struct agent_loop_turn loop_turn;
-    script = SCRIPT_RETRY_THEN_COMPLETE;
-
-    agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL, NULL);
-    /* The retried attempt is its own served request, recorded ahead of the terminal one; the
-     * context measurement reflects only the terminal attempt. */
-    EXPECT(loop_turn.assembly.state == TURN_DONE);
-    EXPECT(loop_turn.usage.input_tokens == 100);
-    EXPECT(loop_turn.usage.output_tokens == 20);
-    EXPECT(loop_turn.attempts.count == 2);
-    EXPECT(loop_turn.attempts.attempts[0].usage.input_tokens == 40);
-    EXPECT(loop_turn.attempts.attempts[1].usage.input_tokens == 100);
-    EXPECT(agent_loop_turn_has_usage(&loop_turn));
-
-    struct agent_absorb_result absorbed = agent_session_absorb(&session, &loop_turn.assembly);
-    EXPECT(absorbed.items_from == 0);
-    EXPECT(session.n_items == 1);
-    EXPECT_STR_EQ(session.items[0].text, "partial");
-
-    agent_loop_turn_destroy(&loop_turn);
+    agent_stream_destroy(&loop_turn);
     agent_session_free(&session);
 }
 
@@ -416,9 +354,8 @@ static void test_empty_cancel_leaves_no_trace(void)
 {
     struct agent_session session;
     session_init(&session);
-    struct agent_loop_turn loop_turn = {0};
-    turn_init(&loop_turn.assembly);
-    loop_turn.usage = (struct stream_usage){-1, -1, -1, -1, -1, -1};
+    struct agent_stream loop_turn;
+    agent_stream_init(&loop_turn);
 
     struct agent_abort_outcome out =
         agent_loop_turn_absorb_abort(&session, &loop_turn, AGENT_ABORT_USER_CANCEL);
@@ -428,7 +365,7 @@ static void test_empty_cancel_leaves_no_trace(void)
     EXPECT(out.items_from == out.items_to);
     EXPECT(session.n_items == 0);
 
-    agent_loop_turn_destroy(&loop_turn);
+    agent_stream_destroy(&loop_turn);
     agent_session_free(&session);
 }
 
@@ -510,6 +447,7 @@ struct loop_test_ctx {
     int tools_refused;
     int turn_begins;
     int compactions;
+    int compact_succeeds;
     int checkpoints;
     int cancel_at;
     int pause_at;
@@ -551,21 +489,22 @@ static struct item run_test_tool(const struct item *call, enum agent_loop_tool_a
     return refused;
 }
 
-static int cancel_checkpoint(void *user)
+static enum agent_signal cancel_checkpoint(void *user)
 {
     struct loop_test_ctx *ctx = user;
     ctx->checkpoints++;
     if (ctx->cancel_at > 0 && ctx->checkpoints >= ctx->cancel_at)
-        return AGENT_LOOP_SIG_ABORT;
+        return AGENT_SIGNAL_ABORT;
     if (ctx->pause_at > 0 && ctx->checkpoints >= ctx->pause_at)
-        return AGENT_LOOP_SIG_PAUSE;
-    return AGENT_LOOP_SIG_NONE;
+        return AGENT_SIGNAL_PAUSE;
+    return AGENT_SIGNAL_NONE;
 }
 
-static void count_compaction(void *user)
+static int count_compaction(void *user)
 {
     struct loop_test_ctx *ctx = user;
     ctx->compactions++;
+    return ctx->compact_succeeds;
 }
 
 static void session_enable_tools(struct agent_session *session)
@@ -1332,6 +1271,65 @@ static void test_loop_requests_mid_chain_compaction(void)
     config_set_override("compact.auto", NULL);
 }
 
+static void test_loop_pause_during_compaction_stops_at_compacted_seam(void)
+{
+    config_set_override("compact.auto", "1");
+    config_set_override("compact.threshold", "50");
+    config_set_override("context_limit", "10");
+
+    struct agent_session session;
+    session_init(&session);
+    session_enable_tools(&session);
+    agent_session_add_user(&session, "start");
+    struct provider provider = {.name = "test", .stream = chain_stream};
+    /* Pause lands at the checkpoint after compaction (post-stream, pre-c1, final, compacted). */
+    struct loop_test_ctx ctx = {.pause_at = 4, .compact_succeeds = 1};
+    chain_turn = 0;
+    chain_two_tools = 0;
+
+    struct agent_loop_result result = run_chain(&session, &provider, &ctx, 4);
+    EXPECT(result.outcome == AGENT_LOOP_PAUSED);
+    EXPECT(result.turns == 1);
+    EXPECT(ctx.compactions == 1);
+    /* The pre-compaction window no longer describes the conversation. */
+    EXPECT(result.last_context_tokens == -1);
+    EXPECT(!result.abort_marker_placed);
+
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+    config_set_override("context_limit", NULL);
+    config_set_override("compact.threshold", NULL);
+    config_set_override("compact.auto", NULL);
+}
+
+static void test_loop_skips_compaction_after_last_allowed_turn(void)
+{
+    config_set_override("compact.auto", "1");
+    config_set_override("compact.threshold", "50");
+    config_set_override("context_limit", "10");
+
+    struct agent_session session;
+    session_init(&session);
+    session_enable_tools(&session);
+    agent_session_add_user(&session, "start");
+    struct provider provider = {.name = "test", .stream = chain_stream};
+    struct loop_test_ctx ctx = {0};
+    chain_turn = 0;
+    chain_two_tools = 0;
+
+    /* The over-threshold seam ends the run, so nothing would use the summary yet. */
+    struct agent_loop_result result = run_chain(&session, &provider, &ctx, 1);
+    EXPECT(result.outcome == AGENT_LOOP_MAX_TURNS);
+    EXPECT(ctx.compactions == 0);
+    EXPECT(compact_due(&session, &provider));
+
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+    config_set_override("context_limit", NULL);
+    config_set_override("compact.threshold", NULL);
+    config_set_override("compact.auto", NULL);
+}
+
 static void observed_task_note(const char *text, void *user)
 {
     EXPECT(text != NULL);
@@ -1397,7 +1395,6 @@ int main(void)
     EXPECT(chdir(t_tempdir()) == 0);
     /* Loop tests exercise orchestration, not the platform inhibitor helper. */
     config_set_override("keep_awake", "0");
-    test_loop_turn_collects_success();
     test_loop_passes_conversation_id_to_provider();
     test_partial_error_is_preserved();
     test_prestream_error_adds_no_marker();
@@ -1407,7 +1404,6 @@ int main(void)
     test_cancel_of_thinking_only_turn_leaves_no_trace();
     test_cancel_keeps_text_but_drops_reasoning();
     test_cancel_keeps_sealed_reasoning_with_tool_call();
-    test_retry_usage_accumulates();
     test_loop_records_footer_per_served_attempt();
     test_empty_cancel_leaves_no_trace();
     test_loop_runs_tool_chain();
@@ -1426,6 +1422,8 @@ int main(void)
     test_loop_empty_completion_keeps_boundary();
     test_loop_pause_on_final_turn_completes();
     test_loop_pause_defers_seam_compaction();
+    test_loop_pause_during_compaction_stops_at_compacted_seam();
+    test_loop_skips_compaction_after_last_allowed_turn();
     test_loop_error_with_usage_keeps_boundary();
     test_loop_reports_provider_error();
     test_loop_prestream_error_leaves_no_marker();

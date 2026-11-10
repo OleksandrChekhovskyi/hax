@@ -818,8 +818,6 @@ static void test_prepare_resumed(void)
     session.model = xstrdup("mock-model");
     unsetenv("HAX_PROVIDER");
     setenv("HAX_NO_SESSION", "1", 1);
-    setenv("HAX_CONTEXT_LIMIT", "1000", 1);
-    setenv("HAX_COMPACT_THRESHOLD", "85", 1);
 
     struct agent_resumed resumed;
     agent_session_add_user(&session, "hello");
@@ -827,19 +825,14 @@ static void test_prepare_resumed(void)
                                   &resumed);
     EXPECT(resumed.session_log == NULL);
     EXPECT(resumed.tail == AGENT_RESUME_TAIL_USER);
-    EXPECT(!resumed.compact_owed);
 
-    /* A record left over the threshold owes the pre-send compaction. */
     agent_session_append(&session,
                          (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("done")});
     struct stream_usage usage = reported_usage();
-    usage.input_tokens = 900;
-    usage.output_tokens = 50;
     agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
     agent_session_prepare_resumed(&session, &mock, "/nonexistent/session.jsonl", &recorded, NULL,
                                   &resumed);
     EXPECT(resumed.tail == AGENT_RESUME_TAIL_CLEAN);
-    EXPECT(resumed.compact_owed);
 
     /* Recording on: the record's own file is reopened for appending. */
     setenv("HAX_NO_SESSION", "0", 1);
@@ -856,8 +849,6 @@ static void test_prepare_resumed(void)
     free(path);
 
     unsetenv("HAX_NO_SESSION");
-    unsetenv("HAX_CONTEXT_LIMIT");
-    unsetenv("HAX_COMPACT_THRESHOLD");
     agent_session_free(&session);
 }
 

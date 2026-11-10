@@ -466,6 +466,41 @@ static void test_sigusr1_pauses_at_seam(void)
     raise(SIGUSR1);
 }
 
+static int prefill_paused_stream(struct provider *provider, const struct context *context,
+                                 const char *model, stream_cb callback, void *user,
+                                 http_tick_cb tick, void *tick_user)
+{
+    (void)provider;
+    (void)context;
+    (void)model;
+    (void)callback;
+    (void)user;
+
+    raise(SIGUSR1);
+    EXPECT(tick != NULL);
+    EXPECT(tick(tick_user));
+    return -1;
+}
+
+/* A pause before the response has streamed anything cuts the request at once; the run pauses
+ * with the prompt unanswered, ready to re-send. */
+static void test_sigusr1_during_prefill_cuts_request(void)
+{
+    configure_test_run();
+    struct provider provider = {
+        .name = "test-provider",
+        .default_model = "unused",
+        .stream = prefill_paused_stream,
+    };
+
+    struct hax_opts options = {.raw = 1, .json = 1};
+    struct captured_run run = capture_run(&provider, "hello", &options);
+    EXPECT(run.result == 1);
+    EXPECT(strstr(run.out, "\"outcome\":\"paused\"") != NULL);
+    EXPECT(strstr(run.out, "assistant_message") == NULL);
+    captured_run_free(&run);
+}
+
 /* Recorded-session variant of configure_test_run: each call isolates its session files. */
 static void configure_recorded_run(void)
 {
@@ -625,6 +660,65 @@ static void test_resumed_run_compacts_oversized_window(void)
     config_set_override("context_limit", CONFIG_VALUE_DEFAULT);
 }
 
+static int paused_compaction_calls;
+
+static int paused_compaction_stream(struct provider *provider, const struct context *context,
+                                    const char *model, stream_cb callback, void *user,
+                                    http_tick_cb tick, void *tick_user)
+{
+    (void)provider;
+    (void)context;
+    (void)model;
+
+    paused_compaction_calls++;
+    struct stream_event delta = {.kind = EV_TEXT_DELTA, .u.text_delta = {.text = "The summary."}};
+    if (callback(&delta, user))
+        return -1;
+    raise(SIGUSR1);
+    EXPECT(tick != NULL);
+    EXPECT(!tick(tick_user));
+    struct stream_event done = {
+        .kind = EV_DONE,
+        .u.done = {.stop_reason = "end_turn",
+                   .usage = {.input_tokens = -1,
+                             .output_tokens = -1,
+                             .cached_tokens = -1,
+                             .cache_write_tokens = -1,
+                             .cache_write_1h_tokens = -1,
+                             .cost = -1}},
+    };
+    return callback(&done, user);
+}
+
+/* A pause during the resumed compaction lets the summary land, then stops before the send. */
+static void test_sigusr1_during_resumed_compaction(void)
+{
+    configure_recorded_run();
+    struct provider provider = {
+        .name = "test-provider",
+        .default_model = "unused",
+        .stream = over_threshold_stream,
+    };
+    struct hax_opts options = {.raw = 1, .json = 1};
+    struct captured_run run = capture_run(&provider, "hello", &options);
+    EXPECT(run.result == 0);
+    captured_run_free(&run);
+
+    char *path = recorded_session_path();
+    config_set_override("context_limit", "1000");
+    struct hax_opts resume_options = {.raw = 1, .json = 1, .resume_path = path};
+    provider.stream = paused_compaction_stream;
+    paused_compaction_calls = 0;
+    run = capture_run(&provider, NULL, &resume_options);
+    EXPECT(run.result == 1);
+    EXPECT(paused_compaction_calls == 1);
+    EXPECT(strstr(run.out, "\"outcome\":\"paused\"") != NULL);
+    EXPECT(strstr(run.out, "\"origin\":\"compact_seed\"") != NULL);
+    captured_run_free(&run);
+    free(path);
+    config_set_override("context_limit", CONFIG_VALUE_DEFAULT);
+}
+
 static int aborted_compaction_calls;
 
 static int aborted_compaction_stream(struct provider *provider, const struct context *context,
@@ -701,10 +795,12 @@ int main(void)
     test_sigint_interrupts_gracefully();
     test_sigint_with_dead_consumer_keeps_interrupt_outcome();
     test_sigusr1_pauses_at_seam();
+    test_sigusr1_during_prefill_cuts_request();
     test_promptless_resume_continues_clean_seam();
     test_promptless_resume_adds_continuation();
     test_resumed_run_compacts_oversized_window();
     test_sigint_during_resumed_compaction();
+    test_sigusr1_during_resumed_compaction();
     test_missing_model_is_diagnostic();
     config_free();
     T_REPORT();
