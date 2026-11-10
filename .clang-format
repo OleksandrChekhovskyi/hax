@@ -7,6 +7,9 @@ AlignConsecutiveMacros: true
 AllowShortFunctionsOnASingleLine: None
 AllowShortIfStatementsOnASingleLine: Never
 AllowShortLoopsOnASingleLine: false
+# Comments are wrapped by hand, a paragraph at a time; lint_style.py flags overlong
+# lines. Reflow would break just the overflowing line and leave a lone */ behind.
+ReflowComments: false
 # Include order: own header, blank line, <system>, blank line, then project
 # includes. Within each block, plain headers sort before subdirectory ones.
 SortIncludes: CaseSensitive

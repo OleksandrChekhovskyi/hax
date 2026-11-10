@@ -3,6 +3,9 @@
 
 Checked over src/ and tests/:
 
+- Lines fit the ColumnLimit in .clang-format. clang-format does not reflow
+  comments (ReflowComments: false), so this catches overlong comment lines;
+  rewrap one with the lines around it rather than only breaking it.
 - Header include guards are derived from the file path: src/render/disp.h
   uses HAX_RENDER_DISP_H (the src/ prefix is dropped, tests/ is kept), with
   a matching ``#endif /* GUARD */`` as the last line. The guard opens the
@@ -34,6 +37,8 @@ from pathlib import Path
 from typing import Final, NamedTuple
 
 ROOTS: Final = (Path("src"), Path("tests"))
+CLANG_FORMAT: Final = Path(".clang-format")
+COLUMN_LIMIT_RE: Final = re.compile(r"^ColumnLimit:\s*(\d+)\s*$", re.MULTILINE)
 HARNESS: Final = Path("tests/harness.c")
 SPAWN: Final = Path("src/system/spawn.c")
 FORK_RE: Final = re.compile(r"\bfork\s*\(")
@@ -82,6 +87,19 @@ def check_guard(path: Path, text: str) -> Iterator[Finding]:
     lines = text.rstrip("\n").splitlines()
     if lines[-1] != f"#endif /* {want} */":
         yield Finding(path, len(lines), f"last line should be '#endif /* {want} */'")
+
+
+def read_column_limit() -> int:
+    if (match := COLUMN_LIMIT_RE.search(CLANG_FORMAT.read_text(encoding="utf-8"))) is None:
+        sys.exit(f"{CLANG_FORMAT}: no ColumnLimit")
+    return int(match.group(1))
+
+
+def check_line_length(path: Path, text: str, limit: int) -> Iterator[Finding]:
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if len(line) > limit:
+            message = f"line exceeds {limit} columns; rewrap it with the lines around it"
+            yield Finding(path, lineno, message)
 
 
 def check_includes(path: Path, text: str) -> Iterator[Finding]:
@@ -151,8 +169,9 @@ def check_fork(path: Path, text: str) -> Iterator[Finding]:
             yield Finding(path, lineno, "raw fork() in src; use spawn_fork() from system/spawn.h")
 
 
-def check_file(path: Path) -> Iterator[Finding]:
+def check_file(path: Path, column_limit: int) -> Iterator[Finding]:
     text = path.read_text(encoding="utf-8")
+    yield from check_line_length(path, text, column_limit)
     if path.suffix == ".h":
         yield from check_guard(path, text)
     yield from check_includes(path, text)
@@ -169,7 +188,8 @@ def source_files() -> Iterator[Path]:
 
 def main() -> int:
     os.chdir(Path(__file__).resolve().parent.parent)
-    findings = [finding for path in source_files() for finding in check_file(path)]
+    column_limit = read_column_limit()
+    findings = [finding for path in source_files() for finding in check_file(path, column_limit)]
     for finding in findings:
         print(finding)
     return 1 if findings else 0

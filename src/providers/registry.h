@@ -37,7 +37,7 @@ struct provider_def {
     int pinned;
     const char *api_key_env;  /* env var holding the key; NULL → local/no key */
     const char *catalog_id;   /* models.dev key (catalog.h); NULL means none. Shipped defs curate
-                                 it; a config-only def has one only from providers.<id>.catalog_id */
+                                 it; config-only defs get one only from providers.<id>.catalog_id */
     const char *metadata_api; /* /models dialect: "openai" (flat list) or "anthropic" (paged);
                                  NULL follows the default wire's family */
     int send_cache_key;       /* prompt_cache_key default (0/1) */
