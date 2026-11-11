@@ -53,10 +53,17 @@ static int g_pick_index;
 static char g_picked_detail[256];
 static char g_picked_description[256];
 static int g_picker_calls;
+static char g_offered_labels[512]; /* the last picker's labels, each followed by '\n' */
 
 long picker_run(const struct picker_opts *options)
 {
     g_picker_calls++;
+    g_offered_labels[0] = '\0';
+    for (size_t i = 0; i < options->item_count; i++) {
+        size_t used = strlen(g_offered_labels);
+        snprintf(g_offered_labels + used, sizeof(g_offered_labels) - used, "%s\n",
+                 options->items[i].label);
+    }
     if (g_pick_index >= g_pick_count || !g_picks[g_pick_index])
         return -1;
     const char *label = g_picks[g_pick_index++];
@@ -485,16 +492,38 @@ static void test_model_choices_come_from_listing(void)
 
 static void test_provider_choices_list_sorted_ids(void)
 {
+    reset();
     struct completion choices = {0};
     select_provider_choices(&choices);
     int has_deepseek = 0;
+    int has_compat = 0;
     for (size_t i = 0; i < choices.count; i++) {
         has_deepseek |= strcmp(choices.candidates[i], "deepseek") == 0;
+        has_compat |= strcmp(choices.candidates[i], "openai-compatible") == 0;
         if (i > 0)
             EXPECT(strcmp(choices.candidates[i - 1], choices.candidates[i]) < 0);
     }
     EXPECT(has_deepseek);
+    EXPECT(!has_compat); /* not offered without a base URL */
     completion_free(&choices);
+}
+
+static void test_provider_picker_skips_unoffered(void)
+{
+    reset();
+    setenv("XDG_STATE_HOME", t_tempdir(), 1);
+    /* A closed port fails the local servers' availability probes fast. */
+    config_set_override("providers.llamacpp.base_url", "http://127.0.0.1:1/v1");
+    config_set_override("providers.ollama.base_url", "http://127.0.0.1:1/v1");
+    struct agent_state *state = fresh_state();
+
+    select_provider(state, NULL);
+
+    EXPECT(g_picker_calls == 1);
+    EXPECT(strstr(g_offered_labels, "deepseek\n") != NULL);
+    EXPECT(strstr(g_offered_labels, "openai-compatible\n") == NULL);
+    config_free();
+    unsetenv("XDG_STATE_HOME");
 }
 
 static void expect_choices(const struct completion *choices, const char *const *expected)
@@ -834,6 +863,7 @@ int main(void)
     test_effort_choices_follow_live_model();
     test_model_choices_come_from_listing();
     test_provider_choices_list_sorted_ids();
+    test_provider_picker_skips_unoffered();
     test_config_key_choices_follow_picker();
     test_config_value_choices_follow_setting();
     test_tint_choices_list_tints();

@@ -753,12 +753,15 @@ struct provider_pick_result {
 
 static struct provider_pick_result choose_provider_def(const char *current_provider_id)
 {
-    size_t def_count = 0;
-    const struct provider_def *const *registered_defs = provider_all(&def_count);
+    size_t registered_count = 0;
+    const struct provider_def *const *registered_defs = provider_all(&registered_count);
 
     /* Picker order is alphabetical by display label; registry order remains autoselect priority. */
-    const struct provider_def **defs = xmalloc(def_count * sizeof(*defs));
-    memcpy(defs, registered_defs, def_count * sizeof(*defs));
+    const struct provider_def **defs = xmalloc(registered_count * sizeof(*defs));
+    size_t def_count = 0;
+    for (size_t i = 0; i < registered_count; i++)
+        if (provider_offered(registered_defs[i]))
+            defs[def_count++] = registered_defs[i];
     qsort(defs, def_count, sizeof(*defs), compare_def_labels);
 
     /* Pre-picker work uses bounded timeouts; cancellation starts at the picker. */
@@ -874,7 +877,8 @@ void select_provider_choices(struct completion *choices)
     size_t def_count = 0;
     const struct provider_def *const *defs = provider_all(&def_count);
     for (size_t i = 0; i < def_count; i++)
-        completion_add(choices, defs[i]->id);
+        if (provider_offered(defs[i]))
+            completion_add(choices, defs[i]->id);
     completion_sort(choices);
 }
 

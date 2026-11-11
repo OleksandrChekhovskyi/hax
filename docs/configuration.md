@@ -104,10 +104,10 @@ credential itself in JSON.
 
 ```json
 {
-  "provider": "openai-compatible",
+  "provider": "vllm",
   "model": "Qwen3-30B",
   "providers": {
-    "openai-compatible": {
+    "vllm": {
       "display_name": "vLLM",
       "base_url": "http://127.0.0.1:8000/v1"
     }

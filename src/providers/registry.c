@@ -176,11 +176,13 @@ static const struct provider_def DEFS[] = {
     {
         .id = "openai-compatible",
         .unconfigured_reason = "HAX_OPENAI_BASE_URL not set",
+        .offer_once_configured = 1,
     },
     {
         .id = "anthropic-compatible",
         .api = "anthropic-messages",
         .unconfigured_reason = "HAX_ANTHROPIC_BASE_URL not set",
+        .offer_once_configured = 1,
     },
     {
         .id = "mock",
@@ -266,6 +268,16 @@ const char *provider_catalog_id(const struct provider_def *def)
     if (configured)
         return *configured ? configured : NULL;
     return def->catalog_id;
+}
+
+int provider_offered(const struct provider_def *def)
+{
+    if (!def->offer_once_configured)
+        return 1;
+    char *key = xasprintf("providers.%s.base_url", def->id);
+    int configured = config_str_nonempty(key) != NULL;
+    free(key);
+    return configured;
 }
 
 void provider_list_names(FILE *out)

@@ -14,6 +14,9 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Changed
 
+- `/provider` and its completion no longer offer `openai-compatible` and `anthropic-compatible`
+  until their base URL is set, since without one they have nothing to connect to. Naming one
+  explicitly still works and says which variable is missing.
 - Quitting with Ctrl-D or Ctrl-C now erases the empty prompt, so the shell prompt, or the
   `resume with` line for a conversation, takes its place instead of appearing two rows below it.
 - A slash command's argument hint now appears only once you pause typing, so typing a command

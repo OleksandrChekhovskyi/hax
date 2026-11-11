@@ -118,6 +118,27 @@ static void test_display_name_resolution(void)
     unsetenv("HAX_OPENAI_DISPLAY_NAME");
 }
 
+/* A generic endpoint is offered once its base URL is configured, through config or the
+ * environment alias; a concrete provider is offered whatever its availability. */
+static void test_generic_endpoint_offered_once_configured(void)
+{
+    unsetenv("HAX_OPENAI_BASE_URL");
+    unsetenv("DEEPSEEK_API_KEY");
+    const struct provider_def *compat = provider_find("openai-compatible");
+    EXPECT(!provider_offered(compat));
+    EXPECT(provider_offered(provider_find("deepseek")));
+
+    setenv("HAX_OPENAI_BASE_URL", "http://127.0.0.1:1/v1", 1);
+    EXPECT(provider_offered(compat));
+    EXPECT(!provider_offered(provider_find("anthropic-compatible")));
+    unsetenv("HAX_OPENAI_BASE_URL");
+
+    EXPECT(config_load("{\"providers\": {\"openai-compatible\": {\"base_url\": \"http://x\"}}}") ==
+           0);
+    EXPECT(provider_offered(compat));
+    EXPECT(config_load(NULL) == 0);
+}
+
 /* Capability hooks declared on a def reach the constructed provider — including the /models
  * entry parser the listing applies, not just the vtable hooks. */
 static void test_def_hooks_reach_provider(void)
@@ -268,6 +289,7 @@ int main(void)
     test_autoselect_order();
     test_former_id_canonicalized();
     test_display_name_resolution();
+    test_generic_endpoint_offered_once_configured();
     test_def_hooks_reach_provider();
     test_port_template();
     test_pinned_def_ignores_compat_config();
