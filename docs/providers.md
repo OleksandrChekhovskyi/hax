@@ -26,6 +26,7 @@ keys in environment variables rather than command arguments or `config.json`.
 | `opencode-zen` | Curated pay-as-you-go models | `OPENCODE_API_KEY`; choose a model. |
 | `opencode-go` | OpenCode's model subscription | `OPENCODE_API_KEY`; choose a model. |
 | `deepseek` | Direct DeepSeek API | `DEEPSEEK_API_KEY`; choose a model. |
+| `minimax` | Direct MiniMax API | `MINIMAX_API_KEY`; choose a model. |
 | `llama.cpp` | Local `llama-server` | Start the server; model is normally discovered. |
 | `ollama` | Local Ollama models | Start `ollama serve`; choose a pulled model. |
 | `openai-compatible` | OpenAI Chat Completions-compatible endpoint | Base URL; usually choose a model. |
@@ -171,6 +172,16 @@ hax --provider=deepseek --model=deepseek-flash
 DeepSeek may train on what you send, code included, and stores it in China. Review its
 [privacy policy](https://cdn.deepseek.com/policies/en-US/deepseek-privacy-policy.html) and training
 opt-out before sending proprietary code.
+
+## MiniMax
+
+```sh
+export MINIMAX_API_KEY=...
+hax --provider=minimax --model=MiniMax-M3.1-Flash
+```
+
+MiniMax Token Plan keys (`sk-cp-...`) work with the same setup. The cost hax displays is a
+pay-as-you-go estimate, not a Token Plan charge.
 
 ## llama.cpp
 

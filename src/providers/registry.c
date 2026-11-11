@@ -128,6 +128,16 @@ static const struct provider_def DEFS[] = {
         .parse_model = deepseek_parse_model,
         .query_usage = deepseek_query_usage,
     },
+    {
+        .id = "minimax",
+        .api = "anthropic-messages",
+        .base_url = "https://api.minimax.io/anthropic/v1",
+        .pinned = 1,
+        .api_key_env = "MINIMAX_API_KEY",
+        .catalog_id = "minimax",
+        /* MiniMax documents adaptive and disabled only; never fall back to budget mode. */
+        .thinking_mode = "adaptive",
+    },
     /* Local servers. */
     {
         /* Dot-free so the id names its providers.llamacpp config block ('.' is the config key

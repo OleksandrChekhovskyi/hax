@@ -22,7 +22,7 @@ override saved choices and `config.json`. Variables hax reads beyond its own set
 
 | Variable | Purpose |
 | --- | --- |
-| `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `OPENCODE_API_KEY`, `DEEPSEEK_API_KEY` | Credentials for the hosted providers; see [hax-providers(7)](../providers.md). |
+| `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `OPENCODE_API_KEY`, `DEEPSEEK_API_KEY`, `MINIMAX_API_KEY` | Credentials for the hosted providers; see [hax-providers(7)](../providers.md). |
 | `VISUAL`, `EDITOR` | Editor for Ctrl-G, in that order of preference. |
 | `PAGER` | Pager for Ctrl-O and Ctrl-T; `less -R` when unset. |
 | `NO_COLOR` | Disables color under the default `theme=auto`. |
