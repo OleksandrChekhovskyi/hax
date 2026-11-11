@@ -13,6 +13,7 @@
 #include "provider.h"
 #include "session.h"
 #include "xalloc.h"
+#include "transport/api_error.h"
 #include "transport/http.h"
 
 static void test_over_threshold(void)
@@ -142,12 +143,21 @@ enum mock_script {
 
 struct mock_state {
     enum mock_script script;
+    /* Requests estimated above this many tokens, or with tools when `reject_tools` is set, fail
+     * as too large with `reject_kind`. */
+    long reject_above;
+    int reject_tools;
+    enum api_error_kind reject_kind;
     int stream_calls;
+    long request_tokens[8];
     /* What poll and checkpoint report; the later fields take over once the stream reaches them. */
     enum agent_signal signal;
     enum agent_signal signal_after_text;
     enum agent_signal signal_at_end;
     size_t last_request_items;
+    size_t last_request_tools;
+    int last_request_is_text;
+    int last_request_was_shortened;
 };
 
 static struct mock_state mock;
@@ -189,6 +199,13 @@ static void emit_error(stream_cb cb, void *user, const char *message,
     cb(&ev, user);
 }
 
+static void emit_rejection(stream_cb cb, void *user, enum api_error_kind kind)
+{
+    struct stream_event ev = {.kind = EV_ERROR,
+                              .u.error = {.message = "request too large", .kind = kind}};
+    cb(&ev, user);
+}
+
 static void emit_retry(stream_cb cb, void *user, const struct stream_usage *usage)
 {
     struct stream_event ev = {.kind = EV_RETRY,
@@ -214,8 +231,23 @@ static int mock_stream(struct provider *provider, const struct context *ctx, con
     (void)provider;
     (void)model;
     EXPECT(ctx != NULL);
+    long tokens =
+        text_token_estimate(ctx->system_prompt) + items_token_estimate(ctx->items, ctx->n_items);
+    if ((size_t)mock.stream_calls < sizeof(mock.request_tokens) / sizeof(mock.request_tokens[0]))
+        mock.request_tokens[mock.stream_calls] = tokens;
     mock.last_request_items = ctx->n_items;
+    mock.last_request_tools = ctx->n_tools;
+    mock.last_request_is_text = ctx->n_items == 1 && ctx->items[0].text &&
+                                strstr(ctx->items[0].text, "<conversation>") != NULL;
+    mock.last_request_was_shortened =
+        mock.last_request_is_text &&
+        strstr(strstr(ctx->items[0].text, "<conversation>"), " omitted") != NULL;
     mock.stream_calls++;
+
+    if ((mock.reject_above && tokens > mock.reject_above) || (mock.reject_tools && ctx->n_tools)) {
+        emit_rejection(cb, user, mock.reject_kind);
+        return 0;
+    }
 
     if ((mock.script == MOCK_RETRY_ONCE && mock.stream_calls == 1) ||
         mock.script == MOCK_ALWAYS_TOOL_CALL) {
@@ -465,17 +497,166 @@ static void test_tool_call_retries_are_bounded(void)
 
     struct compact_result result = run_compaction(&session, &provider, NULL);
     EXPECT(result.outcome == COMPACT_NO_SUMMARY);
-    EXPECT(result.attempts == 2);
-    EXPECT(mock.stream_calls == 2);
-    /* History and prompt, then the rejected text, call, and result. */
-    EXPECT(mock.last_request_items == 5);
-    EXPECT(session.n_items == 3);
+    /* The window and prompt, a re-ask after the rejected call, then the window as text. */
+    EXPECT(result.attempts == 3);
+    EXPECT(mock.stream_calls == 3);
+    EXPECT(mock.last_request_is_text);
+    EXPECT(session.n_items == 4);
     EXPECT_STR_EQ(session.items[0].text, "old history");
     for (size_t i = 1; i < session.n_items; i++)
         EXPECT(session.items[i].kind == ITEM_TURN_USAGE);
 
     compact_result_destroy(&result);
     agent_session_free(&session);
+}
+
+/* A window with a system prompt, one tool, and `user_turns` prompts that each read
+ * `output_bytes`. */
+static void init_large_session(struct agent_session *session, size_t user_turns,
+                               size_t output_bytes)
+{
+    init_session(session);
+    session->system_prompt = xstrdup("system");
+    session->tools = xcalloc(1, sizeof(*session->tools));
+    session->tools[0].name = "read";
+    session->n_tools = 1;
+    char *output = xmalloc(output_bytes + 1);
+    memset(output, 'x', output_bytes);
+    output[output_bytes] = '\0';
+    for (size_t i = 0; i < user_turns; i++) {
+        agent_session_add_user(session, "read the next file");
+        agent_session_append(session, (struct item){.kind = ITEM_TOOL_CALL,
+                                                    .call_id = xstrdup("c"),
+                                                    .tool_name = xstrdup("read"),
+                                                    .tool_arguments_json = xstrdup("{}")});
+        agent_session_append(session, (struct item){.kind = ITEM_TOOL_RESULT,
+                                                    .call_id = xstrdup("c"),
+                                                    .output = xstrdup(output)});
+    }
+    free(output);
+}
+
+/* The text requests after the full-window one, each smaller than the last. */
+static void expect_shrinking_requests(int count)
+{
+    for (int i = 2; i < count; i++)
+        EXPECT(mock.request_tokens[i] < mock.request_tokens[i - 1]);
+}
+
+/* A window rejected as too long is summarized as text without tools, shortened until the
+ * provider accepts it. */
+static void test_overflow_summarizes_shortened_text(void)
+{
+    struct agent_session session;
+    init_large_session(&session, 3, 8000);
+    size_t history_items = session.n_items;
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_SUCCESS);
+    mock.reject_above = 3000;
+    mock.reject_kind = API_ERROR_CONTEXT_OVERFLOW;
+
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    EXPECT(result.outcome == COMPACT_COMPLETE);
+    EXPECT(result.attempts >= 3);
+    expect_shrinking_requests(result.attempts);
+    EXPECT(mock.last_request_is_text);
+    EXPECT(mock.last_request_tools == 0);
+    EXPECT(mock.last_request_was_shortened);
+
+    EXPECT(session.items[history_items + 1].origin == ITEM_ORIGIN_COMPACT_SEED);
+
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+/* The whole text goes first, then each shrink step must send a smaller request, and four steps
+ * end the run. */
+static void test_overflow_attempts_are_bounded(void)
+{
+    struct agent_session session;
+    init_large_session(&session, 3, 8000);
+    size_t history_items = session.n_items;
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_SUCCESS);
+    mock.reject_above = 1;
+    mock.reject_kind = API_ERROR_CONTEXT_OVERFLOW;
+
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    EXPECT(result.outcome == COMPACT_PROVIDER_ERROR);
+    EXPECT_STR_EQ(result.error_message, "request too large");
+    EXPECT(result.attempts == 6);
+    expect_shrinking_requests(result.attempts);
+    EXPECT(session.n_items == history_items);
+
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+/* Text carries no media, so a byte-size rejection first retries the window whole as text. */
+static void test_payload_too_large_sends_whole_text(void)
+{
+    struct agent_session session;
+    init_large_session(&session, 1, 400);
+    struct item *result_item = &session.items[session.n_items - 1];
+    result_item->images = xcalloc(1, sizeof(*result_item->images));
+    result_item->images[0].mime = xstrdup("image/png");
+    result_item->images[0].data_b64 = xstrdup("AAAA");
+    result_item->n_images = 1;
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_SUCCESS);
+    mock.reject_above = ITEM_IMAGE_TOKEN_ESTIMATE;
+    mock.reject_kind = API_ERROR_PAYLOAD_TOO_LARGE;
+
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    EXPECT(result.outcome == COMPACT_COMPLETE);
+    EXPECT(result.attempts == 2);
+    EXPECT(mock.last_request_is_text);
+    EXPECT(!mock.last_request_was_shortened);
+
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+/* Tool schemas can overflow a short history; the text request, which has none, still goes out. */
+static void test_overflow_from_tools_sends_text(void)
+{
+    struct agent_session session;
+    init_large_session(&session, 0, 0);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_SUCCESS);
+    mock.reject_tools = 1;
+    mock.reject_kind = API_ERROR_CONTEXT_OVERFLOW;
+
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    EXPECT(result.outcome == COMPACT_COMPLETE);
+    EXPECT(result.attempts == 2);
+    EXPECT(mock.last_request_is_text);
+
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+/* With a known window, even the first text request aims at a share of it less the reserve. */
+static void test_text_fits_known_window(void)
+{
+    config_set_override("context_limit", "4000");
+    struct agent_session session;
+    init_large_session(&session, 3, 8000);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_SUCCESS);
+    mock.reject_above = 4000;
+    mock.reject_kind = API_ERROR_PAYLOAD_TOO_LARGE;
+
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    EXPECT(result.outcome == COMPACT_COMPLETE);
+    EXPECT(result.attempts == 2);
+    EXPECT(mock.request_tokens[0] > 4000);
+    EXPECT(mock.request_tokens[1] <= 2550); /* 85% of 4000 less a quarter */
+    EXPECT(mock.last_request_was_shortened);
+
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+    config_set_override("context_limit", NULL);
 }
 
 /* The floor is derived from the recorded seed, so a resumed file needs no carried-over state. */
@@ -709,6 +890,11 @@ int main(void)
     test_compacts_twice();
     test_keeps_one_session();
     test_tool_call_retries_are_bounded();
+    test_overflow_summarizes_shortened_text();
+    test_overflow_attempts_are_bounded();
+    test_payload_too_large_sends_whole_text();
+    test_overflow_from_tools_sends_text();
+    test_text_fits_known_window();
     test_resumed_session_floors_at_seed();
     test_preserves_failure();
     test_failure_without_message();

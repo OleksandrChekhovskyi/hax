@@ -200,28 +200,8 @@ int bash_read_head_slice(int fd, off_t range_start, size_t cap_bytes, size_t cap
         buf_append(out, chunk, (size_t)bytes_read);
     }
 
-    size_t last_newline = out->len;
-    while (last_newline > 0 && out->data[last_newline - 1] != '\n')
-        last_newline--;
-    if (last_newline == 0) {
-        out->len = 0;
-        if (out->data)
-            out->data[0] = '\0';
-        return 0;
-    }
-    out->len = last_newline;
-
-    size_t lines = count_newlines(out->data, out->len);
-    if (lines > cap_lines) {
-        size_t lines_seen = 0, offset = 0;
-        while (offset < out->len && lines_seen < cap_lines) {
-            if (out->data[offset] == '\n')
-                lines_seen++;
-            offset++;
-        }
-        out->len = offset;
-        lines = cap_lines;
-    }
+    size_t lines = 0;
+    out->len = whole_lines_head(out->data, out->len, cap_lines, &lines);
     if (out->data)
         out->data[out->len] = '\0';
 
@@ -265,35 +245,13 @@ int bash_read_tail_slice(int fd, off_t range_start, size_t range_bytes, size_t c
         buf_append(out, chunk, (size_t)bytes_read);
     }
 
-    /* Do not trim when the only newline ends the window; that would erase a long line. */
-    if (needs_alignment && out->len > 0) {
-        char *newline = memchr(out->data, '\n', out->len);
-        if (newline) {
-            size_t skip_bytes = (size_t)(newline - out->data) + 1;
-            if (skip_bytes < out->len) {
-                memmove(out->data, out->data + skip_bytes, out->len - skip_bytes);
-                out->len -= skip_bytes;
-                if (out->data)
-                    out->data[out->len] = '\0';
-            }
-        }
-    }
-
-    size_t newline_count = count_newlines(out->data ? out->data : "", out->len);
-    size_t line_count = newline_count + (out->len > 0 && out->data[out->len - 1] != '\n' ? 1 : 0);
-    if (line_count > cap_lines) {
-        size_t lines_to_skip = line_count - cap_lines;
-        size_t offset = 0;
-        while (lines_to_skip > 0 && offset < out->len) {
-            if (out->data[offset] == '\n')
-                lines_to_skip--;
-            offset++;
-        }
-        memmove(out->data, out->data + offset, out->len - offset);
-        out->len -= offset;
-        if (out->data)
-            out->data[out->len] = '\0';
-        line_count = cap_lines;
+    size_t line_count = 0;
+    size_t skip_bytes =
+        whole_lines_tail(out->data, out->len, needs_alignment, cap_lines, &line_count);
+    if (skip_bytes > 0) {
+        memmove(out->data, out->data + skip_bytes, out->len - skip_bytes);
+        out->len -= skip_bytes;
+        out->data[out->len] = '\0';
     }
 
     *kept_bytes_out = out->len;
@@ -402,8 +360,8 @@ static void build_model_body(struct bash_output *output, int binary, struct buf 
     }
 
     size_t total_cap = output_cap_bytes();
-    size_t head_cap_bytes = total_cap / BASH_OUTPUT_HEAD_DIVISOR;
-    size_t head_cap_lines = OUTPUT_CAP_LINES / BASH_OUTPUT_HEAD_DIVISOR;
+    size_t head_cap_bytes = total_cap / OUTPUT_CAP_HEAD_DIVISOR;
+    size_t head_cap_lines = OUTPUT_CAP_LINES / OUTPUT_CAP_HEAD_DIVISOR;
     size_t tail_cap_bytes = total_cap - head_cap_bytes;
     size_t tail_cap_lines = OUTPUT_CAP_LINES - head_cap_lines;
 

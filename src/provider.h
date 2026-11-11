@@ -103,6 +103,7 @@ size_t items_image_count(const struct item *items, size_t n_items);
  * An item counts its message text, tool name, arguments, output, and readable reasoning; opaque
  * reasoning state does not tokenize like text and is left out. `text` may be NULL. */
 #define ITEM_IMAGE_TOKEN_ESTIMATE 2000L
+long bytes_token_estimate(size_t bytes);
 long text_token_estimate(const char *text);
 long items_token_estimate(const struct item *items, size_t n_items);
 

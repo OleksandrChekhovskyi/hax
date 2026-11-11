@@ -2,6 +2,7 @@
 #include "tools/output_cap.h"
 
 #include <stdio.h>
+#include <string.h>
 
 #include "buf.h"
 #include "config.h"
@@ -38,4 +39,41 @@ char *cap_line_lengths(const char *data, size_t length, size_t max_line_bytes, s
     if (out_len)
         *out_len = result.len;
     return buf_steal(&result);
+}
+
+size_t whole_lines_head(const char *data, size_t length, size_t max_lines, size_t *lines_out)
+{
+    size_t end = 0;
+    size_t lines = 0;
+    for (size_t i = 0; i < length && lines < max_lines; i++) {
+        if (data[i] == '\n') {
+            end = i + 1;
+            lines++;
+        }
+    }
+    if (lines_out)
+        *lines_out = lines;
+    return end;
+}
+
+size_t whole_lines_tail(const char *data, size_t length, int mid_line, size_t max_lines,
+                        size_t *lines_out)
+{
+    size_t start = 0;
+    if (mid_line && length > 0) {
+        const char *newline = memchr(data, '\n', length);
+        if (newline && (size_t)(newline - data) + 1 < length)
+            start = (size_t)(newline - data) + 1;
+    }
+
+    size_t lines = length > start && data[length - 1] != '\n';
+    for (size_t i = start; i < length; i++)
+        lines += data[i] == '\n';
+    for (; lines > max_lines; lines--) {
+        const char *newline = memchr(data + start, '\n', length - start);
+        start = newline ? (size_t)(newline - data) + 1 : length;
+    }
+    if (lines_out)
+        *lines_out = lines;
+    return start;
 }

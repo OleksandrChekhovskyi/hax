@@ -85,6 +85,7 @@ sources = files(
     'src/catalog.c',
     'src/cli.c',
     'src/compact.c',
+    'src/compact_text.c',
     'src/config.c',
     'src/cred_store.c',
     'src/diag.c',

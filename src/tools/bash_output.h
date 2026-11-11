@@ -46,10 +46,6 @@ void bash_format_byte_size(char *buf, size_t buf_size, size_t bytes);
 /* Shared output-shaping policy and helpers, used for both synchronous results and background
  * task deliveries so every truncated body follows one dialect. */
 
-/* Fraction of the byte/line budget reserved for a leading summary; the rest goes to the
- * trailing results. */
-#define BASH_OUTPUT_HEAD_DIVISOR 8
-
 /* Append data with per-line width caps and UTF-8 sanitization applied. */
 void bash_output_append_sanitized(struct buf *out, const char *data, size_t len);
 

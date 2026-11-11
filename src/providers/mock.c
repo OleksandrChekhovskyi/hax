@@ -17,6 +17,7 @@
 #include "xalloc.h"
 #include "providers/registry.h"
 #include "system/rand.h"
+#include "text/utf8.h"
 #include "transport/api_error.h"
 #include "transport/http.h"
 
@@ -76,8 +77,7 @@ static int emit_chunked(stream_cb callback, void *callback_user, const char *tex
 
         size_t chunk_len = length - offset < TEXT_CHUNK_BYTES ? length - offset : TEXT_CHUNK_BYTES;
         if (offset + chunk_len < length) {
-            while (chunk_len > 0 && ((unsigned char)text[offset + chunk_len] & 0xC0) == 0x80)
-                chunk_len--;
+            chunk_len = utf8_char_start(text + offset, chunk_len);
             /* A full window of continuation bytes is already malformed; preserve progress. */
             if (chunk_len == 0)
                 chunk_len = length - offset < TEXT_CHUNK_BYTES ? length - offset : TEXT_CHUNK_BYTES;

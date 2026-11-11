@@ -74,6 +74,37 @@ static void test_cap_lines_long_line_no_trailing_newline(void)
     free(out);
 }
 
+static void test_whole_lines_head(void)
+{
+    size_t lines = 99;
+    EXPECT(whole_lines_head("a\nbb\ncc", 8, 10, &lines) == 5); /* the partial last line goes */
+    EXPECT(lines == 2);
+    EXPECT(whole_lines_head("a\nbb\ncc", 8, 1, &lines) == 2);
+    EXPECT(lines == 1);
+    EXPECT(whole_lines_head("long line", 9, 10, &lines) == 0);
+    EXPECT(lines == 0);
+    EXPECT(whole_lines_head(NULL, 0, 10, NULL) == 0);
+}
+
+static void test_whole_lines_tail(void)
+{
+    size_t lines = 99;
+    /* Mid-line, the partial first line goes; a final unterminated line counts. */
+    EXPECT(whole_lines_tail("aa\nbb\ncc", 8, 1, 10, &lines) == 3);
+    EXPECT(lines == 2);
+    EXPECT(whole_lines_tail("aa\nbb\ncc", 8, 0, 10, &lines) == 0);
+    EXPECT(lines == 3);
+    EXPECT(whole_lines_tail("aa\nbb\ncc", 8, 0, 1, &lines) == 6);
+    EXPECT(lines == 1);
+    /* A single long line is kept raw rather than erased. */
+    EXPECT(whole_lines_tail("long line\n", 10, 1, 10, &lines) == 0);
+    EXPECT(lines == 1);
+    EXPECT(whole_lines_tail("long line", 9, 1, 10, &lines) == 0);
+    EXPECT(lines == 1);
+    EXPECT(whole_lines_tail(NULL, 0, 1, 10, &lines) == 0);
+    EXPECT(lines == 0);
+}
+
 int main(void)
 {
     test_cap_lines_no_long_lines();
@@ -81,6 +112,8 @@ int main(void)
     test_cap_lines_truncates_long_line();
     test_cap_lines_preserves_short_neighbors();
     test_cap_lines_long_line_no_trailing_newline();
+    test_whole_lines_head();
+    test_whole_lines_tail();
 
     T_REPORT();
 }

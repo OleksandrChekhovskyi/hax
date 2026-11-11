@@ -32,6 +32,7 @@ test_sources = [
     'test_catalog_fetch.c',
     'test_cli.c',
     'test_compact.c',
+    'test_compact_text.c',
     'test_config.c',
     'test_cred_store.c',
     'test_diag.c',

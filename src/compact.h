@@ -64,10 +64,12 @@ struct compact_result {
     int auto_suspended;
 };
 
-/* Summarize the current model-visible context and append a seed on success. Every attempt's
- * reported usage is appended to the session and both logs are flushed. A success clears the
- * session's compact_failures, and an automatic run that fails without being cancelled adds one.
- * The result owns `error_message`, which is NULL unless the provider reported one. */
+/* Summarize the current model-visible context and append a seed on success. A window the provider
+ * rejects as too large, or a reply that keeps calling tools, falls back to a shortened text form of
+ * the window. Every attempt's reported usage is appended to the session and both logs are flushed.
+ * A success clears the session's compact_failures, and an automatic run that fails without being
+ * cancelled adds one. The result owns `error_message`, which is NULL unless the provider reported
+ * one. */
 void compact_run(const struct compact_params *params, struct compact_result *result);
 void compact_result_destroy(struct compact_result *result);
 

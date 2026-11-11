@@ -9,6 +9,7 @@
 
 #include "buf.h"
 #include "xalloc.h"
+#include "text/utf8.h"
 #include "transport/sse.h"
 
 #define MAX_MESSAGE_BYTES 200
@@ -87,9 +88,7 @@ static char *truncate_utf8(const char *message, size_t max_bytes)
     if (len <= max_bytes)
         return xstrdup(message);
 
-    size_t end = max_bytes;
-    while (end > 0 && ((unsigned char)message[end] & 0xC0) == 0x80)
-        end--;
+    size_t end = utf8_char_start(message, max_bytes);
 
     char *truncated = xmalloc(end + 4);
     memcpy(truncated, message, end);

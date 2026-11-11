@@ -28,6 +28,10 @@ size_t utf8_encode_codepoint(uint32_t codepoint, char out[4]);
 size_t utf8_next(const char *bytes, size_t length, size_t offset);
 size_t utf8_prev(const char *bytes, size_t offset);
 
+/* The start of the codepoint containing byte `offset`: `offset` itself unless it is a
+ * continuation byte. Cutting there leaves no partial codepoint before the cut. */
+size_t utf8_char_start(const char *bytes, size_t offset);
+
 /* Measure the codepoint at offset and write its byte length to codepoint_len. Returns zero at the
  * end, a positive terminal-cell width for printable codepoints, and -1 for malformed input,
  * controls, or format characters that could hide or rearrange terminal content. Tab and newline

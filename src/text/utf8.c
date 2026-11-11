@@ -113,6 +113,13 @@ size_t utf8_next(const char *bytes, size_t length, size_t offset)
     return offset + sequence_len;
 }
 
+size_t utf8_char_start(const char *bytes, size_t offset)
+{
+    while (offset > 0 && byte_is_continuation((unsigned char)bytes[offset]))
+        offset--;
+    return offset;
+}
+
 size_t utf8_prev(const char *bytes, size_t offset)
 {
     if (offset == 0)

@@ -55,7 +55,7 @@ static size_t text_bytes(const char *text)
     return text ? strlen(text) : 0;
 }
 
-static long bytes_token_estimate(size_t bytes)
+long bytes_token_estimate(size_t bytes)
 {
     return (long)((bytes + TOKEN_ESTIMATE_BYTES - 1) / TOKEN_ESTIMATE_BYTES);
 }

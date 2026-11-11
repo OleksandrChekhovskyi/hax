@@ -406,8 +406,8 @@ static void append_capped_range(struct task *t, size_t from, size_t to, struct b
 {
     size_t range = to - from;
     size_t cap = output_cap_bytes();
-    size_t head_cap = cap / BASH_OUTPUT_HEAD_DIVISOR;
-    size_t head_lines_cap = OUTPUT_CAP_LINES / BASH_OUTPUT_HEAD_DIVISOR;
+    size_t head_cap = cap / OUTPUT_CAP_HEAD_DIVISOR;
+    size_t head_lines_cap = OUTPUT_CAP_LINES / OUTPUT_CAP_HEAD_DIVISOR;
 
     struct buf tail;
     buf_init(&tail);

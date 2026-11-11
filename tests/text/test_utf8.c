@@ -204,6 +204,20 @@ static void test_next_overlong_steps_one(void)
     EXPECT(utf8_next(s, 2, 0) == 1);
 }
 
+/* "a", then U+20AC (three bytes), then "b". */
+static void test_char_start(void)
+{
+    const char text[] = "a\xE2\x82\xAC"
+                        "b";
+    EXPECT(utf8_char_start(text, 0) == 0);
+    EXPECT(utf8_char_start(text, 1) == 1);
+    EXPECT(utf8_char_start(text, 2) == 1);
+    EXPECT(utf8_char_start(text, 3) == 1);
+    EXPECT(utf8_char_start(text, 4) == 4);
+    /* Continuation bytes alone back up to the start. */
+    EXPECT(utf8_char_start("\x80\x80", 1) == 0);
+}
+
 static void test_prev_ascii(void)
 {
     const char *s = "abc";
@@ -517,6 +531,7 @@ int main(void)
     test_prev_lone_continuation();
     test_prev_overlong_steps_one();
     test_prev_leader_length_mismatch();
+    test_char_start();
 
     test_cells_ascii();
     test_cells_at_end();

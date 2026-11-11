@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "xalloc.h"
+#include "text/utf8.h"
 
 void completion_add(struct completion *completion, const char *candidate)
 {
@@ -56,9 +57,7 @@ static size_t shared_prefix_len(const struct completion *completion)
     }
     /* Candidates that differ inside a multibyte character share only its leading bytes; stop
      * before that character rather than emit a partial one. */
-    while (shared > 0 && ((unsigned char)first[shared] & 0xc0) == 0x80)
-        shared--;
-    return shared;
+    return utf8_char_start(first, shared);
 }
 
 /* Return the end of the part of `candidate` that continues at byte `from`: just past the next
