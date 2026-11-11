@@ -72,6 +72,8 @@ test_sources = [
     'providers/test_deepseek.c',
     'providers/test_provider_config.c',
     'providers/test_http_provider.c',
+    'providers/test_kimi_auth.c',
+    'providers/test_kimi_login.c',
     'providers/test_llamacpp.c',
     'providers/test_mock.c',
     'providers/test_model_info.c',
@@ -180,6 +182,7 @@ endforeach
 # binary through the mock provider (see e2e/harness.py). Names mirror the C tests:
 # e2e/test_oneshot.py registers as e2e/oneshot, so `meson test 'e2e/*'` selects the group.
 e2e_scenarios = [
+    'kimi',
     'oneshot',
     'repl_compact',
     'repl_complete',

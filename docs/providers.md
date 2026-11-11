@@ -26,6 +26,7 @@ keys in environment variables rather than command arguments or `config.json`.
 | `opencode-zen` | Curated pay-as-you-go models | `OPENCODE_API_KEY`; choose a model. |
 | `opencode-go` | OpenCode's model subscription | `OPENCODE_API_KEY`; choose a model. |
 | `deepseek` | Direct DeepSeek API | `DEEPSEEK_API_KEY`; choose a model. |
+| `kimi` | Kimi Code subscription | Run `/login kimi`; choose a model. |
 | `llama.cpp` | Local `llama-server` | Start the server; model is normally discovered. |
 | `ollama` | Local Ollama models | Start `ollama serve`; choose a pulled model. |
 | `openai-compatible` | OpenAI Chat Completions-compatible endpoint | Base URL; usually choose a model. |
@@ -171,6 +172,26 @@ hax --provider=deepseek --model=deepseek-flash
 DeepSeek may train on what you send, code included, and stores it in China. Review its
 [privacy policy](https://cdn.deepseek.com/policies/en-US/deepseek-privacy-policy.html) and training
 opt-out before sending proprietary code.
+
+## Kimi Code
+
+Run `/login kimi`, open the displayed `auth.kimi.com` link in a browser on any device, and approve
+its device code. This also works over ssh; the Kimi CLI is not required. Use `/provider` to select
+**Kimi Code**, then `/model` to choose an available model:
+
+```sh
+hax --provider=kimi --model=kimi-for-coding
+```
+
+The `kimi` provider uses the Kimi Code subscription endpoint, not the Moonshot pay-as-you-go API.
+Tokens are stored under `kimi` in `~/.local/state/hax/auth.json` (or the XDG state directory), with
+mode 0600. hax refreshes them automatically, coordinating token rotation across hax processes.
+It does not read or modify Kimi CLI credentials. A new login in another process is not silently
+adopted by an existing conversation; switch with `/provider` to adopt it explicitly.
+
+`/logout kimi` removes the local login, including from the active provider. Kimi does not expose
+a token-revocation endpoint, so this does not revoke the remote grant. `/usage` is not supported.
+For a Moonshot API key or a different endpoint, use a [custom provider](#custom-providers).
 
 ## llama.cpp
 

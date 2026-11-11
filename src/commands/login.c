@@ -10,6 +10,8 @@
 #include "xalloc.h"
 #include "providers/codex.h"
 #include "providers/codex_login.h"
+#include "providers/kimi_auth.h"
+#include "providers/kimi_login.h"
 #include "providers/registry.h"
 #include "render/disp.h"
 #include "render/render_ctx.h"
@@ -39,6 +41,15 @@ static const struct login_method METHODS[] = {
         .status = codex_login_status,
         .logged_in = codex_login_present,
         .adopt = codex_provider_reload_auth,
+    },
+    {
+        .provider_id = "kimi",
+        .detail = "Kimi Code account (device login)",
+        .login = kimi_login_run,
+        .logout = kimi_logout_run,
+        .status = kimi_login_status,
+        .logged_in = kimi_login_present,
+        .adopt = kimi_provider_reload_auth,
     },
 };
 #define N_METHODS (sizeof(METHODS) / sizeof(METHODS[0]))
@@ -98,7 +109,7 @@ static const struct login_method *resolve_argument(struct agent_state *state, co
 {
     const struct login_method *method = find_method(argument);
     if (!method) {
-        ui_error("no login flow for '%s' — hax manages logins for: codex", argument);
+        ui_error("no login flow for '%s' — hax manages logins for: codex kimi", argument);
         disp_sync_external_line(&state->render->disp);
     }
     return method;
