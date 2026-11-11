@@ -36,6 +36,8 @@
 #include "text/width.h"
 
 #define ESC_TIMEOUT_MS 50
+/* Longer than the gap between keystrokes in fluent typing, so a hint shows once typing stops. */
+#define HINT_DELAY_MS 300
 
 static void terminal_size(int *columns, int *rows)
 {
@@ -378,6 +380,8 @@ static int edit_area_rows(int terminal_rows)
  * indicator rows and at least one content row. */
 static void paint(struct input *in)
 {
+    input_core_update_hint(in);
+
     int prompt_width = input_core_prompt_width(in->prompt);
     int continuation_column = in->continuation_at_column_zero ? 0 : prompt_width;
     struct input_layout layout;
@@ -1209,6 +1213,20 @@ void input_history_open_tty(struct input *in, const char *path, int persist)
         input_history_load(in, path);
 }
 
+/* Wait for the next key, painting a pending hint once typing pauses. */
+static int read_key(struct input *in, unsigned char *key)
+{
+    if (in->hint_state == INPUT_HINT_PENDING) {
+        int ready = read_byte_timeout(key, HINT_DELAY_MS);
+        if (ready != 0)
+            return ready;
+        in->hint_state = INPUT_HINT_SHOWN;
+        refresh_terminal_size(in);
+        paint(in);
+    }
+    return read_byte_blocking(key);
+}
+
 /* ---------------- public API ---------------- */
 
 char *input_readline(struct input *in, const char *prompt)
@@ -1243,6 +1261,7 @@ char *input_readline(struct input *in, const char *prompt)
     in->exit_armed = 0;
     in->last_key_was_tab = 0;
     clear_candidates(in);
+    in->hint_state = INPUT_HINT_NONE;
     live_region_forget(&in->region);
     in->window_top = 0;
 
@@ -1255,7 +1274,7 @@ char *input_readline(struct input *in, const char *prompt)
 
     while (!submit && !eof) {
         unsigned char c;
-        int r = read_byte_blocking(&c);
+        int r = read_key(in, &c);
         if (r <= 0) {
             eof = 1;
             break;

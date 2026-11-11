@@ -52,7 +52,8 @@ struct input_completer;
 int input_add_completer(struct input *in, const struct input_completer *completer);
 
 /* Register the ghost-text hint: after each edit `fn` receives the buffer and returns a malloc'd
- * string, or NULL for no hint. The hook must not touch the tty; NULL `fn` disables it. */
+ * string, or NULL for no hint. A hint appears once typing pauses and then follows edits at once
+ * until none applies. The hook must not touch the tty; NULL `fn` disables it. */
 void input_set_hint(struct input *in, char *(*fn)(const char *buf, void *user), void *user);
 
 /* Register the Ctrl-V paste hook. Ctrl-V or an empty bracketed paste calls

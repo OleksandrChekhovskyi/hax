@@ -30,6 +30,14 @@ struct input_completer {
  * Small on purpose: these are top-level views, not a general keymap. */
 #define INPUT_MODAL_KEYS_MAX 4
 
+/* A hint waits until typing pauses, so one that the next keystroke would remove never flashes.
+ * Once shown, it follows edits without waiting again until no hint applies. */
+enum input_hint_state {
+    INPUT_HINT_NONE,
+    INPUT_HINT_PENDING,
+    INPUT_HINT_SHOWN,
+};
+
 struct input {
     /* current edit buffer (NUL-terminated, may contain '\n') */
     char *buf;
@@ -77,6 +85,7 @@ struct input {
 
     char *(*hint_fn)(const char *buf, void *user);
     void *hint_user;
+    enum input_hint_state hint_state;
 
     /* Returns malloc'd insertion text. Empty bracketed pastes also invoke this hook. */
     char *(*paste_hook)(void *user);
@@ -169,10 +178,14 @@ char *input_core_history_decode(const char *encoded, size_t len);
 /* Older entries are evicted past this cap. */
 #define INPUT_CORE_HISTORY_MAX 1000
 
+/* Recompute hint_state for the current buffer and cursor: NONE when no hint applies, otherwise
+ * PENDING unless a hint is already shown. Revealing a pending hint is the caller's decision. */
+void input_core_update_hint(struct input *in);
+
 /* Return the allocated dim text drawn after the buffer, or NULL: the exit confirmation, then
- * completion candidates, then the empty-buffer placeholder, then the hint. It appears only with the
- * cursor at the buffer end, which lets the painter erase it from the cursor, and it is sanitized
- * because candidates and hints may echo untrusted text. */
+ * completion candidates, then the empty-buffer placeholder, then a shown hint. It appears only
+ * with the cursor at the buffer end, which lets the painter erase it from the cursor, and it is
+ * sanitized because candidates and hints may echo untrusted text. */
 char *input_core_ghost_text(const struct input *in);
 
 /* ---- layout / utf-8 ---- */

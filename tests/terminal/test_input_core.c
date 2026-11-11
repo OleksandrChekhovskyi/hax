@@ -1204,6 +1204,7 @@ static void test_ghost_text_precedence(void)
     expect_ghost(in, "enter to continue");
 
     input_core_set_buffer(in, "/x");
+    in->hint_state = INPUT_HINT_SHOWN;
     expect_ghost(in, " hint for /x");
     in->candidates = xstrdup("  /a /b");
     expect_ghost(in, "  /a /b");
@@ -1213,6 +1214,44 @@ static void test_ghost_text_precedence(void)
     input_core_set_buffer(in, "");
     in->exit_armed = 1;
     expect_ghost(in, "ctrl+c again to exit");
+    input_free(in);
+}
+
+/* Hints only for a buffer starting with a slash, so a test can make one apply or not. */
+static char *slash_only_hint(const char *buf, void *user)
+{
+    (void)user;
+    return buf[0] == '/' ? xasprintf(" hint for %s", buf) : NULL;
+}
+
+static void test_hint_waits_until_revealed(void)
+{
+    struct input *in = new_with("/x");
+    in->hint_fn = slash_only_hint;
+    input_core_update_hint(in);
+    EXPECT(in->hint_state == INPUT_HINT_PENDING);
+    expect_ghost(in, NULL);
+
+    in->hint_state = INPUT_HINT_SHOWN;
+    expect_ghost(in, " hint for /x");
+
+    /* A shown hint follows an edit that keeps one applicable. */
+    input_core_insert(in, "y", 1);
+    input_core_update_hint(in);
+    EXPECT(in->hint_state == INPUT_HINT_SHOWN);
+    expect_ghost(in, " hint for /xy");
+
+    /* Moving off the end hides it, and returning waits again. */
+    input_core_move_left(in);
+    input_core_update_hint(in);
+    EXPECT(in->hint_state == INPUT_HINT_NONE);
+    input_core_move_right(in);
+    input_core_update_hint(in);
+    EXPECT(in->hint_state == INPUT_HINT_PENDING);
+
+    input_core_set_buffer(in, "x");
+    input_core_update_hint(in);
+    EXPECT(in->hint_state == INPUT_HINT_NONE);
     input_free(in);
 }
 
@@ -1309,6 +1348,7 @@ int main(void)
     test_decode_overflow_and_runaway();
 
     test_ghost_text_precedence();
+    test_hint_waits_until_revealed();
     test_ghost_text_is_sanitized();
     T_REPORT();
 }

@@ -51,9 +51,20 @@ static char *unsanitized_ghost_text(const struct input *in)
         return xstrdup(in->candidates);
     if (in->len == 0 && in->empty_placeholder)
         return xstrdup(in->empty_placeholder);
-    if (in->hint_fn)
+    if (in->hint_fn && in->hint_state == INPUT_HINT_SHOWN)
         return in->hint_fn(in->buf, in->hint_user);
     return NULL;
+}
+
+void input_core_update_hint(struct input *in)
+{
+    char *hint = in->hint_fn && in->cursor == in->len ? in->hint_fn(in->buf, in->hint_user) : NULL;
+
+    if (!hint)
+        in->hint_state = INPUT_HINT_NONE;
+    else if (in->hint_state == INPUT_HINT_NONE)
+        in->hint_state = INPUT_HINT_PENDING;
+    free(hint);
 }
 
 char *input_core_ghost_text(const struct input *in)
