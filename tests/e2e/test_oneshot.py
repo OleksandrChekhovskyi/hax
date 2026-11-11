@@ -82,6 +82,32 @@ def test_failed_compaction_is_reported():
     harness.expect("Finished anyway." in result.stdout, "the run continues to its answer", result)
 
 
+def test_rejected_request_is_compacted_and_retried():
+    """A request rejected as too large is compacted and sent again, and the answer reaches stdout
+    without an error."""
+    result = harness.run_oneshot(
+        "count",
+        """
+        tool bash {"command":"seq 1 4000"}
+        end-turn
+
+        # Requests over the limit, such as the one carrying the tool output, fail and replay this
+        # turn; the summary request, its output clipped, fits and gets the summary.
+        overflow limit=3000
+        text ## Goal\\n- count
+        end-turn
+
+        # The retry over the seed.
+        text Counted.
+        end-turn
+        """,
+    )
+    harness.expect(result.returncode == 0, "exit status is 0", result)
+    harness.expect("[compacted context]" in result.stderr, "the compaction is noted", result)
+    harness.expect("error" not in result.stderr, "the rejection is not reported", result)
+    harness.expect(result.stdout == "Counted.\n", "the retried request answers", result)
+
+
 def test_json_stream():
     """--json turns stdout into a JSONL stream: a session record, conversation records in
     session-file schema, and a terminal result record."""

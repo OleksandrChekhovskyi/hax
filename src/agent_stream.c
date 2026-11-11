@@ -106,3 +106,15 @@ int agent_stream_has_usage(const struct agent_stream *stream)
 {
     return attempt_log_has_usage(&stream->attempts);
 }
+
+int agent_stream_rejected_for_size(const struct agent_stream *stream, long context_limit)
+{
+    if (stream->assembly.state != TURN_FAILED)
+        return 0;
+    /* A known window keeps room for the reply before compacting, so a length limit there is an
+     * output cap, such as a provider's default max_tokens, not a full context. */
+    if (stream->error_kind == API_ERROR_LENGTH_LIMIT)
+        return context_limit <= 0;
+    return stream->error_kind == API_ERROR_CONTEXT_OVERFLOW ||
+           stream->error_kind == API_ERROR_PAYLOAD_TOO_LARGE;
+}

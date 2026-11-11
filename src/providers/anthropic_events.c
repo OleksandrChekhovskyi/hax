@@ -291,9 +291,9 @@ static void handle_message_delta(struct anthropic_events *parser, json_t *root)
     capture_usage(parser, json_object_get(root, "usage"));
 }
 
-/* `error` is the native error object carrying `type` and `message`, or NULL. */
+/* `code` and `detail` are the native error type or stop reason and the server's text, or NULL. */
 static void emit_terminal_error(struct anthropic_events *parser, const char *message,
-                                const json_t *error)
+                                const char *code, const char *detail)
 {
     parser->terminal_emitted = 1;
     struct stream_response response = response_of(parser);
@@ -301,8 +301,8 @@ static void emit_terminal_error(struct anthropic_events *parser, const char *mes
         .kind = EV_ERROR,
         .u.error = {.message = message,
                     .http_status = 0,
-                    .code = json_string_value(json_object_get(error, "type")),
-                    .detail = json_string_value(json_object_get(error, "message")),
+                    .code = code,
+                    .detail = detail,
                     .usage = &parser->usage,
                     .response = &response},
     };
@@ -319,12 +319,17 @@ static void handle_message_stop(struct anthropic_events *parser)
         emit_terminal_error(parser,
                             "response incomplete: max_tokens — raise the provider's "
                             "max_tokens or lower the effort level",
+                            reason, NULL);
+        return;
+    }
+    if (reason && strcmp(reason, "model_context_window_exceeded") == 0) {
+        emit_terminal_error(parser, "response incomplete: the context window is full", reason,
                             NULL);
         return;
     }
     /* pause_turn requires replaying server-side tool state, which hax does not drive. */
     if (reason && strcmp(reason, "pause_turn") == 0) {
-        emit_terminal_error(parser, "response paused before completion (pause_turn)", NULL);
+        emit_terminal_error(parser, "response paused before completion (pause_turn)", NULL, NULL);
         return;
     }
 
@@ -345,7 +350,8 @@ static void handle_error(struct anthropic_events *parser, json_t *root)
 
     json_t *error = json_object_get(root, "error");
     const char *message = json_string_value(json_object_get(error, "message"));
-    emit_terminal_error(parser, message ? message : "provider error", error);
+    emit_terminal_error(parser, message ? message : "provider error",
+                        json_string_value(json_object_get(error, "type")), message);
 }
 
 void anthropic_events_feed(struct anthropic_events *parser, const char *event_name,
@@ -385,5 +391,5 @@ out:
 void anthropic_events_finalize(struct anthropic_events *parser)
 {
     if (!parser->terminal_emitted)
-        emit_terminal_error(parser, "stream ended before completion", NULL);
+        emit_terminal_error(parser, "stream ended before completion", NULL, NULL);
 }

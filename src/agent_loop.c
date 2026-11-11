@@ -210,6 +210,42 @@ static void loop_flush(const struct agent_loop_params *params)
     agent_flush_logs(params->tlog, params->slog, params->session->items, params->session->n_items);
 }
 
+enum loop_compaction {
+    LOOP_COMPACT_FAILED,
+    LOOP_COMPACTED,
+    LOOP_COMPACT_STOPPED, /* a stop request ended the run; result->outcome is set */
+};
+
+/* Run the frontend's compaction over flushed history, then settle a stop request raised during
+ * it. */
+static enum loop_compaction loop_compact(const struct agent_loop_params *params,
+                                         struct agent_loop_result *result,
+                                         enum compact_reason reason)
+{
+    const struct agent_loop_hooks *hooks = &params->hooks;
+    int compacted = hooks->compact(reason, hooks->user);
+    if (compacted)
+        result->last_context_tokens = -1;
+    enum agent_signal sig = loop_checkpoint(hooks);
+    if (sig == AGENT_SIGNAL_ABORT) {
+        agent_session_mark_interrupt(params->session);
+        loop_flush(params);
+        result->outcome = AGENT_LOOP_INTERRUPTED;
+        result->abort_marker_placed = 1;
+        return LOOP_COMPACT_STOPPED;
+    }
+    if (sig == AGENT_SIGNAL_PAUSE) {
+        result->outcome = AGENT_LOOP_PAUSED;
+        return LOOP_COMPACT_STOPPED;
+    }
+    return compacted ? LOOP_COMPACTED : LOOP_COMPACT_FAILED;
+}
+
+/* Requests accepted between two compactions that answer rejections: two mean a tool batch's
+ * results fit. With fewer, the compacted window or the first batch after it overflowed, and
+ * compacting again would likely end the same way. */
+#define RECOVERY_MIN_ACCEPTED 2
+
 static void loop_run_active(const struct agent_loop_params *params,
                             struct agent_loop_result *result)
 {
@@ -220,16 +256,15 @@ static void loop_run_active(const struct agent_loop_params *params,
      * returns from its branch below. */
     result->outcome = AGENT_LOOP_MAX_TURNS;
     result->last_context_tokens = -1;
+    int recovered = 0; /* a compaction in this run answered a rejected request */
+    int accepted_since_recovery = 0;
 
     for (int turn_n = 0; params->max_turns <= 0 || turn_n < params->max_turns; turn_n++) {
-        /* The first boundary arrived with the user message — except on a continued run, whose
-         * first turn extends the previous seam. Follow-up turns owe their own. Either way it is
-         * appended lazily — just before this turn's items land in history — so a turn that
-         * leaves nothing behind (a pause pre-empting a still-prefilling request, a provider
-         * failure before any output) doesn't leave a dangling empty turn header in the
-         * transcript. Boundaries are inert to providers, so context built without one is
-         * unaffected. */
-        int owes_boundary = turn_n > 0 || params->continued;
+        /* The user message brought the first boundary, unless the run continues a previous seam;
+         * follow-up turns and a retry after a compaction seed owe their own. It is appended only
+         * when this turn's items land, so a turn that leaves nothing behind leaves no empty turn
+         * header. Providers ignore boundaries, so the request built before it is unaffected. */
+        int owes_boundary = turn_n > 0 || params->continued || recovered;
 
         /* Deliver finished-task notes before building this turn's request, so the model hears
          * about completions at the earliest seam: between tool batches mid-turn, and with the
@@ -274,14 +309,36 @@ static void loop_run_active(const struct agent_loop_params *params,
             result->final_items_from = abort.items_from;
             result->final_items_to = abort.items_to;
             result->abort_marker_placed = abort.marker_placed;
-            result->error_message =
-                loop_turn.error_message ? xstrdup(loop_turn.error_message) : NULL;
             loop_add_usage(params, &loop_turn, 1);
             loop_flush(params);
+            int rejected_for_size = agent_stream_rejected_for_size(
+                &loop_turn, model_meta_context(params->provider, session->model));
+            char *error_message = loop_turn.error_message;
+            loop_turn.error_message = NULL;
             agent_stream_destroy(&loop_turn);
+
+            /* A partial reply stays, marked, before the seed, outside the window the retry sees. */
+            int may_recover = !recovered || accepted_since_recovery >= RECOVERY_MIN_ACCEPTED;
+            if (rejected_for_size && may_recover && hooks->compact &&
+                compact_auto_enabled(session)) {
+                recovered = 1;
+                accepted_since_recovery = 0;
+                enum loop_compaction compaction = loop_compact(params, result, COMPACT_OVERFLOW);
+                if (compaction != LOOP_COMPACT_FAILED) {
+                    free(error_message);
+                    if (compaction == LOOP_COMPACT_STOPPED)
+                        return;
+                    /* The retry re-issues this turn, outside max_turns. */
+                    result->abort_marker_placed = 0;
+                    turn_n--;
+                    continue;
+                }
+            }
+            result->error_message = error_message;
             result->outcome = AGENT_LOOP_PROVIDER_ERROR;
             return;
         }
+        accepted_since_recovery++;
 
         /* Sample cancellation after a clean stream but before absorption or dispatch, so a late
          * Esc cannot launch tools or another turn. A pause request is only noted: the batch it
@@ -384,28 +441,13 @@ static void loop_run_active(const struct agent_loop_params *params,
             return;
         }
 
-        /* Compact only at a seam another turn follows, once calls, results, and usage record are
-         * durable and before the next boundary; compact_due() reads the record and estimates the
-         * results it did not measure. After the last allowed turn, the run that continues
-         * compacts before its first request instead. Cancellation during the frontend
-         * transaction must stop continuation against old history. */
+        /* Only at a seam another turn follows, once the usage record compact_due() reads is
+         * appended; past the last allowed turn, the run that continues compacts before its first
+         * request. */
         int turns_left = params->max_turns <= 0 || turn_n + 1 < params->max_turns;
-        if (turns_left && hooks->compact && compact_due(session, params->provider, NULL)) {
-            if (hooks->compact(hooks->user))
-                result->last_context_tokens = -1;
-            sig = loop_checkpoint(hooks);
-            if (sig == AGENT_SIGNAL_ABORT) {
-                agent_session_mark_interrupt(session);
-                loop_flush(params);
-                result->outcome = AGENT_LOOP_INTERRUPTED;
-                result->abort_marker_placed = 1;
-                return;
-            }
-            if (sig == AGENT_SIGNAL_PAUSE) {
-                result->outcome = AGENT_LOOP_PAUSED;
-                return;
-            }
-        }
+        if (turns_left && hooks->compact && compact_due(session, params->provider, NULL) &&
+            loop_compact(params, result, COMPACT_THRESHOLD) == LOOP_COMPACT_STOPPED)
+            return;
     }
 }
 

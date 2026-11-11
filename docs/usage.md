@@ -275,11 +275,11 @@ conversation goes on, so a conversation you leave is never summarized for nothin
 earlier when the conversation has accumulated obsolete exploration, optionally naming what the
 summary must preserve. Manual compaction works even when the model's context limit is unknown.
 
-If a request fails because the conversation no longer fits the context window, `/compact` recovers
-it. A conversation too large to summarize whole is shortened first, oldest detail first, so restate
-anything from early on that still matters. If hax does not recognize a server's context-overflow
-error, add its wording to the provider's `overflow_phrases` setting (see
-[providers.md](./providers.md)).
+If the conversation outgrows the context window, even one whose size hax does not know, hax
+compacts it and carries on; with automatic compaction off, `/compact` recovers it. A conversation
+too large to summarize whole is shortened first, oldest detail first, so restate anything from
+early on that still matters. If hax does not recognize a server's context-overflow error, add its
+wording to the provider's `overflow_phrases` setting (see [providers.md](./providers.md)).
 
 After three automatic compactions fail with none succeeding in between, hax stops trying and says
 so. A successful `/compact`, a change of provider, model, effort, or any `/config` setting, `/undo`,

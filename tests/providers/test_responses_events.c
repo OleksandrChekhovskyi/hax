@@ -306,6 +306,7 @@ static void test_incomplete_with_reason(void)
     EXPECT(fixture.capture.count == 1);
     EXPECT(fixture.capture.events[0].kind == EV_ERROR);
     EXPECT(strstr(fixture.capture.events[0].message, "max_output_tokens") != NULL);
+    EXPECT_STR_EQ(fixture.capture.events[0].code, "max_output_tokens");
     EXPECT(fixture.capture.events[0].usage.input_tokens == 500);
     EXPECT(fixture.capture.events[0].usage.output_tokens == 80);
     EXPECT(fixture.capture.events[0].usage.cached_tokens == 300);

@@ -37,6 +37,7 @@ struct compact_hooks {
 enum compact_reason {
     COMPACT_MANUAL,
     COMPACT_THRESHOLD, /* compact_due() held before a request */
+    COMPACT_OVERFLOW,  /* the provider rejected a request as too large */
 };
 
 /* All pointers are borrowed for the duration of compact_run. `session` must be non-NULL;
@@ -66,10 +67,10 @@ struct compact_result {
 
 /* Summarize the current model-visible context and append a seed on success. A window the provider
  * rejects as too large, or a reply that keeps calling tools, falls back to a shortened text form of
- * the window. Every attempt's reported usage is appended to the session and both logs are flushed.
- * A success clears the session's compact_failures, and an automatic run that fails without being
- * cancelled adds one. The result owns `error_message`, which is NULL unless the provider reported
- * one. */
+ * the window; COMPACT_OVERFLOW starts from that form, since the window is known not to fit. Every
+ * attempt's reported usage is appended to the session and both logs are flushed. A success clears
+ * the session's compact_failures, and an automatic run that fails without being cancelled adds
+ * one. The result owns `error_message`, which is NULL unless the provider reported one. */
 void compact_run(const struct compact_params *params, struct compact_result *result);
 void compact_result_destroy(struct compact_result *result);
 
@@ -79,10 +80,13 @@ void compact_result_destroy(struct compact_result *result);
  * limit, or a percentage outside 1..100 do not trigger compaction. */
 int compact_over_threshold(long context_tokens, long context_limit, int threshold_percent);
 
-/* Whether the next request should be preceded by compaction: compact.auto and
- * compact.threshold applied to agent_session_context_estimate() plus `pending_prompt` against the
- * current model's context limit, unless the session's compact_failures has reached
- * COMPACT_MAX_AUTO_FAILURES. `provider` and `pending_prompt` may be NULL. */
+/* Whether automatic compaction may run: compact.auto is on and the session's compact_failures has
+ * not reached COMPACT_MAX_AUTO_FAILURES. */
+int compact_auto_enabled(const struct agent_session *session);
+
+/* Whether the next request should be preceded by compaction: compact.threshold applied to
+ * agent_session_context_estimate() plus `pending_prompt` against the current model's context
+ * limit, while compact_auto_enabled() holds. `provider` and `pending_prompt` may be NULL. */
 int compact_due(const struct agent_session *session, struct provider *provider,
                 const char *pending_prompt);
 

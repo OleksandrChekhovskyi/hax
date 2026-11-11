@@ -65,7 +65,7 @@ static void report_compact_failure(const struct compact_result *result)
         hax_warn("automatic compaction off after %d failures", COMPACT_MAX_AUTO_FAILURES);
 }
 
-static int auto_compact(void *user)
+static int auto_compact(enum compact_reason reason, void *user)
 {
     struct oneshot_state *state = user;
     struct compact_params params = {
@@ -73,7 +73,7 @@ static int auto_compact(void *user)
         .provider = state->provider,
         .session_log = state->session_log,
         .transcript_log = state->transcript,
-        .reason = COMPACT_THRESHOLD,
+        .reason = reason,
         .hooks = {.user = state, .poll = oneshot_poll, .checkpoint = oneshot_poll},
     };
     struct compact_result result;
@@ -583,7 +583,7 @@ int oneshot_run(struct provider *provider, const char *prompt, const struct hax_
     /* The REPL's compaction before a send: the loop compacts only at seams it reaches itself,
      * so a resumed record over the threshold is compacted here. */
     if (compact_due(&state.session, state.provider, prompt))
-        auto_compact(&state);
+        auto_compact(COMPACT_THRESHOLD, &state);
 
     struct agent_loop_result loop_result;
     enum agent_signal stop = agent_interrupt_signal();

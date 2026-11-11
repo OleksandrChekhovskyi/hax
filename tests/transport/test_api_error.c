@@ -406,6 +406,7 @@ static void test_classify_overflow(void)
     static const struct classify_case cases[] = {
         {400, "context_length_exceeded", "x", API_ERROR_CONTEXT_OVERFLOW},
         {400, "exceed_context_size_error", NULL, API_ERROR_CONTEXT_OVERFLOW},
+        {0, "model_context_window_exceeded", NULL, API_ERROR_CONTEXT_OVERFLOW},
         {400, "invalid_request_error", "prompt is too long: 213462 tokens > 200000 maximum",
          API_ERROR_CONTEXT_OVERFLOW},
         {400, NULL, "prompt too long; exceeded max context length by 100 tokens",
@@ -461,6 +462,19 @@ static void test_classify_other(void)
     expect_classified(cases, N_CASES(cases), NULL);
 }
 
+/* Stop reasons for a length limit arrive as the code of a stream failure. */
+static void test_classify_length_limit(void)
+{
+    static const struct classify_case cases[] = {
+        {0, "length", "response incomplete: length", API_ERROR_LENGTH_LIMIT},
+        {0, "max_tokens", NULL, API_ERROR_LENGTH_LIMIT},
+        {0, "max_output_tokens", NULL, API_ERROR_LENGTH_LIMIT},
+        {400, "length", NULL, API_ERROR_OTHER},
+        {0, "string_above_max_length", NULL, API_ERROR_OTHER},
+    };
+    expect_classified(cases, N_CASES(cases), NULL);
+}
+
 static void test_classify_configured_phrases(void)
 {
     static const char *const phrases[] = {"Input Too Big", NULL};
@@ -511,6 +525,7 @@ int main(void)
     test_classify_overflow();
     test_classify_payload_too_large();
     test_classify_other();
+    test_classify_length_limit();
     test_classify_configured_phrases();
     T_REPORT();
 }

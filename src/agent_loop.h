@@ -6,6 +6,7 @@
 
 #include "agent_core.h"
 #include "agent_stream.h"
+#include "compact.h"
 #include "provider.h"
 
 /* Continuation engine shared by the frontends: drive one user turn through provider
@@ -73,9 +74,10 @@ struct agent_loop_hooks {
      * itself, without presentation. */
     struct item (*tool_call)(const struct item *call, enum agent_loop_tool_action action,
                              int image_input, void *user);
-    /* Runs the frontend's compaction transaction at a continuation seam where compact_due()
-     * holds; returns whether it appended a seed. */
-    int (*compact)(void *user);
+    /* Runs the frontend's compaction transaction for `reason`: COMPACT_THRESHOLD at a
+     * continuation seam where compact_due() holds, COMPACT_OVERFLOW after a request rejected as
+     * too large. Returns whether it appended a seed. */
+    int (*compact)(enum compact_reason reason, void *user);
     /* A background-task note was appended to history before this turn's request; text is
      * borrowed for the call. Display-only. */
     void (*task_note)(const char *text, void *user);
@@ -123,7 +125,9 @@ struct agent_loop_params {
 };
 
 /* Continue an already-appended user message through provider turns and tool calls until the
- * model returns without a tool call or the run aborts. Holds the idle-sleep inhibitor for the
+ * model returns without a tool call or the run aborts. A request agent_stream_rejected_for_size()
+ * fails is compacted with COMPACT_OVERFLOW and retried while compact_auto_enabled(), provided a
+ * tool batch has fit since any previous such compaction. Holds the idle-sleep inhibitor for the
  * complete continuation run. */
 void agent_loop_run(const struct agent_loop_params *params, struct agent_loop_result *result);
 void agent_loop_result_destroy(struct agent_loop_result *result);

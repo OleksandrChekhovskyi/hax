@@ -636,6 +636,42 @@ static void test_overflow_from_tools_sends_text(void)
     agent_session_free(&session);
 }
 
+/* While the window is unknown, a summary cut at a length limit ran out of context, so the text
+ * shrinks as for an overflow. */
+static void test_length_limit_shrinks_text_on_unknown_window(void)
+{
+    struct agent_session session;
+    init_large_session(&session, 3, 8000);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_SUCCESS);
+    mock.reject_above = 3000;
+    mock.reject_kind = API_ERROR_LENGTH_LIMIT;
+
+    struct compact_result result = run_compaction_as(&session, &provider, NULL, COMPACT_OVERFLOW);
+    EXPECT(result.outcome == COMPACT_COMPLETE);
+    EXPECT(mock.last_request_was_shortened);
+
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+/* A compaction answering a rejected request skips the full window, known not to fit. */
+static void test_overflow_reason_starts_with_text(void)
+{
+    struct agent_session session;
+    init_large_session(&session, 1, 400);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_SUCCESS);
+
+    struct compact_result result = run_compaction_as(&session, &provider, NULL, COMPACT_OVERFLOW);
+    EXPECT(result.outcome == COMPACT_COMPLETE);
+    EXPECT(result.attempts == 1);
+    EXPECT(mock.last_request_is_text);
+
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
 /* With a known window, even the first text request aims at a share of it less the reserve. */
 static void test_text_fits_known_window(void)
 {
@@ -894,6 +930,8 @@ int main(void)
     test_overflow_attempts_are_bounded();
     test_payload_too_large_sends_whole_text();
     test_overflow_from_tools_sends_text();
+    test_overflow_reason_starts_with_text();
+    test_length_limit_shrinks_text_on_unknown_window();
     test_text_fits_known_window();
     test_resumed_session_floors_at_seed();
     test_preserves_failure();

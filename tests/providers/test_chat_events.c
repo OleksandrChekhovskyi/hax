@@ -514,6 +514,7 @@ static void test_finish_reason_length_emits_error(void)
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_ERROR);
     EXPECT(strstr(capture.events[0].message, "length") != NULL);
+    EXPECT_STR_EQ(capture.events[0].code, "length");
     EXPECT(capture.events[0].usage.input_tokens == 1234);
     EXPECT(capture.events[0].usage.output_tokens == 56);
     EXPECT(parser.terminal_emitted == 1);
@@ -541,6 +542,7 @@ static void test_finish_reason_content_filter_emits_error(void)
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_ERROR);
     EXPECT(strstr(capture.events[0].message, "content_filter") != NULL);
+    EXPECT(capture.events[0].code == NULL);
     EVENTS_FIXTURE_FREE(capture, parser);
 }
 

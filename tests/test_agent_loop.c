@@ -17,6 +17,7 @@
 #include "turn.h"
 #include "xalloc.h"
 #include "tools/task_registry.h"
+#include "transport/api_error.h"
 #include "transport/http.h"
 
 enum script_mode {
@@ -448,6 +449,7 @@ struct loop_test_ctx {
     int turn_begins;
     int compactions;
     int compact_succeeds;
+    enum compact_reason compact_reason;
     int checkpoints;
     int cancel_at;
     int pause_at;
@@ -500,10 +502,11 @@ static enum agent_signal cancel_checkpoint(void *user)
     return AGENT_SIGNAL_NONE;
 }
 
-static int count_compaction(void *user)
+static int count_compaction(enum compact_reason reason, void *user)
 {
     struct loop_test_ctx *ctx = user;
     ctx->compactions++;
+    ctx->compact_reason = reason;
     return ctx->compact_succeeds;
 }
 
@@ -1330,6 +1333,187 @@ static void test_loop_skips_compaction_after_last_allowed_turn(void)
     config_set_override("compact.auto", NULL);
 }
 
+/* One letter per request: R is rejected as too large, P likewise after some text, L stops at a
+ * length limit, T calls a tool, and A answers. */
+static const char *overflow_script;
+
+static int overflow_stream(struct provider *p, const struct context *ctx, const char *model,
+                           stream_cb cb, void *user, http_tick_cb tick, void *tick_user)
+{
+    (void)p;
+    (void)ctx;
+    (void)model;
+    (void)tick;
+    (void)tick_user;
+    char step = *overflow_script ? *overflow_script++ : 'A';
+    if (step == 'R' || step == 'P' || step == 'L') {
+        if (step == 'P')
+            emit_text(cb, user, "partial");
+        struct stream_event ev = {
+            .kind = EV_ERROR,
+            .u.error = {.message = "context exceeded",
+                        .kind = step == 'L' ? API_ERROR_LENGTH_LIMIT : API_ERROR_CONTEXT_OVERFLOW},
+        };
+        cb(&ev, user);
+        return 0;
+    }
+    if (step == 'T')
+        emit_tool_call(cb, user, "c1");
+    else
+        emit_text(cb, user, "answer");
+    emit_done(cb, user, usage_tokens(10, 2));
+    return 0;
+}
+
+static struct agent_loop_result run_overflow(struct agent_session *session,
+                                             struct loop_test_ctx *ctx, const char *script,
+                                             int max_turns)
+{
+    struct provider provider = {.name = "test", .stream = overflow_stream};
+    overflow_script = script;
+    session_init(session);
+    session_enable_tools(session);
+    agent_session_add_user(session, "start");
+    return run_chain(session, &provider, ctx, max_turns);
+}
+
+/* A rejected request is compacted and re-issued as a follow-up turn, beyond max_turns. */
+static void test_loop_compacts_after_overflow(void)
+{
+    config_set_override("compact.auto", "1");
+    struct agent_session session;
+    struct loop_test_ctx ctx = {.compact_succeeds = 1};
+
+    struct agent_loop_result result = run_overflow(&session, &ctx, "RA", 1);
+    EXPECT(result.outcome == AGENT_LOOP_COMPLETE);
+    EXPECT(result.error_message == NULL);
+    EXPECT(ctx.compactions == 1);
+    EXPECT(ctx.compact_reason == COMPACT_OVERFLOW);
+    EXPECT(result.turns == 2);
+    EXPECT_STR_EQ(session.items[result.final_items_from].text, "answer");
+    EXPECT(session.items[result.final_items_from - 1].kind == ITEM_TURN_BOUNDARY);
+
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+    config_set_override("compact.auto", NULL);
+}
+
+/* Once a tool batch fits after compacting, the next rejection is compacted too. */
+static void test_loop_compacts_again_after_progress(void)
+{
+    config_set_override("compact.auto", "1");
+    struct agent_session session;
+    struct loop_test_ctx ctx = {.compact_succeeds = 1};
+
+    struct agent_loop_result result = run_overflow(&session, &ctx, "RTTRA", 0);
+    EXPECT(result.outcome == AGENT_LOOP_COMPLETE);
+    EXPECT(ctx.compactions == 2);
+
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+    config_set_override("compact.auto", NULL);
+}
+
+/* Without a tool batch fitting since compacting, another rejection ends the run with its error. */
+static void test_loop_stops_compacting_without_progress(void)
+{
+    config_set_override("compact.auto", "1");
+    const char *scripts[] = {"RR", "RTR"};
+    for (size_t i = 0; i < sizeof(scripts) / sizeof(scripts[0]); i++) {
+        struct agent_session session;
+        struct loop_test_ctx ctx = {.compact_succeeds = 1};
+        struct agent_loop_result result = run_overflow(&session, &ctx, scripts[i], 0);
+        EXPECT(result.outcome == AGENT_LOOP_PROVIDER_ERROR);
+        EXPECT(ctx.compactions == 1);
+        EXPECT_STR_EQ(result.error_message, "context exceeded");
+        agent_loop_result_destroy(&result);
+        agent_session_free(&session);
+    }
+    config_set_override("compact.auto", NULL);
+}
+
+/* A partial reply stays in history, marked, whether or not compacting rescues the request. */
+static void test_loop_keeps_partial_reply_when_compacting(void)
+{
+    config_set_override("compact.auto", "1");
+    const struct {
+        int compact_succeeds;
+        enum agent_loop_outcome outcome;
+    } cases[] = {{1, AGENT_LOOP_COMPLETE}, {0, AGENT_LOOP_PROVIDER_ERROR}};
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        struct agent_session session;
+        struct loop_test_ctx ctx = {.compact_succeeds = cases[i].compact_succeeds};
+        struct agent_loop_result result = run_overflow(&session, &ctx, "PA", 1);
+        EXPECT(result.outcome == cases[i].outcome);
+        EXPECT(ctx.compactions == 1);
+        EXPECT_STR_EQ(session.items[2].text, "partial\n" INTERRUPT_MARKER);
+        EXPECT(session.items[2].origin == ITEM_ORIGIN_INTERRUPTED);
+        agent_loop_result_destroy(&result);
+        agent_session_free(&session);
+    }
+    config_set_override("compact.auto", NULL);
+}
+
+/* A length limit means a full context only while the model's window is unknown. */
+static void test_loop_compacts_after_length_limit_on_unknown_window(void)
+{
+    config_set_override("compact.auto", "1");
+    struct agent_session session;
+    struct loop_test_ctx unknown = {.compact_succeeds = 1};
+    struct agent_loop_result result = run_overflow(&session, &unknown, "LA", 1);
+    EXPECT(result.outcome == AGENT_LOOP_COMPLETE);
+    EXPECT(unknown.compactions == 1);
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+
+    config_set_override("context_limit", "1000000");
+    struct loop_test_ctx known = {.compact_succeeds = 1};
+    result = run_overflow(&session, &known, "LA", 1);
+    EXPECT(result.outcome == AGENT_LOOP_PROVIDER_ERROR);
+    EXPECT(known.compactions == 0);
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+    config_set_override("context_limit", NULL);
+    config_set_override("compact.auto", NULL);
+}
+
+/* The rejection is reported when compacting fails, is switched off, or was suspended after
+ * repeated failures. */
+static void test_loop_reports_unrecovered_overflow(void)
+{
+    struct agent_session session;
+    config_set_override("compact.auto", "1");
+    struct loop_test_ctx failing = {.compact_succeeds = 0};
+    struct agent_loop_result result = run_overflow(&session, &failing, "R", 1);
+    EXPECT(result.outcome == AGENT_LOOP_PROVIDER_ERROR);
+    EXPECT(failing.compactions == 1);
+    EXPECT_STR_EQ(result.error_message, "context exceeded");
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+
+    config_set_override("compact.auto", "0");
+    struct loop_test_ctx disabled = {.compact_succeeds = 1};
+    result = run_overflow(&session, &disabled, "R", 1);
+    EXPECT(result.outcome == AGENT_LOOP_PROVIDER_ERROR);
+    EXPECT(disabled.compactions == 0);
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+    config_set_override("compact.auto", "1");
+
+    struct loop_test_ctx suspended = {.compact_succeeds = 1};
+    struct provider provider = {.name = "test", .stream = overflow_stream};
+    overflow_script = "R";
+    session_init(&session);
+    agent_session_add_user(&session, "start");
+    session.compact_failures = COMPACT_MAX_AUTO_FAILURES;
+    result = run_chain(&session, &provider, &suspended, 1);
+    EXPECT(result.outcome == AGENT_LOOP_PROVIDER_ERROR);
+    EXPECT(suspended.compactions == 0);
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+    config_set_override("compact.auto", NULL);
+}
+
 static void observed_task_note(const char *text, void *user)
 {
     EXPECT(text != NULL);
@@ -1428,6 +1612,12 @@ int main(void)
     test_loop_reports_provider_error();
     test_loop_prestream_error_leaves_no_marker();
     test_loop_requests_mid_chain_compaction();
+    test_loop_compacts_after_overflow();
+    test_loop_compacts_again_after_progress();
+    test_loop_stops_compacting_without_progress();
+    test_loop_keeps_partial_reply_when_compacting();
+    test_loop_compacts_after_length_limit_on_unknown_window();
+    test_loop_reports_unrecovered_overflow();
     test_loop_injects_finished_task_note();
     T_REPORT();
 }

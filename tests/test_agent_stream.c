@@ -224,6 +224,28 @@ static void test_pause_after_content_finishes(void)
     agent_stream_destroy(&stream);
 }
 
+/* A reply cut at a length limit counts as too large only while the window is unknown: a known one
+ * keeps room for the reply, so the limit there is an output cap. */
+static void test_rejected_for_size(void)
+{
+    struct agent_stream stream;
+    agent_stream_init(&stream);
+    stream.error_kind = API_ERROR_CONTEXT_OVERFLOW;
+    EXPECT(!agent_stream_rejected_for_size(&stream, 0)); /* the request did not fail */
+
+    stream.assembly.state = TURN_FAILED;
+    EXPECT(agent_stream_rejected_for_size(&stream, 32768));
+    stream.error_kind = API_ERROR_PAYLOAD_TOO_LARGE;
+    EXPECT(agent_stream_rejected_for_size(&stream, 32768));
+    stream.error_kind = API_ERROR_LENGTH_LIMIT;
+    EXPECT(agent_stream_rejected_for_size(&stream, 0));
+    EXPECT(!agent_stream_rejected_for_size(&stream, 32768));
+    stream.error_kind = API_ERROR_OTHER;
+    EXPECT(!agent_stream_rejected_for_size(&stream, 0));
+
+    agent_stream_destroy(&stream);
+}
+
 int main(void)
 {
     test_signal_stops();
@@ -231,5 +253,6 @@ int main(void)
     test_requests_accumulate();
     test_poll_cuts_by_signal();
     test_pause_after_content_finishes();
+    test_rejected_for_size();
     T_REPORT();
 }

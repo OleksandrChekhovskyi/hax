@@ -15,7 +15,6 @@
 #include "session.h"
 #include "turn.h"
 #include "xalloc.h"
-#include "transport/api_error.h"
 
 /* Fixed sections and exact identifiers make the seed useful across model changes. The leading
  * output-only instruction prevents weaker models from continuing the task instead. */
@@ -102,11 +101,15 @@ int compact_over_threshold(long context_tokens, long context_limit, int threshol
     return context_tokens >= threshold_tokens;
 }
 
+int compact_auto_enabled(const struct agent_session *session)
+{
+    return config_bool("compact.auto") && session->compact_failures < COMPACT_MAX_AUTO_FAILURES;
+}
+
 int compact_due(const struct agent_session *session, struct provider *provider,
                 const char *pending_prompt)
 {
-    if (!provider || !session->model || !config_bool("compact.auto") ||
-        session->compact_failures >= COMPACT_MAX_AUTO_FAILURES)
+    if (!provider || !session->model || !compact_auto_enabled(session))
         return 0;
     long tokens = agent_session_context_estimate(session);
     if (tokens < 0)
@@ -283,13 +286,6 @@ static long percent_of(long tokens, int percent)
     return tokens / 100 * percent + tokens % 100 * percent / 100;
 }
 
-static int rejected_for_size(const struct agent_stream *stream)
-{
-    return stream->assembly.state == TURN_FAILED &&
-           (stream->error_kind == API_ERROR_CONTEXT_OVERFLOW ||
-            stream->error_kind == API_ERROR_PAYLOAD_TOO_LARGE);
-}
-
 /* The summary of a completed reply that called no tools, or NULL. */
 static char *take_text_summary(struct agent_stream *stream)
 {
@@ -350,7 +346,7 @@ static char *summarize_text(const struct compact_params *params, struct agent_st
         summary = take_text_summary(stream);
         long tokens = overhead + text.tokens;
         compact_text_destroy(&text);
-        if (!rejected_for_size(stream))
+        if (!agent_stream_rejected_for_size(stream, context_limit))
             break;
 
         if (base)
@@ -366,6 +362,8 @@ static char *summarize_text(const struct compact_params *params, struct agent_st
 static char *generate_summary(const struct compact_params *params, struct agent_stream *stream,
                               struct compact_result *result)
 {
+    if (params->reason == COMPACT_OVERFLOW)
+        return summarize_text(params, stream, result);
     struct summary_request request;
     summary_request_init(&request, params);
     int kept_calling_tools = 0;
@@ -373,7 +371,8 @@ static char *generate_summary(const struct compact_params *params, struct agent_
     summary_request_destroy(&request);
     if (summary)
         return summary;
-    if (kept_calling_tools || rejected_for_size(stream))
+    long context_limit = model_meta_context(params->provider, params->session->model);
+    if (kept_calling_tools || agent_stream_rejected_for_size(stream, context_limit))
         return summarize_text(params, stream, result);
     return NULL;
 }

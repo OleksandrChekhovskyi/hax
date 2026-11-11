@@ -293,11 +293,26 @@ static void test_stop_reason_max_tokens_is_error(void)
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_ERROR);
     EXPECT(strstr(capture.events[0].message, "max_tokens") != NULL);
+    EXPECT_STR_EQ(capture.events[0].code, "max_tokens");
 
     EXPECT(capture.events[0].usage.input_tokens == 150);
     EXPECT(capture.events[0].usage.output_tokens == 99);
     EXPECT(capture.events[0].usage.cached_tokens == 40);
     EXPECT(capture.events[0].usage.cache_write_tokens == 10);
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+/* A reply that ran into the context window is not a finished turn. */
+static void test_stop_reason_context_window_exceeded_is_error(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    FEED(parser, "{\"type\":\"message_delta\",\"delta\":"
+                 "{\"stop_reason\":\"model_context_window_exceeded\"},"
+                 "\"usage\":{\"output_tokens\":10}}");
+    FEED(parser, "{\"type\":\"message_stop\"}");
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_ERROR);
+    EXPECT_STR_EQ(capture.events[0].code, "model_context_window_exceeded");
     EVENTS_FIXTURE_FREE(capture, parser);
 }
 
@@ -385,6 +400,7 @@ int main(void)
     test_usage_fragments_merge_at_done();
     test_usage_cache_creation_ttl_breakdown();
     test_stop_reason_max_tokens_is_error();
+    test_stop_reason_context_window_exceeded_is_error();
     test_stop_reason_pause_turn_is_error();
     test_error_event();
     test_ping_and_unparseable_ignored();

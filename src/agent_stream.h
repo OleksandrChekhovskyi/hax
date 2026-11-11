@@ -50,6 +50,11 @@ int agent_signal_stops(enum agent_signal signal, const struct turn *assembly);
 /* Whether the latest request returned without a terminal event because `signal` cut it. */
 int agent_stream_cut_by(const struct agent_stream *stream, enum agent_signal signal);
 
+/* Whether the latest request failed as too large for the provider: over the model's context
+ * window or the endpoint's byte limit, or a reply cut at a length limit while `context_limit`, the
+ * model's window, is unknown (<= 0). */
+int agent_stream_rejected_for_size(const struct agent_stream *stream, long context_limit);
+
 /* True when any attempt reported billable usage. */
 int agent_stream_has_usage(const struct agent_stream *stream);
 

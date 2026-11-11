@@ -39,6 +39,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 - `/compact` and automatic compaction now succeed when the conversation no longer fits the context
   window, by summarizing a shortened copy that loses the oldest detail first. For a server whose
   overflow error hax does not recognize, add its wording to the provider's `overflow_phrases`.
+- When the conversation outgrows the context window, hax now compacts it and carries on instead
+  of stopping with an error, even on servers whose context size it does not know.
 
 ## [0.6.1] - 2026-10-15
 

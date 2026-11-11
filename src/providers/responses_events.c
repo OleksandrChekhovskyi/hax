@@ -317,9 +317,10 @@ static void parse_usage(json_t *root, struct stream_usage *usage)
         usage->cached_tokens = (long)json_integer_value(value);
 }
 
-/* `error` is the native error object carrying `code` and `message`, or NULL. */
+/* `code` and `detail` are the native error code or incomplete reason and the server's text, or
+ * NULL. */
 static void emit_terminal_error(struct responses_events *events, const char *message, json_t *root,
-                                const json_t *error)
+                                const char *code, const char *detail)
 {
     if (events->terminal_emitted)
         return;
@@ -332,8 +333,8 @@ static void emit_terminal_error(struct responses_events *events, const char *mes
         .kind = EV_ERROR,
         .u.error = {.message = message,
                     .http_status = 0,
-                    .code = json_string_value(json_object_get(error, "code")),
-                    .detail = json_string_value(json_object_get(error, "message")),
+                    .code = code,
+                    .detail = detail,
                     .usage = &usage,
                     .response = &response},
     };
@@ -345,18 +346,18 @@ static void handle_failed(struct responses_events *events, json_t *root)
     json_t *response = json_object_get(root, "response");
     json_t *error = json_object_get(response, "error");
     const char *message = json_string_value(json_object_get(error, "message"));
-    emit_terminal_error(events, message ? message : "response.failed", root, error);
+    emit_terminal_error(events, message ? message : "response.failed", root,
+                        json_string_value(json_object_get(error, "code")), message);
 }
 
 /* A bare `error` event carries the failure at the top level rather than under `response`, and no
  * terminal response event follows it. */
 static void handle_stream_error(struct responses_events *events, json_t *root)
 {
-    const char *message = json_string_value(json_object_get(root, "message"));
+    const char *detail = json_string_value(json_object_get(root, "message"));
     const char *code = json_string_value(json_object_get(root, "code"));
-    if (!message)
-        message = code;
-    emit_terminal_error(events, message ? message : "provider error", root, root);
+    const char *message = detail ? detail : code;
+    emit_terminal_error(events, message ? message : "provider error", root, code, detail);
 }
 
 static void handle_incomplete(struct responses_events *events, json_t *root)
@@ -365,7 +366,7 @@ static void handle_incomplete(struct responses_events *events, json_t *root)
     json_t *details = json_object_get(response, "incomplete_details");
     const char *reason = json_string_value(json_object_get(details, "reason"));
     char *message = xasprintf("response incomplete: %s", reason ? reason : "unknown");
-    emit_terminal_error(events, message, root, NULL);
+    emit_terminal_error(events, message, root, reason, NULL);
     free(message);
 }
 
@@ -431,5 +432,5 @@ out:
 
 void responses_events_finalize(struct responses_events *events)
 {
-    emit_terminal_error(events, "stream ended before completion", NULL, NULL);
+    emit_terminal_error(events, "stream ended before completion", NULL, NULL, NULL);
 }

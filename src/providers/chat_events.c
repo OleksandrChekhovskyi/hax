@@ -37,6 +37,7 @@ void chat_events_free(struct chat_events *parser)
     parser->finish_reason = NULL;
     free(parser->finish_error);
     parser->finish_error = NULL;
+    parser->finish_code = NULL;
     free(parser->response_id);
     parser->response_id = NULL;
     free(parser->served_model);
@@ -381,6 +382,7 @@ static void emit_terminal_event(struct chat_events *parser)
             .u.error =
                 {
                     .message = parser->finish_error,
+                    .code = parser->finish_code,
                     .http_status = 0,
                     .usage = &parser->usage,
                     .response = &response,
@@ -432,8 +434,11 @@ static void handle_finish_reason(struct chat_events *parser, const char *reason,
         parser->finish_error = xasprintf(
             "upstream error: %s", finish_reason_is_error(native_reason) ? native_reason : reason);
         parser->finish_transient = 1;
-    } else if (strcmp(reason, "length") == 0 && parser->length_hint) {
-        parser->finish_error = xasprintf("response incomplete: length — %s", parser->length_hint);
+    } else if (strcmp(reason, "length") == 0) {
+        parser->finish_code = "length";
+        parser->finish_error =
+            parser->length_hint ? xasprintf("response incomplete: length — %s", parser->length_hint)
+                                : xstrdup("response incomplete: length");
     } else {
         parser->finish_error = xasprintf("response incomplete: %s", reason);
     }

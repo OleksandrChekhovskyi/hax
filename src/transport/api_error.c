@@ -271,6 +271,7 @@ void api_error_body_free(struct api_error_body *parsed)
  * common local servers. A provider's configured phrases cover the rest. */
 static const char *const OVERFLOW_PHRASES[] = {
     "context_length_exceeded",            /* OpenAI's code */
+    "model_context_window_exceeded",      /* Anthropic's stop reason */
     "exceed_context_size_error",          /* llama.cpp's code */
     "prompt is too long",                 /* Anthropic */
     "prompt too long",                    /* Ollama */
@@ -298,6 +299,17 @@ static int contains_phrase(const char *text, const char *const *phrases)
     return 0;
 }
 
+/* Stop reasons for a reply cut at a length limit, which the parsers report as the code of a stream
+ * failure: Chat's finish reason, Messages' stop reason, and Responses' incomplete reason. */
+static int is_length_stop(const char *code)
+{
+    static const char *const CODES[] = {"length", "max_tokens", "max_output_tokens"};
+    for (size_t i = 0; code && i < sizeof(CODES) / sizeof(CODES[0]); i++)
+        if (strcmp(code, CODES[i]) == 0)
+            return 1;
+    return 0;
+}
+
 static int says_overflow(const char *text, const char *const *overflow_phrases)
 {
     return contains_phrase(text, OVERFLOW_PHRASES) || contains_phrase(text, overflow_phrases);
@@ -309,6 +321,8 @@ enum api_error_kind api_error_classify(long status, const char *code, const char
     /* Only the request can be at fault, and a throttle is not, whatever its wording. */
     if (status != 0 && (status < 400 || status >= 500 || status == 429))
         return API_ERROR_OTHER;
+    if (status == 0 && is_length_stop(code))
+        return API_ERROR_LENGTH_LIMIT;
     if (says_overflow(code, overflow_phrases) || says_overflow(detail, overflow_phrases))
         return API_ERROR_CONTEXT_OVERFLOW;
     return status == 413 ? API_ERROR_PAYLOAD_TOO_LARGE : API_ERROR_OTHER;

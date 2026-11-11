@@ -200,14 +200,7 @@ static int render_on_event(const struct stream_event *event, void *user)
         disp_flush(disp);
         break;
     case EV_ERROR:
-        /* Closing the render state flushes partial text before the error line. */
-        render_open_block(render);
-        disp_write_ansi(disp, theme_open(THEME_ERROR));
-        disp_printf(disp, "[error: %s]", event->u.error.message);
-        disp_write_ansi(disp, ANSI_RESET);
-        disp_putc(disp, '\n');
-        disp_flush(disp);
-        break;
+        break; /* render_loop_error() draws it if the run ends on it */
     }
 
     return 0;
@@ -919,9 +912,23 @@ static struct item repl_loop_tool_call(const struct item *call, enum agent_loop_
 }
 
 /* Runs under the loop's interrupt watch, so an Esc latched here reaches its next checkpoint. */
-static int repl_loop_compact(void *user)
+static int repl_loop_compact(enum compact_reason reason, void *user)
 {
-    return compact_conversation(user, NULL, COMPACT_THRESHOLD);
+    return compact_conversation(user, NULL, reason);
+}
+
+/* Drawn when the run ends rather than as the error streams, so a rejection the loop recovers from
+ * by compacting never shows. Closing the render state flushes partial text before the line. */
+static void render_loop_error(struct render_ctx *render, const struct agent_loop_result *result)
+{
+    struct disp *disp = &render->disp;
+    render_open_block(render);
+    disp_write_ansi(disp, theme_open(THEME_ERROR));
+    disp_printf(disp, "[error: %s]",
+                result->error_message ? result->error_message : "stream failed");
+    disp_write_ansi(disp, ANSI_RESET);
+    disp_putc(disp, '\n');
+    disp_flush(disp);
 }
 
 static void repl_loop_task_note(const char *text, void *user)
@@ -1212,6 +1219,8 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
         struct agent_loop_result loop_result;
         agent_loop_run(&loop_params, &loop_result);
         int user_turn_errored = loop_result.outcome == AGENT_LOOP_PROVIDER_ERROR;
+        if (user_turn_errored)
+            render_loop_error(&render, &loop_result);
         set_resume_state(&state, &loop_result);
         agent_loop_result_destroy(&loop_result);
         interrupt_disarm();
