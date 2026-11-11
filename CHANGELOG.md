@@ -14,6 +14,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Changed
 
+- Quitting with Ctrl-D or Ctrl-C now erases the empty prompt, so the shell prompt, or the
+  `resume with` line for a conversation, takes its place instead of appearing two rows below it.
 - A slash command's argument hint now appears only once you pause typing, so typing a command
   straight through no longer flashes a hint that the next keystroke removes. A hint already on
   screen still follows your edits immediately.

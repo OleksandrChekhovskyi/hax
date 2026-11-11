@@ -13,8 +13,9 @@ struct input;
 struct input *input_new(void);
 void input_free(struct input *in);
 
-/* Return a malloc'd message, which may contain '\n'; return NULL on EOF or a
- * double Ctrl-C quit. Ctrl-C with text clears the buffer and editing continues. */
+/* Return a malloc'd message, which may contain '\n'; return NULL on EOF or a double Ctrl-C quit,
+ * after erasing the prompt so the cursor rests where it began. Ctrl-C with text clears the buffer
+ * and editing continues. */
 char *input_readline(struct input *in, const char *prompt);
 
 /* Add a non-empty line with erasedups semantics. When persistence is open, append it to

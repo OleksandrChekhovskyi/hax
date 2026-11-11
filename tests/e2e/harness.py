@@ -252,11 +252,13 @@ def skip(reason: str) -> None:
 
 
 # escape-time 0 delivers a lone Esc at once; remain-on-exit keeps the final screen and exit status
-# readable; /bin/sh keeps the launch command's quoting independent of the login shell.
+# readable, and its empty format keeps tmux's dead-pane notice off that screen; /bin/sh keeps the
+# launch command's quoting independent of the login shell.
 _TMUX_CONF = """\
 set -sg escape-time 0
 set -g status off
 set -g remain-on-exit on
+set -g remain-on-exit-format ""
 set -g default-shell /bin/sh
 """
 

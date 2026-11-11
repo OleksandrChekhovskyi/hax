@@ -1081,10 +1081,8 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
          * recolors the prompt instead of keeping the startup theme's bytes. */
         char *line = input_readline(input, build_prompt(prompt_buffer, sizeof(prompt_buffer)));
         cursor_hide();
-        if (!line) {
-            putchar('\n');
+        if (!line)
             break;
-        }
         /* Empty input continues only resumable turns. */
         if (!*line && state.resume_reason == AGENT_RESUME_NONE) {
             free(line);

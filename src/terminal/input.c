@@ -1399,15 +1399,16 @@ char *input_readline(struct input *in, const char *prompt)
             paint(in);
     }
 
+    int quit = eof && in->len == 0;
     if (submit && in->len > 0)
         render_submitted(in);
-    else if (submit)
+    else if (submit || quit)
         erase_edit_area(in);
     else
         leave_edit_area(in);
     disable_raw_mode(in);
 
-    if (eof && in->len == 0)
+    if (quit)
         return NULL;
     /* Jansson rejects malformed UTF-8, so normalize external input before returning it. */
     return utf8_sanitize(in->buf, in->len);
