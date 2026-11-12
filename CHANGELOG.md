@@ -14,41 +14,30 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Changed
 
-- `/provider` and its completion no longer offer `openai-compatible` and `anthropic-compatible`
-  until their base URL is set, since without one they have nothing to connect to. Naming one
-  explicitly still works and says which variable is missing.
-- Quitting with Ctrl-D or Ctrl-C now erases the empty prompt, so the shell prompt, or the
-  `resume with` line for a conversation, takes its place instead of appearing two rows below it.
-- A slash command's argument hint now appears only once you pause typing, so typing a command
-  straight through no longer flashes a hint that the next keystroke removes. A hint already on
-  screen still follows your edits immediately.
-- Prompts are sent without leading blank lines or trailing whitespace, so a paste or Ctrl+G edit
-  that ends in a newline no longer echoes as empty rows. The first line keeps its indentation.
-  A prompt that is only whitespace sends nothing, and `-p` rejects it as empty.
-- The llama.cpp provider now connects to port 9931 by default, matching `llama-server` since
-  llama.cpp v0.7.0. For an older server, set `HAX_LLAMACPP_PORT=8080` or
-  `providers.llamacpp.port`.
-- The status line stays visible for the whole turn, including while an answer streams or a tool
-  runs, so the elapsed time and the current state, such as a requested pause, are always in view.
-- The model now always knows that `--preset <name>` starts a subagent with one of your presets,
-  so asking for a preset by name works even when no preset has a description. Presets with a
-  description are still the only ones listed for the model to pick on its own.
-- Automatic compaction waits until the conversation goes on instead of running as soon as a
-  reply ends, so a conversation you leave is never summarized for nothing.
-- A single Esc no longer discards a compaction once its summary has started: hax finishes it,
-  then pauses. Press Esc again to cancel it. If the compaction ran for a message you just sent,
-  the message goes back to the prompt unsent.
-- In one-shot mode, SIGUSR1 now pauses the way Esc does: it lets a compaction finish, and stops
-  at once if the model has not started answering.
-- Automatic compaction now counts tool output and the message being sent, and keeps room for the
-  summary on small context windows, so it is less likely to start too late to fit. After three
-  failed attempts with no success between them, it stops retrying until something changes, such as
-  a successful `/compact` or a model switch. One-shot runs now report a failed compaction on stderr.
-- `/compact` and automatic compaction now succeed when the conversation no longer fits the context
-  window, by summarizing a shortened copy that loses the oldest detail first. For a server whose
-  overflow error hax does not recognize, add its wording to the provider's `overflow_phrases`.
-- When the conversation outgrows the context window, hax now compacts it and carries on instead
-  of stopping with an error, even on servers whose context size it does not know.
+- A persistent, live-updating area below the conversation keeps the spinner, elapsed time, and
+  status visible while hax works, even as answers stream and tools run. Pause requests show up
+  immediately, and activity labels change without flickering.
+- Compaction can now recover conversations that already exceed the context limit. Both `/compact`
+  and automatic compaction can summarize a shortened copy, sacrificing older detail first when
+  the full conversation will not fit. With automatic compaction enabled, hax tries to recover from
+  context-overflow errors and continue, even when the server's context size is unknown.
+- Automatic compaction accounts for new tool output and your next message, and leaves room for
+  the summary on small context windows. It runs only when the conversation continues, avoiding
+  unnecessary summaries after a finished reply. Repeated failures suspend automatic compaction
+  instead of retrying indefinitely; one-shot runs now report failures on stderr.
+- Esc lets a compaction whose summary has started finish before pausing; a second Esc cancels it.
+  If compaction ran for a message you just sent, pausing returns that message to the prompt unsent.
+  In one-shot mode, SIGUSR1 likewise lets compaction finish, or pauses immediately if the model
+  has not started answering.
+- Prompt polish: slash-command hints wait until you pause typing, pasted or edited prompts no
+  longer leave empty rows from surrounding whitespace, and quitting removes the empty prompt.
+  Prompt indentation is preserved; whitespace-only input is treated as empty.
+- `/provider` and its completion offer `openai-compatible` and `anthropic-compatible` only once
+  their base URL is configured.
+- Subagent guidance now always explains `--preset <name>`, so the model need not discover how to
+  use a preset you request by name, even when none of your presets has a description.
+- The llama.cpp provider now defaults to port 9931, matching `llama-server` since v0.7.0.
+  For an older server, set `HAX_LLAMACPP_PORT=8080` or `providers.llamacpp.port`.
 
 ## [0.6.1] - 2026-10-15
 
