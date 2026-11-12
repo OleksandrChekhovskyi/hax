@@ -420,12 +420,13 @@ static void test_oversized_complete_row_is_not_collected(void)
 
     /* An oversized complete row finalizes the safe prefix and remains for parser passthrough. */
     size_t big = 70000;
-    char *input = xmalloc(big + 64);
-    int p = snprintf(input, big + 64, "| H |\n|---|\n| ");
+    size_t cap = big + 64;
+    char *input = xmalloc(cap);
+    int p = snprintf(input, cap, "| H |\n|---|\n| ");
     size_t body_offset = (size_t)p - 2;
     memset(input + p, 'a', big);
     p += (int)big;
-    p += snprintf(input + p, 64, " |\n");
+    p += snprintf(input + p, cap - (size_t)p, " |\n");
 
     struct buf work;
     buf_init(&work);
@@ -450,11 +451,12 @@ static void test_oversized_header_passes(void)
 
     /* Rejecting an oversized header before collection bounds buffering and layout work. */
     size_t big = 70000;
-    char *input = xmalloc(big + 64);
-    int p = snprintf(input, big + 64, "| ");
+    size_t cap = big + 64;
+    char *input = xmalloc(cap);
+    int p = snprintf(input, cap, "| ");
     memset(input + p, 'H', big);
     p += (int)big;
-    p += snprintf(input + p, 64, " |\n|---|\n");
+    p += snprintf(input + p, cap - (size_t)p, " |\n|---|\n");
     struct buf work;
     buf_init(&work);
     buf_append(&work, input, (size_t)p);
@@ -475,11 +477,12 @@ static void test_eof_row_over_cap_stays_in_tail(void)
 
     /* EOF must not absorb a final row that would push the collected table past its cap. */
     size_t row_len = 60000;
-    char *row = xmalloc(row_len + 8);
-    int p = snprintf(row, row_len + 8, "| ");
+    size_t cap = row_len + 8;
+    char *row = xmalloc(cap);
+    int p = snprintf(row, cap, "| ");
     memset(row + p, 'a', row_len);
     p += (int)row_len;
-    p += snprintf(row + p, 8, " |\n");
+    p += snprintf(row + p, cap - (size_t)p, " |\n");
 
     struct buf work;
     buf_init(&work);

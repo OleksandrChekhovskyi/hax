@@ -8,6 +8,7 @@
 #include "compact_text.h"
 #include "harness.h"
 #include "provider.h"
+#include "xalloc.h"
 #include "text/utf8.h"
 
 #define ITEMS_MAX 32
@@ -162,8 +163,7 @@ static void test_clipped_output_keeps_mostly_its_tail(void)
 static void test_dropped_outputs_clip_arguments(void)
 {
     char *payload = repeat("a", 1000);
-    char *arguments = malloc(strlen(payload) + 32);
-    sprintf(arguments, "{\"path\": \"todo.py\", \"new\": \"%s\"}", payload);
+    char *arguments = xasprintf("{\"path\": \"todo.py\", \"new\": \"%s\"}", payload);
     char *output = repeat("x", 5000);
     struct window window = {0};
     add_prompt(&window, "go");
@@ -290,9 +290,7 @@ static void test_clips_older_prompts_only(void)
 {
     char *older = repeat("é", 3000);
     char *latest = repeat("y", 3000);
-    char *misaligned = malloc(strlen(older) + 2);
-    misaligned[0] = 'a';
-    strcpy(misaligned + 1, older);
+    char *misaligned = xasprintf("a%s", older);
     struct window window = {0};
     add_prompt(&window, misaligned);
     add_prompt(&window, latest);
