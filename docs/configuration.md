@@ -376,3 +376,45 @@ When model metadata has no output limit, `max_tokens` falls back internally to 3
 | `providers.mock.script` | `HAX_MOCK_SCRIPT` | — | Mock-provider script path. |
 
 Custom provider blocks are documented in [providers.md](./providers.md#custom-providers).
+
+## Provider Fallback
+
+When `fallback: true`, hax tries providers in the order they appear in your `providers` block.
+On a terminal error (quota exhausted, invalid API key, auth failure, 4xx other than rate-limit),
+it switches to the next provider and retries the request.
+
+```json
+{
+  "fallback": true,
+  "provider": "freellmapi",
+  "providers": {
+    "freellmapi": {
+      "display_name": "FreeLLMAPI",
+      "base_url": "http://127.0.0.1:3001/v1",
+      "api_key_env": "FREELLMAPI_API_KEY"
+    },
+    "openrouter": {
+      "display_name": "OpenRouter",
+      "api_key_env": "OPENROUTER_API_KEY"
+    }
+  }
+}
+```
+
+### Behavior
+
+- **Order**: Providers are tried in `providers.*` block order (JSON object key order).
+- **Scope**: Fallback is per-turn. Each user turn starts with the primary provider.
+- **Reasoning**: Provider switching drops reasoning state. The new provider starts without
+  any opaque reasoning blobs from the previous provider. This is safe but less efficient.
+- **User notice**: A warning is printed when fallback occurs: `"provider 'freellmapi' exhausted (HTTP 429 quota_exceeded) — falling back to 'openrouter'"`.
+- **Session config**: `/fallback on|off|status` toggles the session flag (saved in `state.json`).
+  Changes require a session restart to take effect.
+- **One-shot mode**: Works in `-p` mode; the router attempts all providers before exiting.
+
+### Caveats
+
+- Not all provider pairs are compatible. Switching from an OpenAI-compatible provider to
+  Anthropic-compatible may fail if tool call formats differ.
+- Reasoning models (o1, DeepSeek-R1, etc.) lose their chain-of-thought on switch.
+- Codex provider cannot fall back to other providers (different auth model).
