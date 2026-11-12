@@ -21,30 +21,34 @@ To cut a release:
 
 The tag push runs the full CI matrix and, in parallel, the release workflow: it fails early if
 the tag does not match the `meson.build` version, builds and tests every artifact, publishes the
-release, and finally points the downstream packages at the published source tarball. Prerelease
-tags (`-rc.N`) are published as GitHub prereleases and skip both package bumps, so
-`releases/latest` and the packages keep tracking the newest stable release.
+release, and finally bumps the downstream repositories below. Prerelease tags (`-rc.N`) are
+published as GitHub prereleases and skip those bumps, so `releases/latest` and everything
+downstream keep tracking the newest stable release.
 
 The prebuilt binaries bundle libcurl (Linux) and jansson (macOS) at versions pinned, with their
 checksums, in `scripts/build_linux.sh` and `scripts/build_macos.sh`; the remaining Linux
 libraries come from Alpine's current packages. Before a release, bump a pin whose upstream has
 shipped security fixes since.
 
-## Downstream packages
+## Downstream repositories
 
 hax is packaged in the Homebrew tap
 ([homebrew-hax](https://github.com/OleksandrChekhovskyi/homebrew-hax)) and in the
-[AUR](https://aur.archlinux.org/packages/hax). The workflow bumps each through a script that
-can also be run by hand:
+[AUR](https://aur.archlinux.org/packages/hax), and the
+[usehax.dev](https://github.com/OleksandrChekhovskyi/usehax.dev) website publishes its man pages.
+The workflow bumps each through a script that can also be run by hand:
 
-| Package | Script | Secret |
+| Target | Script | Secret |
 | --- | --- | --- |
 | Homebrew tap | `scripts/maint/bump_homebrew.py` | `HOMEBREW_TAP_TOKEN` |
 | AUR | `scripts/maint/bump_aur.py` | `AUR_SSH_KEY` |
+| Website manual | `scripts/maint/bump_site.py` | `SITE_TOKEN` |
 
-`HOMEBREW_TAP_TOKEN` is a PAT with push access to the tap; the default workflow token only
-reaches this repository. The workflow hands it to the script as `GH_TOKEN`, which is the name a
-hand-run needs — `GH_TOKEN=$(gh auth token)` will do when that login can push to the tap.
+`HOMEBREW_TAP_TOKEN` and `SITE_TOKEN` are PATs with push access to their repositories; the
+default workflow token only reaches this one. The workflow hands each to its script as
+`GH_TOKEN`, which is the name a hand-run needs — `GH_TOKEN=$(gh auth token)` will do when that
+login can push to the target.
+
 `AUR_SSH_KEY` is an SSH private key whose public half sits on the AUR account. AUR keys are
 account-scoped — there are no per-package deploy keys — so that key can write every package the
 account maintains.
@@ -54,7 +58,7 @@ account maintains.
 Up to the publish step, a failed run leaves nothing external behind — for a transient failure
 (a flaked test), just re-run the job from the Actions UI. Only when the fix needs new commits
 must the tag be deleted and re-created on the fixed commit. If the publish step itself dies
-mid-upload, delete the half-made GitHub release before re-running. If only a package bump
-fails, the release itself is complete and self-contained and that package merely lags one
+mid-upload, delete the half-made GitHub release before re-running. If only a downstream bump
+fails, the release itself is complete and self-contained and that target merely lags one
 version: re-run the job, or run its script by hand. Re-runs are safe — the scripts refuse to
-move a package backwards, and report a green no-op when it is already current.
+move a target backwards, and report a green no-op when it is already current.

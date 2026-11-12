@@ -1,8 +1,8 @@
-"""Shared helpers for pointing a downstream package at a published hax release.
+"""Shared helpers for pointing a downstream repository at a published hax release.
 
-Used by bump_homebrew.py and bump_aur.py. Both take a published version, rewrite a
-recipe in a packaging repository, and push it; only the recipe format and the transport
-differ.
+Used by bump_homebrew.py, bump_aur.py, and bump_site.py. Each takes a published version,
+updates a repository that tracks hax releases — a package recipe, or the website's
+manual — and pushes it; only what changes and the transport differ.
 
 The checksum is taken from the release asset as served, not from a local build, so the
 recipe attests to the artifact users actually download.

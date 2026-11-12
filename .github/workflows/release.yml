@@ -120,6 +120,29 @@ jobs:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: scripts/maint/bump_homebrew.py "${GITHUB_REF_NAME#v}"
 
+  # The site is another repository, beyond the workflow token's reach, hence
+  # SITE_TOKEN (see docs/releasing.md).
+  site:
+    runs-on: ubuntu-latest
+    needs: release
+    # The site documents the release `releases/latest` serves, which a prerelease is not.
+    if: ${{ !contains(github.ref_name, '-') }}
+    # The bump pushes to the site with its own PAT, never to this repository.
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # The site renders its manual from a hax build of the release's source tarball.
+      - name: Install dependencies
+        run: scripts/install_deps.sh ci
+      - name: Bump site manual
+        env:
+          GH_TOKEN: ${{ secrets.SITE_TOKEN }}
+        run: scripts/maint/bump_site.py "${GITHUB_REF_NAME#v}"
+
   # AUR_SSH_KEY can write every package on the AUR account (see docs/releasing.md),
   # hence the care below to keep it away from the PKGBUILD that makepkg runs.
   aur:
