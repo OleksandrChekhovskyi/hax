@@ -186,7 +186,7 @@ Where a test goes:
   their own line, control-flow braces on the same line.
 - Every source file starts with `/* SPDX-License-Identifier: MIT */`.
 - Use plain `malloc`/`calloc`/`free`; `xmalloc`/`xstrdup`/`xasprintf` in `src/xalloc.h` abort on
-  OOM. No arenas.
+  OOM. No arenas. Build strings with `xasprintf`, or `snprintf` bounded by the space actually left.
 - Use kernel-style goto cleanup for multi-resource functions, with labels in reverse
   acquisition order.
 - Always release owned resources on success and all early exits: `json_decref` jansson roots,

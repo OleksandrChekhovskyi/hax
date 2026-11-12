@@ -23,6 +23,8 @@ Checked over src/ and tests/:
   scratch directories are removed on early exits.
 - Production code forks through spawn_fork() from src/system/spawn.h, so no
   child runs hax's signal handlers before it execs.
+- No sprintf, vsprintf, strcpy, or strcat: they write without a bound, so a
+  hand-counted buffer size is all that stands between them and an overflow.
 
 Prints findings as file:line: message and exits non-zero if any are found.
 """
@@ -42,7 +44,12 @@ COLUMN_LIMIT_RE: Final = re.compile(r"^ColumnLimit:\s*(\d+)\s*$", re.MULTILINE)
 HARNESS: Final = Path("tests/harness.c")
 SPAWN: Final = Path("src/system/spawn.c")
 FORK_RE: Final = re.compile(r"\bfork\s*\(")
-COMMENT_RE: Final = re.compile(r"/\*.*?\*/|//[^\n]*", re.DOTALL)
+UNBOUNDED_RE: Final = re.compile(r"\b(v?sprintf|strcpy|strcat)\s*\(")
+# String and character literals match alongside comments, so whichever opens first claims the text:
+# "/*" in a string starts no comment, and a quote in a comment starts no string.
+NON_CODE_RE: Final = re.compile(
+    r'"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'|/\*.*?\*/|//[^\n]*', re.DOTALL
+)
 
 INCLUDE_RE: Final = re.compile(r'^\s*#\s*include\s+"([^"]+)"')
 INCLUDE_DIRECTIVE_RE: Final = re.compile(r"^\s*#\s*include\b")
@@ -159,14 +166,25 @@ def check_mkdtemp(path: Path, text: str) -> Iterator[Finding]:
             yield Finding(path, lineno, "raw mkdtemp in tests; use t_tempdir() from tests/harness.h")
 
 
+def code_lines(text: str) -> list[str]:
+    """Lines with comments and literals blanked, so neither names nor hides a banned call."""
+    code = NON_CODE_RE.sub(lambda match: re.sub(r"[^\n]", " ", match.group()), text)
+    return code.splitlines()
+
+
 def check_fork(path: Path, text: str) -> Iterator[Finding]:
     if not path.is_relative_to("src") or path == SPAWN:
         return
-    # Blank comments out line for line, so prose may mention fork() and line numbers still match.
-    code = COMMENT_RE.sub(lambda comment: re.sub(r"[^\n]", " ", comment.group()), text)
-    for lineno, line in enumerate(code.splitlines(), 1):
+    for lineno, line in enumerate(code_lines(text), 1):
         if FORK_RE.search(line):
             yield Finding(path, lineno, "raw fork() in src; use spawn_fork() from system/spawn.h")
+
+
+def check_unbounded_writes(path: Path, text: str) -> Iterator[Finding]:
+    for lineno, line in enumerate(code_lines(text), 1):
+        if match := UNBOUNDED_RE.search(line):
+            message = f"unbounded {match.group(1)}(); use xasprintf/xstrdup or snprintf"
+            yield Finding(path, lineno, message)
 
 
 def check_file(path: Path, column_limit: int) -> Iterator[Finding]:
@@ -179,6 +197,7 @@ def check_file(path: Path, column_limit: int) -> Iterator[Finding]:
     yield from check_comment_delimiters(path, text)
     yield from check_mkdtemp(path, text)
     yield from check_fork(path, text)
+    yield from check_unbounded_writes(path, text)
 
 
 def source_files() -> Iterator[Path]:
