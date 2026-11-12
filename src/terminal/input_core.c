@@ -169,6 +169,39 @@ void input_core_load_edited(struct input *in, const char *text, size_t len)
     in->cursor = in->len;
 }
 
+char *input_core_editor_command(const char *command, const char *path)
+{
+    if (!command || !*command)
+        return NULL;
+
+    char *quoted = xasprintf("'%s'", path);
+    size_t placeholders = 0;
+    for (const char *at = command; (at = strstr(at, "{}")) != NULL; at += 2)
+        placeholders++;
+    if (placeholders == 0) {
+        char *built = xasprintf("%s %s", command, quoted);
+        free(quoted);
+        return built;
+    }
+
+    size_t quoted_len = strlen(quoted);
+    char *built = xmalloc(strlen(command) + placeholders * (quoted_len - 2) + 1);
+    char *out = built;
+    const char *at = command;
+    for (size_t i = 0; i < placeholders; i++) {
+        const char *brace = strstr(at, "{}");
+        size_t prefix_len = (size_t)(brace - at);
+        memcpy(out, at, prefix_len);
+        out += prefix_len;
+        memcpy(out, quoted, quoted_len);
+        out += quoted_len;
+        at = brace + 2;
+    }
+    memcpy(out, at, strlen(at) + 1);
+    free(quoted);
+    return built;
+}
+
 void input_core_replace_span(struct input *in, size_t start, size_t end, const char *text)
 {
     if (start > end || end > in->len)

@@ -244,10 +244,27 @@ provider-dependent.
 | `compact.auto` | `HAX_COMPACT_AUTO` | on | Automatically summarize the conversation near the context limit. |
 | `compact.threshold` | `HAX_COMPACT_THRESHOLD` | `85` | Context percentage that triggers automatic compaction. It triggers sooner when needed to keep 16k tokens, or a quarter of a small window, free. |
 | `max_turns` | `HAX_MAX_TURNS` | `0` | Model round-trips per user turn before hax pauses (interactive) or aborts (one-shot). `0` is unlimited. |
+| `editor` | `HAX_EDITOR` | `$VISUAL`/`$EDITOR` | Command Ctrl-G runs to edit the prompt. `{}` becomes the temp file path; without it the path is appended. |
 
 `theme=auto` respects `NO_COLOR`, terminal color support, and `COLORFGBG` when available. Terminals
 rarely report a light background reliably, so set `light` explicitly if auto detection is wrong.
 `theme=ansi` uses the terminal's own 16-color palette; identity tints apply only to dark/light themes.
+
+`editor` selects what Ctrl-G runs, ahead of `$VISUAL` and `$EDITOR`. The editor's temporary
+file path is appended as the last argument unless the command contains `{}`, which becomes the
+quoted path.
+
+A use case is opening vim in a tmux split pane,
+so the conversation stays in view while compose the prompt.
+It pairs well with [tmux-complete.vim](https://github.com/wellle/tmux-complete.vim).
+
+```sh
+tmux split-window -v -l 30% "vim {}; tmux wait-for -S hax-edit-$$" \
+    && tmux wait-for hax-edit-$$
+```
+`-h` places the panes side by side, and `-v` stacks them, 
+with `-l` fixing the new pane's size,
+`$$` gives each invocation its own wait channel.
 
 ### Recording
 

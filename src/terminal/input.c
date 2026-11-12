@@ -18,6 +18,7 @@
 #include <sys/wait.h> // IWYU pragma: keep
 
 #include "buf.h"
+#include "config.h"
 #include "xalloc.h"
 #include "system/fd.h"
 #include "system/fs.h"
@@ -565,13 +566,27 @@ static const char *resolve_editor(void)
     return NULL;
 }
 
+/* The editor setting replaces $VISUAL, $EDITOR, and the probed fallbacks. A configured command
+ * that does not start a resolvable program is an error for the same reason a broken $EDITOR is.
+ * Returns NULL after reporting why. */
+static const char *editor_command(void)
+{
+    const char *configured = config_str_nonempty("editor");
+    if (!configured)
+        return resolve_editor();
+    if (fs_shell_head_resolves(configured))
+        return configured;
+    ui_error("editor (%s) not found — fix it, or unset it to use $VISUAL/$EDITOR", configured);
+    return NULL;
+}
+
 static void open_editor(struct input *in)
 {
     /* Alternate-screen editors restore the cursor to this cleared position. */
     erase_edit_area(in);
     disable_raw_mode(in);
 
-    const char *editor = resolve_editor();
+    const char *editor = editor_command();
     if (!editor) {
         /* No disp in modal context; restore the block gap before the repainted prompt. */
         putchar('\n');
@@ -589,11 +604,12 @@ static void open_editor(struct input *in)
     }
     close(fd);
 
-    /* The mkstemp path is shell-safe; VISUAL/EDITOR is trusted user configuration and the
-     * probed fallbacks are bare command names. */
+    /* The mkstemp path is shell-safe; the editor setting, $VISUAL, and $EDITOR are trusted user
+     * configuration, and the probed fallbacks are bare command names. */
     /* The buffer handed over is whatever the user typed or pasted, and comes back the same way, so
      * the editor has to agree with hax about the encoding or it will rewrite the text. */
-    char *cmd = spawn_shell_cmd_force_utf8(xasprintf("%s '%s'", editor, path));
+    char *command_line = input_core_editor_command(editor, path);
+    char *cmd = spawn_shell_cmd_force_utf8(command_line);
     int status = spawn_shell_wait(cmd);
     free(cmd);
 

@@ -129,7 +129,7 @@ The editor supports common readline-style movement and history keys. Notable hax
 | Ctrl-C | Clear the current prompt; twice on an empty prompt quits. |
 | Ctrl-D | Quit on an empty prompt. |
 | Ctrl-L | Clear the screen and redraw the prompt. |
-| Ctrl-G | Edit the prompt in `$VISUAL` or `$EDITOR`. |
+| Ctrl-G | Edit the prompt in the `editor` setting, `$VISUAL`, or `$EDITOR`. |
 | Ctrl-O | Open the rendered conversation in `$PAGER`. |
 | Ctrl-T | Open the model-facing transcript in `$PAGER`. |
 | Ctrl-V | Paste an image, or clipboard text when no image is available. |

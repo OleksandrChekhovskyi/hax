@@ -7,6 +7,12 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
+### Added
+
+- `editor` (or `HAX_EDITOR`) chooses the command Ctrl-G runs, ahead of `$VISUAL` and `$EDITOR`.
+  The temp file path is appended unless the command contains `{}`, which puts it where you write
+  it; a wrapper can edit the prompt in a tmux split, for example.
+
 ## [0.7.0] - 2026-11-12
 
 ### Added

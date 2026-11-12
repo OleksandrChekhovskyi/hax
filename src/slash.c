@@ -263,7 +263,7 @@ static const struct shortcut SHORTCUTS[] = {
     {.key = "ctrl-c", .description = "cancel current prompt line"},
     {.key = "ctrl-d", .description = "quit (on empty prompt)"},
     {.key = "ctrl-l", .description = "clear screen and redraw prompt"},
-    {.key = "ctrl-g", .description = "edit prompt in $EDITOR"},
+    {.key = "ctrl-g", .description = "edit prompt in $EDITOR or /config editor"},
     {.key = "ctrl-o", .description = "view the conversation in $PAGER"},
     {.key = "ctrl-t", .description = "view model-facing transcript in $PAGER"},
     {.key = "ctrl-v", .description = "paste image (or text) from clipboard"},

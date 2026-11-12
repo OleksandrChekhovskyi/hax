@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """The REPL renders a submitted prompt, the response, and its stats line, then exits 0 on Ctrl-D at
 an empty prompt, erasing the prompt row so the resume hint takes its place. The echo drops a
-submission's trailing blank lines, and Ctrl+G round-trips the buffer through $EDITOR, keeping it
-when the editor fails."""
+submission's trailing blank lines, and Ctrl+G round-trips the buffer through an editor, keeping it
+when the editor fails. The editor setting runs ahead of $VISUAL and $EDITOR."""
 
 import harness
 
@@ -112,6 +112,37 @@ def test_editor_round_trip():
         ▌ ctrl-d quit · try /help
 
         ❯ keep
+        """
+    )
+
+
+def test_editor_wins():
+    """The editor setting runs instead of $VISUAL/$EDITOR, and {} carries the temp file's path."""
+    good = harness.scratch_dir() / "good-editor"
+    good.write_text('#!/bin/sh\nprintf \' from editor\\n\' >> "$1"\n')
+    good.chmod(0o755)
+    bad = harness.scratch_dir() / "bad-editor"
+    bad.write_text('#!/bin/sh\nprintf \' wrong editor\\n\' > "$1"\n')
+    bad.chmod(0o755)
+    term = harness.Terminal(
+        "end-turn",
+        extra_env={
+            "VISUAL": str(bad),
+            "EDITOR": str(bad),
+            # The path takes the place of {} even with an argument after it; appended instead, the
+            # script would be handed "ignored" and the buffer would come back unchanged.
+            "HAX_EDITOR": f"{good} {{}} ignored",
+        },
+    )
+    term.wait_for("❯")
+    term.type("draft")
+    term.send("C-g")
+    term.expect_screen(
+        """
+        ▌ hax › mock · mock-model
+        ▌ ctrl-d quit · try /help
+
+        ❯ draft from editor
         """
     )
 

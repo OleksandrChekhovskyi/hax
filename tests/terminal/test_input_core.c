@@ -469,6 +469,25 @@ static void test_load_edited(void)
     input_free(in);
 }
 
+static void test_editor_command(void)
+{
+    char *cmd = input_core_editor_command("vim", "/tmp/hax-edit-abc123");
+    EXPECT_STR_EQ(cmd, "vim '/tmp/hax-edit-abc123'");
+    free(cmd);
+
+    cmd = input_core_editor_command("tmux split-window \"vim {}\" && tmux wait-for hax",
+                                    "/tmp/hax-edit-abc123");
+    EXPECT_STR_EQ(cmd, "tmux split-window \"vim '/tmp/hax-edit-abc123'\" && tmux wait-for hax");
+    free(cmd);
+
+    cmd = input_core_editor_command("tee {} < {}", "/tmp/hax-edit-abc123");
+    EXPECT_STR_EQ(cmd, "tee '/tmp/hax-edit-abc123' < '/tmp/hax-edit-abc123'");
+    free(cmd);
+
+    EXPECT(input_core_editor_command(NULL, "/tmp/hax-edit-abc123") == NULL);
+    EXPECT(input_core_editor_command("", "/tmp/hax-edit-abc123") == NULL);
+}
+
 static void test_motions_ascii(void)
 {
     struct input *in = new_with("hi");
@@ -1302,6 +1321,7 @@ int main(void)
     test_commit_paste();
     test_submit_ready_trims();
     test_load_edited();
+    test_editor_command();
     test_motions_ascii();
     test_motions_utf8();
     test_motions_malformed_utf8();
