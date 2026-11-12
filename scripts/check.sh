@@ -97,14 +97,16 @@ setup_build_dir() {
     build)
         set --
         ;;
+    # Clang links sanitizer runtimes only into executables, so b_lundef would reject any shared
+    # object calling into them; meson warns about the combination at setup.
     build-asan)
-        set -- -Db_sanitize=address,undefined
+        set -- -Db_sanitize=address,undefined -Db_lundef=false
         ;;
     build-release)
         set -- --buildtype=release
         ;;
     build-tsan)
-        set -- -Db_sanitize=thread
+        set -- -Db_sanitize=thread -Db_lundef=false
         ;;
     *)
         printf "error: build dir '%s' does not exist; run: meson setup %s <options>\n" \
