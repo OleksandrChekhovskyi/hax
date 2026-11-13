@@ -96,6 +96,7 @@ as_root apk add --no-cache -q \
     git cmake jansson-static mbedtls-dev mbedtls-static zlib-dev zlib-static
 printf '%s\n' 'deps OK'
 
+# Pinned; see "Version pins" in docs/releasing.md.
 CURL_VERSION=8.23.0
 CURL_SHA256=e3de77cfa6367083c776a26647fc9f633b538c06c3baa73d931a252ac8f72b49
 

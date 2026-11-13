@@ -25,10 +25,20 @@ release, and finally bumps the downstream repositories below. Prerelease tags (`
 published as GitHub prereleases and skip those bumps, so `releases/latest` and everything
 downstream keep tracking the newest stable release.
 
-The prebuilt binaries bundle libcurl (Linux) and jansson (macOS) at versions pinned, with their
-checksums, in `scripts/build_linux.sh` and `scripts/build_macos.sh`; the remaining Linux
-libraries come from Alpine's current packages. Before a release, bump a pin whose upstream has
-shipped security fixes since.
+## Version pins
+
+These versions are pinned in-tree and never move on their own. Check them before a release:
+
+- libcurl and jansson, bundled into the Linux and macOS binaries: `CURL_*` in
+  `scripts/build_linux.sh` and `JANSSON_*` in `scripts/build_macos.sh`. Bump when upstream has
+  shipped security fixes, along with the checksum. Other Linux libraries come from Alpine's
+  current packages.
+- The Codex CLI version in the `codex` provider's User-Agent (`src/providers/registry.c`). The
+  backend's routing has depended on client identity before, so keep it close to the latest
+  `codex` release.
+- The FreeBSD and OpenBSD versions in `.github/workflows/ci.yml`, and the
+  `cross-platform-actions` release that boots them: track current OS releases before the old
+  ones lose support.
 
 ## Downstream repositories
 

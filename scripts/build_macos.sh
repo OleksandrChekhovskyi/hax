@@ -28,6 +28,7 @@ export BUILD_DIR
 wipe=
 [ -d "$BUILD_DIR" ] && wipe=--wipe
 
+# Pinned; see "Version pins" in docs/releasing.md.
 JANSSON_VERSION=2.15.1
 JANSSON_SHA256=0c7114dc0b2d22a670724a1f95922029d7077c19dbf79a584cb8084d2f267f2f
 

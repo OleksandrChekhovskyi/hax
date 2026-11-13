@@ -70,6 +70,7 @@ jobs:
   # GitHub has no BSD runners, so these boot a QEMU guest on a Linux runner and
   # take longer than the container jobs above. They cannot join that matrix: the
   # whole body has to run inside the VM, which the `cpa.sh` shell arranges.
+  # Pinned versions; see "Version pins" in docs/releasing.md.
   bsd:
     name: ${{ matrix.name }}
     runs-on: ubuntu-latest
