@@ -95,6 +95,10 @@ static const struct config_setting REGISTRY[] = {
      .description = "Model round-trips per user turn before interactive pauses for confirmation "
                     "and one-shot aborts; 0 is unlimited",
      .kind = CONFIG_KIND_INT, .editable = 1},
+    {.key = "editor", .env_var = "HAX_EDITOR",
+     .description = "Command Ctrl-G runs instead of $VISUAL/$EDITOR; {} becomes the temp file "
+                    "path, or the path is appended when it is absent",
+     .editable = 1},
 
     /* model catalog */
     {.key = "catalog.url", .env_var = "HAX_CATALOG_URL",

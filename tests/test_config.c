@@ -666,6 +666,9 @@ static void test_registry_introspection(void)
     const struct config_setting *show_reasoning = config_setting_find("show_reasoning");
     EXPECT(show_reasoning != NULL && show_reasoning->editable);
     EXPECT_STR_EQ(show_reasoning->choices, CONFIG_CHOICES_BOOL);
+    const struct config_setting *editor = config_setting_find("editor");
+    EXPECT(editor != NULL && editor->editable);
+    EXPECT(editor->kind == CONFIG_KIND_STRING);
     EXPECT(config_setting_find("nonesuch") == NULL);
     EXPECT(config_setting_find("providers.openai-compatible.base_url") != NULL);
     EXPECT(!config_setting_find("providers.openai-compatible.base_url")->editable);

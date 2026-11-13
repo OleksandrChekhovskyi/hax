@@ -137,6 +137,13 @@ int input_core_submit_ready(struct input *in);
  * past the final newline most editors append. */
 void input_core_load_edited(struct input *in, const char *text, size_t len);
 
+/* ---- external editor ---- */
+
+/* Build the shell command that runs `command` on `path`: every "{}" in `command` becomes the
+ * single-quoted path, and the quoted path is appended as a final argument when there is none.
+ * Return NULL for a NULL or empty command. */
+char *input_core_editor_command(const char *command, const char *path);
+
 /* Offset of the word that ends before `end` in `text`, after skipping the separators just before
  * `end`. Words are whitespace-delimited for Ctrl-W and alphanumeric, like readline's Meta word
  * operations, for the alnum variant. `text` may be NULL when `end` is 0. */
