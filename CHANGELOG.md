@@ -7,6 +7,12 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
+### Added
+
+- Releases now build a Workshop SDK and release it to the SDK Store, wrapping the same Linux
+  binary so a Workshop can install hax by name; it is built from that binary and carries the
+  release version.
+
 ## [0.7.0] - 2026-11-12
 
 ### Added

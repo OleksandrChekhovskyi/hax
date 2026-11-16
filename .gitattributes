@@ -11,4 +11,5 @@
 AGENTS.md export-ignore
 CLAUDE.md export-ignore
 compile_commands.json export-ignore
+sdkcraft.yaml export-ignore
 scripts/maint export-ignore
