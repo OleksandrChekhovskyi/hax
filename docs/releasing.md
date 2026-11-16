@@ -2,7 +2,10 @@
 
 Releases are tag-driven: pushing a `v*` tag runs `.github/workflows/release.yml`, which publishes
 a GitHub release with the source tarball, prebuilt Linux and macOS binaries, and a `SHA256SUMS`
-file, using the matching `CHANGELOG.md` section as notes.
+file, using the matching `CHANGELOG.md` section as notes. Releases also publish a Workshop SDK,
+built from the Linux binary, to the SDK Store, where workshops install it by name: a stable
+release goes to `latest/stable`, an `-rc.N` prerelease to `latest/candidate`, and anything else
+to `latest/edge`.
 
 Versions follow [Semantic Versioning](https://semver.org/): `vMAJOR.MINOR.PATCH`, with
 `-rc.N` pre-release suffixes when a release candidate is warranted.
@@ -23,7 +26,7 @@ The tag push runs the full CI matrix and, in parallel, the release workflow: it 
 the tag does not match the `meson.build` version, builds and tests every artifact, publishes the
 release, and finally bumps the downstream repositories below. Prerelease tags (`-rc.N`) are
 published as GitHub prereleases and skip those bumps, so `releases/latest` and everything
-downstream keep tracking the newest stable release.
+downstream keep tracking the newest stable release; the SDK Store takes them on `latest/candidate`.
 
 ## Version pins
 
@@ -62,6 +65,16 @@ login can push to the target.
 `AUR_SSH_KEY` is an SSH private key whose public half sits on the AUR account. AUR keys are
 account-scoped — there are no per-package deploy keys — so that key can write every package the
 account maintains.
+
+The Workshop SDK is not a repository but an SDK Store package: the workflow's `store` job runs
+`sdkcraft upload hax_amd64_ubuntu@26.04.sdk --release <channel>`, which registers the `hax` name
+on first use, then uploads the SDK the `sdk` job packed as a new revision and releases it. The
+channel is `latest/stable` for a stable release, `latest/candidate` for an `-rc.N` tag, and
+`latest/edge` for anything else, so a workshop can test release candidates by tracking
+candidate. `SDKCRAFT_STORE_CREDENTIALS` holds credentials exported by
+`sdkcraft login --export <file>` under the store account that owns the name. Unlike the bump
+scripts, the store does not refuse to move a channel backwards: re-running an older release's
+`store` job after a newer release would replace it, so re-run only the newest.
 
 ## When a run fails
 

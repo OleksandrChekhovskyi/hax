@@ -1,0 +1,28 @@
+name: hax
+summary: hax, a terminal AI coding agent
+description: |
+  Provides the hax command-line AI coding agent inside a Workshop
+  environment. hax is a single fully static binary, so it needs no extra
+  packages at runtime.
+license: MIT
+platforms:          # Must match the base of the workshop using this SDK
+  ubuntu@26.04:amd64:
+
+# The SDK ships the same version as the binary it wraps, so adopt it from
+# meson.build rather than duplicating a version string that could drift.
+adopt-info: hax
+
+parts:
+  hax:
+    plugin: dump
+    # The release workflow stages the just-built Linux binary tarball here (see
+    # the `sdk` job in .github/workflows/release.yml); it is not fetched from a
+    # published URL, so the SDK always wraps the artifact this release built.
+    source: dist/hax-linux-x86_64.tar.gz
+    source-type: tar
+    organize:
+      hax: bin/hax
+    override-pull: |
+      craftctl default
+      craftctl set version="$(sed -n "s/^    version: '\([^']*\)',$/\1/p" \
+          "$CRAFT_PROJECT_DIR/meson.build")"

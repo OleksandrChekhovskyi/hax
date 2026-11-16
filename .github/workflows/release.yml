@@ -58,6 +58,40 @@ jobs:
           path: hax-*.tar.gz
           if-no-files-found: error
 
+  # The Workshop SDK wraps the Linux binary, so Workshop users install the very
+  # artifact this release built. sdkcraft.yaml sources that binary from the
+  # `binary` job's tarball rather than a published URL, hence needs: binary; the
+  # SDK's version is adopted from meson.build, which the check below pins to the tag.
+  sdk:
+    name: sdk (ubuntu@26.04-amd64)
+    runs-on: ubuntu-26.04
+    needs: binary
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check tag matches project version
+        run: |
+          grep -Fq "version: '${GITHUB_REF_NAME#v}'," meson.build
+      # SDKcraft ships as a classic snap; the runner's snapd installs it.
+      - name: Install SDKcraft
+        run: sudo snap install sdkcraft --classic
+      - uses: actions/download-artifact@v8
+        with:
+          name: binary-linux-x86_64
+          path: dist
+      # Destructive mode: the runner is the SDK's ubuntu@26.04 base and the part only
+      # dumps a static binary, so no build environment beyond the host is needed. The
+      # part's source is a fixed path, so strip the version from the downloaded name.
+      - name: Build the SDK
+        run: |
+          mv dist/hax-*-linux-x86_64.tar.gz dist/hax-linux-x86_64.tar.gz
+          sdkcraft pack --destructive-mode
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sdk
+          path: hax_amd64_ubuntu@26.04.sdk
+          if-no-files-found: error
+
   release:
     runs-on: ubuntu-latest
     needs: binary
@@ -98,6 +132,46 @@ jobs:
           case "$GITHUB_REF_NAME" in *-*) prerelease=true ;; *) prerelease=false ;; esac
           gh release create "$GITHUB_REF_NAME" --title "hax $GITHUB_REF_NAME" \
               --prerelease="$prerelease" --notes-file notes.md artifacts/*
+
+  # Workshops install SDKs by name from the SDK Store, so that is where the packed SDK
+  # is published; the GitHub release carries only the binaries and the source tarball.
+  # `sdkcraft upload` registers the name on first use, then uploads the revision and
+  # releases it in one step. Unlike the repository bumps below, the store has channels,
+  # so prereleases publish too: -rc.N tags to latest/candidate and anything else to
+  # latest/edge, leaving latest/stable tracking the newest stable release.
+  store:
+    runs-on: ubuntu-26.04
+    needs: release
+    # Nothing here writes to this repository; the store account is reached through
+    # SDKCRAFT_STORE_CREDENTIALS (see docs/releasing.md), not the workflow token.
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: sdk
+          path: .
+      # SDKcraft ships as a classic snap; the runner's snapd installs it.
+      - name: Install SDKcraft
+        run: sudo snap install sdkcraft --classic
+      - name: Upload and release to the SDK Store
+        env:
+          SDKCRAFT_STORE_CREDENTIALS: ${{ secrets.SDKCRAFT_STORE_CREDENTIALS }}
+        run: |
+          test -n "$SDKCRAFT_STORE_CREDENTIALS" || {
+              echo 'SDKCRAFT_STORE_CREDENTIALS is not set' >&2; exit 1; }
+          # The channel follows the tag's shape. A bare vX.Y.Z is a stable release; a
+          # vX.Y.Z-rc.N tag is a release candidate; anything else (another prerelease
+          # suffix, or a malformed tag) goes to edge rather than risk the stable channel.
+          if   [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              channel=latest/stable
+          elif [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
+              channel=latest/candidate
+          else
+              channel=latest/edge
+          fi
+          sdkcraft upload hax_amd64_ubuntu@26.04.sdk --release "$channel"
 
   # The tap is another repository, beyond the workflow token's reach, hence
   # HOMEBREW_TAP_TOKEN (see docs/releasing.md).
