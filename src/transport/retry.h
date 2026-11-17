@@ -19,6 +19,12 @@ struct retry_policy retry_policy_default(void);
  * Terminal quota markers in a JSON 429 body also suppress retries. `body` may be NULL. */
 int retry_should_attempt(int result, long status, const char *body);
 
+/* Classify an HTTP response as a terminal (non-retryable, fallback-worthy) error. Mirrors the
+ * decision `retry_should_attempt` makes about whether to retry the same attempt internally:
+ * transport failures, timeouts, and 5xx are transient; 401/403 and other 4xx (including terminal
+ * 429 quota markers) are terminal. `body` may be NULL. */
+int retry_is_terminal_error(long status, const char *body);
+
 /* Returns the jittered delay after zero-based `attempt`, capped by `max_delay_ms`. */
 long retry_delay_ms(const struct retry_policy *policy, int attempt);
 

@@ -48,6 +48,10 @@ static const struct config_setting REGISTRY[] = {
     {.key = "no_tasks", .env_var = "HAX_NO_TASKS", .choices = CONFIG_CHOICES_BOOL,
      .description = "Disable background tasks: bash timeouts kill instead of detaching, and the "
                     "task tools are not offered"},
+    {.key = "fallback", .env_var = "HAX_FALLBACK", .choices = CONFIG_CHOICES_BOOL,
+     .default_value = "0",
+     .description = "Waterfall through providers in config order on terminal errors (quota, "
+                    "auth, etc.). Reasoning is dropped on provider switch"},
 
     /* display */
     {.key = "markdown", .env_var = "HAX_MARKDOWN", .default_value = "1",

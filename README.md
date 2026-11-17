@@ -121,7 +121,7 @@ CLI flags apply only to the current run, and environment variables are useful fo
 scripts. Resumed conversations restore their own provider, model, effort, and preset unless a
 CLI selection flag overrides them.
 
-See [docs/configuration.md](./docs/configuration.md) for the file format, resolution order, presets,
+See [docs/configuration.md](./docs/configuration.md) for the file format, resolution order, presets, and the `fallback: true` config option.
 and the setting reference.
 
 ## Extras
