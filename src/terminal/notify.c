@@ -19,7 +19,8 @@ enum notify_method {
 /* Kitty consumes unsupported OSC 9, including its BEL terminator, so detect support positively. */
 static int terminal_supports_osc9(void)
 {
-    static const char *const TERM_PROGRAMS[] = {"iTerm.app", "ghostty", "WezTerm", "WarpTerminal"};
+    static const char *const TERM_PROGRAMS[] = {"iTerm.app", "ghostty", "WezTerm", "WarpTerminal",
+                                                "rex"};
     const char *term_program = getenv("TERM_PROGRAM");
     if (term_program) {
         for (size_t i = 0; i < sizeof(TERM_PROGRAMS) / sizeof(TERM_PROGRAMS[0]); i++) {

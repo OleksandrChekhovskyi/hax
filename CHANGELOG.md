@@ -7,6 +7,10 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
+### Added
+
+- Add Rex as a terminal known to support OSC 9
+
 ## [0.7.0] - 2026-11-12
 
 ### Added
