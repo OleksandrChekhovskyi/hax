@@ -11,7 +11,6 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
-#include "buf.h"
 #include "xalloc.h"
 #include "system/fd.h"
 #include "system/path.h"
@@ -451,15 +450,6 @@ int fs_open_regular(const char *path)
     return -1;
 }
 
-static ssize_t read_retry(int fd, void *data, size_t length)
-{
-    ssize_t bytes_read;
-    do {
-        bytes_read = read(fd, data, length);
-    } while (bytes_read < 0 && errno == EINTR);
-    return bytes_read;
-}
-
 char *fs_read_file(const char *path, size_t *out_len)
 {
     return fs_read_file_capped(path, SIZE_MAX, out_len, NULL);
@@ -467,45 +457,14 @@ char *fs_read_file(const char *path, size_t *out_len)
 
 char *fs_read_file_capped(const char *path, size_t cap, size_t *out_len, int *out_truncated)
 {
-    int saved_errno;
-    int truncated = 0;
     int fd = fs_open_regular(path);
     if (fd < 0)
         return NULL;
 
-    struct buf contents;
-    buf_init(&contents);
-    char chunk[8192];
-    while (contents.len < cap) {
-        size_t remaining = cap - contents.len;
-        size_t request = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
-        ssize_t bytes_read = read_retry(fd, chunk, request);
-        if (bytes_read < 0)
-            goto error;
-        if (bytes_read == 0)
-            break;
-        buf_append(&contents, chunk, (size_t)bytes_read);
-    }
-
-    if (contents.len == cap) {
-        char extra;
-        ssize_t bytes_read = read_retry(fd, &extra, 1);
-        if (bytes_read < 0)
-            goto error;
-        truncated = bytes_read > 0;
-    }
-
-    close(fd);
-    if (out_len)
-        *out_len = contents.len;
-    if (out_truncated)
-        *out_truncated = truncated;
-    return buf_steal(&contents);
-
-error:
-    saved_errno = errno;
-    buf_free(&contents);
+    /* Some streaming pseudo-files pass as regular; failing fast keeps them from blocking. */
+    char *contents = fd_read_all(fd, cap, FD_READ_FAIL_FAST, out_len, out_truncated);
+    int saved_errno = errno;
     close(fd);
     errno = saved_errno;
-    return NULL;
+    return contents;
 }

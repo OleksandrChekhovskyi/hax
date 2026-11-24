@@ -3,10 +3,9 @@
 
 /* getopt_long and struct option live in glibc's bits/getopt_ext.h, which the
  * include cleaner is told to ignore, so it cannot see this header being used. */
-#include <errno.h>
 #include <fcntl.h>
 #include <getopt.h> // IWYU pragma: keep
-#include <poll.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +19,7 @@
 #include "session_picker.h"
 #include "version.h"
 #include "xalloc.h"
+#include "system/fd.h"
 #include "terminal/ansi.h"
 #include "terminal/interrupt.h"
 #include "terminal/theme.h"
@@ -313,50 +313,19 @@ static char *join_arguments(int count, char **arguments)
     return output;
 }
 
-static char *read_stream(FILE *input)
-{
-    struct buf buffer;
-    buf_init(&buffer);
-
-    char chunk[4096];
-    for (;;) {
-        size_t bytes_read = fread(chunk, 1, sizeof(chunk), input);
-        if (bytes_read > 0)
-            buf_append(&buffer, chunk, bytes_read);
-        if (bytes_read == sizeof(chunk))
-            continue;
-        /* A parent sharing the open file description may have made it nonblocking. */
-        if (ferror(input) && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            clearerr(input);
-            struct pollfd readable = {.fd = fileno(input), .events = POLLIN};
-            (void)poll(&readable, 1, -1);
-            continue;
-        }
-        if (ferror(input)) {
-            buf_free(&buffer);
-            return NULL;
-        }
-        break;
-    }
-
-    return buf_steal(&buffer);
-}
-
 /* Pipes, files, and devices are read to EOF, since an idle pipe cannot be told from a slow
  * producer. Other stdin, chiefly a socket a launcher leaves open, is read only if input arrives
  * within the grace period, and then to EOF rather than truncated at a pause. */
-static int accompanying_input_arrives(FILE *input, int grace_ms)
+static int accompanying_input_arrives(int fd, int grace_ms)
 {
-    int fd = fileno(input);
-    int flags = fd < 0 ? -1 : fcntl(fd, F_GETFL);
+    int flags = fcntl(fd, F_GETFL);
     struct stat st;
     if (flags < 0 || (flags & O_ACCMODE) == O_WRONLY || fstat(fd, &st) != 0)
         return 0;
     if (S_ISFIFO(st.st_mode) || S_ISREG(st.st_mode) || S_ISCHR(st.st_mode))
         return 1;
 
-    struct pollfd readable = {.fd = fd, .events = POLLIN};
-    if (poll(&readable, 1, grace_ms) > 0)
+    if (fd_wait_readable(fd, grace_ms) > 0)
         return 1;
     hax_warn("stdin had no input within %d ms; continuing without it", grace_ms);
     return 0;
@@ -383,7 +352,7 @@ static char *combine_prompt(char *typed, char *piped)
     return combined;
 }
 
-int cli_read_prompt(const struct cli_options *options, int argc, char **argv, FILE *input,
+int cli_read_prompt(const struct cli_options *options, int argc, char **argv, int input_fd,
                     int input_is_tty, int input_grace_ms, char **prompt)
 {
     *prompt = NULL;
@@ -408,8 +377,8 @@ int cli_read_prompt(const struct cli_options *options, int argc, char **argv, FI
     }
 
     char *piped = NULL;
-    if (!input_is_tty && (!has_arguments || accompanying_input_arrives(input, input_grace_ms))) {
-        piped = read_stream(input);
+    if (!input_is_tty && (!has_arguments || accompanying_input_arrives(input_fd, input_grace_ms))) {
+        piped = fd_read_all(input_fd, SIZE_MAX, FD_READ_WAIT, NULL, NULL);
         if (!piped) {
             hax_err("failed to read stdin");
             free(typed);

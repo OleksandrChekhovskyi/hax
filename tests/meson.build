@@ -1,6 +1,7 @@
 # Fixtures shared across tests, each a header with its implementation beside it.
 test_support = static_library('test_support',
     'harness.c',
+    'late_writer.c',
     'loopback.c',
     'output.c',
     'tools/bash_fixtures.c',

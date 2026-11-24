@@ -4,7 +4,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <libgen.h>
-#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -132,14 +131,9 @@ static int read_byte_blocking(unsigned char *out)
 
 static int read_byte_timeout(unsigned char *out, int timeout_ms)
 {
-    struct pollfd input = {.fd = STDIN_FILENO, .events = POLLIN};
-    int result;
-
-    do {
-        result = poll(&input, 1, timeout_ms);
-    } while (result < 0 && errno == EINTR);
-    if (result <= 0)
-        return result;
+    int ready = fd_wait_readable(STDIN_FILENO, timeout_ms);
+    if (ready <= 0)
+        return ready;
     return read_byte_blocking(out);
 }
 

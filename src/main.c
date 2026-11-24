@@ -179,8 +179,8 @@ int main(int argc, char **argv)
     }
     if (parse_result == CLI_PARSE_ERROR || cli_check_subagent_depth() != 0)
         goto cleanup_config;
-    if (cli_read_prompt(&options, argc, argv, stdin, isatty(fileno(stdin)), CLI_INPUT_GRACE_MS,
-                        &prompt) != 0)
+    if (cli_read_prompt(&options, argc, argv, STDIN_FILENO, isatty(STDIN_FILENO),
+                        CLI_INPUT_GRACE_MS, &prompt) != 0)
         goto cleanup_config;
 
     enum cli_session_result session_result = cli_resolve_session(&options, &resume_path);

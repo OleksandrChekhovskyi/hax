@@ -7,11 +7,11 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 
 #include "cli.h"
 #include "config.h"
 #include "harness.h"
+#include "late_writer.h"
 #include "output.h"
 #include "provider.h"
 #include "session.h"
@@ -46,7 +46,7 @@ static void test_parse_selection_and_prompt_arguments(void)
     EXPECT_STR_EQ(options.selection.preset, "review");
 
     char *prompt = NULL;
-    EXPECT(cli_read_prompt(&options, argc, argv, stdin, 1, 0, &prompt) == 0);
+    EXPECT(cli_read_prompt(&options, argc, argv, STDIN_FILENO, 1, 0, &prompt) == 0);
     EXPECT_STR_EQ(prompt, "hello world");
     free(prompt);
 }
@@ -116,7 +116,7 @@ static void test_parse_leading_preset(void)
     EXPECT(cli_parse(6, oneshot, &options) == CLI_PARSE_OK);
     EXPECT_STR_EQ(options.selection.preset, "review");
     char *prompt = NULL;
-    EXPECT(cli_read_prompt(&options, 6, oneshot, stdin, 1, 0, &prompt) == 0);
+    EXPECT(cli_read_prompt(&options, 6, oneshot, STDIN_FILENO, 1, 0, &prompt) == 0);
     EXPECT_STR_EQ(prompt, "fix the tests");
     free(prompt);
 
@@ -124,7 +124,7 @@ static void test_parse_leading_preset(void)
     char *after_print[] = {"hax", "-p", "review", "fix", NULL};
     EXPECT(cli_parse(4, after_print, &options) == CLI_PARSE_OK);
     EXPECT(options.selection.preset == NULL);
-    EXPECT(cli_read_prompt(&options, 4, after_print, stdin, 1, 0, &prompt) == 0);
+    EXPECT(cli_read_prompt(&options, 4, after_print, STDIN_FILENO, 1, 0, &prompt) == 0);
     EXPECT_STR_EQ(prompt, "review fix");
     free(prompt);
 
@@ -141,7 +141,7 @@ static void test_parse_leading_preset(void)
     char *trailing_print[] = {"hax", "fix", "the", "tests", "-p", NULL};
     EXPECT(cli_parse(5, trailing_print, &options) == CLI_PARSE_OK);
     EXPECT(options.selection.preset == NULL);
-    EXPECT(cli_read_prompt(&options, 5, trailing_print, stdin, 1, 0, &prompt) == 0);
+    EXPECT(cli_read_prompt(&options, 5, trailing_print, STDIN_FILENO, 1, 0, &prompt) == 0);
     EXPECT_STR_EQ(prompt, "fix the tests");
     free(prompt);
 
@@ -219,33 +219,37 @@ static void test_help_wraps_to_display_width(void)
     free(out);
 }
 
-static FILE *prompt_stream(const char *text)
+/* Return a descriptor reading `text` from an unlinked temporary file. */
+static int prompt_input(const char *text)
 {
     FILE *stream = tmpfile();
     EXPECT(stream != NULL);
     EXPECT(fwrite(text, 1, strlen(text), stream) == strlen(text));
-    EXPECT(fseek(stream, 0, SEEK_SET) == 0);
-    return stream;
+    EXPECT(fflush(stream) == 0);
+    int input = dup(fileno(stream));
+    fclose(stream);
+    EXPECT(input >= 0 && lseek(input, 0, SEEK_SET) == 0);
+    return input;
 }
 
-static void test_read_prompt_from_stream(void)
+static void test_read_prompt_from_input(void)
 {
     char *argv[] = {"hax", "--print", NULL};
     struct cli_options options;
     EXPECT(cli_parse(2, argv, &options) == CLI_PARSE_OK);
 
-    FILE *stream = prompt_stream("first\nsecond\r\n");
+    int input = prompt_input("first\nsecond\r\n");
     char *prompt = NULL;
-    EXPECT(cli_read_prompt(&options, 2, argv, stream, 0, 0, &prompt) == 0);
+    EXPECT(cli_read_prompt(&options, 2, argv, input, 0, 0, &prompt) == 0);
     EXPECT_STR_EQ(prompt, "first\nsecond");
     free(prompt);
-    fclose(stream);
+    close(input);
 
-    stream = prompt_stream("\nfirst\n\n");
-    EXPECT(cli_read_prompt(&options, 2, argv, stream, 0, 0, &prompt) == 0);
+    input = prompt_input("\nfirst\n\n");
+    EXPECT(cli_read_prompt(&options, 2, argv, input, 0, 0, &prompt) == 0);
     EXPECT_STR_EQ(prompt, "first");
     free(prompt);
-    fclose(stream);
+    close(input);
 }
 
 static void test_read_prompt_appends_input_to_arguments(void)
@@ -254,52 +258,26 @@ static void test_read_prompt_appends_input_to_arguments(void)
     struct cli_options options;
     EXPECT(cli_parse(4, argv, &options) == CLI_PARSE_OK);
 
-    FILE *stream = prompt_stream("\n  indented\nline\n\n");
+    int input = prompt_input("\n  indented\nline\n\n");
     char *prompt = NULL;
-    EXPECT(cli_read_prompt(&options, 4, argv, stream, 0, 0, &prompt) == 0);
+    EXPECT(cli_read_prompt(&options, 4, argv, input, 0, 0, &prompt) == 0);
     EXPECT_STR_EQ(prompt, "review this\n\n<stdin>\n  indented\nline\n</stdin>");
     free(prompt);
-    fclose(stream);
+    close(input);
 
-    stream = prompt_stream(" \n");
-    EXPECT(cli_read_prompt(&options, 4, argv, stream, 0, 0, &prompt) == 0);
+    input = prompt_input(" \n");
+    EXPECT(cli_read_prompt(&options, 4, argv, input, 0, 0, &prompt) == 0);
     EXPECT_STR_EQ(prompt, "review this");
     free(prompt);
-    fclose(stream);
+    close(input);
 
     char *blank_argv[] = {"hax", "--print", " ", NULL};
     EXPECT(cli_parse(3, blank_argv, &options) == CLI_PARSE_OK);
-    stream = prompt_stream("piped alone");
-    EXPECT(cli_read_prompt(&options, 3, blank_argv, stream, 0, 0, &prompt) == 0);
+    input = prompt_input("piped alone");
+    EXPECT(cli_read_prompt(&options, 3, blank_argv, input, 0, 0, &prompt) == 0);
     EXPECT_STR_EQ(prompt, "piped alone");
     free(prompt);
-    fclose(stream);
-}
-
-/* Return the read end of a pipe whose forked writer sends `early` at once and `late` after a pause,
- * then exits. */
-static int late_writer_pipe(const char *early, const char *late, pid_t *writer)
-{
-    int fds[2];
-    EXPECT(pipe(fds) == 0);
-    *writer = fork();
-    EXPECT(*writer >= 0);
-    if (*writer == 0) {
-        close(fds[0]);
-        int written = write(fds[1], early, strlen(early)) == (ssize_t)strlen(early);
-        struct timespec delay = {.tv_nsec = 50 * 1000 * 1000};
-        nanosleep(&delay, NULL);
-        written = written && write(fds[1], late, strlen(late)) == (ssize_t)strlen(late);
-        _exit(written ? 0 : 1);
-    }
-    close(fds[1]);
-    return fds[0];
-}
-
-static void expect_writer_succeeded(pid_t writer)
-{
-    int status;
-    EXPECT(waitpid(writer, &status, 0) == writer && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    close(input);
 }
 
 /* A shell pipe is waited for past the grace period, however late its producer writes. */
@@ -310,32 +288,13 @@ static void test_read_prompt_waits_for_slow_pipe(void)
     EXPECT(cli_parse(3, argv, &options) == CLI_PARSE_OK);
 
     pid_t writer;
-    FILE *stream = fdopen(late_writer_pipe("", "late", &writer), "r");
+    int input = late_writer_pipe("", "late", &writer);
     char *prompt = NULL;
-    EXPECT(cli_read_prompt(&options, 3, argv, stream, 0, 0, &prompt) == 0);
+    EXPECT(cli_read_prompt(&options, 3, argv, input, 0, 0, &prompt) == 0);
     EXPECT_STR_EQ(prompt, "summarize\n\n<stdin>\nlate\n</stdin>");
     free(prompt);
-    fclose(stream);
-    expect_writer_succeeded(writer);
-}
-
-/* A parent sharing stdin may leave it nonblocking; a pause must not discard what was read. */
-static void test_read_prompt_waits_on_nonblocking_pipe(void)
-{
-    char *argv[] = {"hax", "--print", "summarize", NULL};
-    struct cli_options options;
-    EXPECT(cli_parse(3, argv, &options) == CLI_PARSE_OK);
-
-    pid_t writer;
-    int fd = late_writer_pipe("first ", "second", &writer);
-    EXPECT(fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) == 0);
-    FILE *stream = fdopen(fd, "r");
-    char *prompt = NULL;
-    EXPECT(cli_read_prompt(&options, 3, argv, stream, 0, 0, &prompt) == 0);
-    EXPECT_STR_EQ(prompt, "summarize\n\n<stdin>\nfirst second\n</stdin>");
-    free(prompt);
-    fclose(stream);
-    expect_writer_succeeded(writer);
+    close(input);
+    late_writer_wait(writer);
 }
 
 /* A socket left open by a spawning parent must not hold a run that already has its prompt. */
@@ -347,23 +306,21 @@ static void test_read_prompt_skips_idle_socket(void)
 
     int idle[2];
     EXPECT(socketpair(AF_UNIX, SOCK_STREAM, 0, idle) == 0);
-    FILE *stream = fdopen(idle[0], "r");
     char *prompt = NULL;
-    EXPECT(cli_read_prompt(&options, 3, argv, stream, 0, 0, &prompt) == 0);
+    EXPECT(cli_read_prompt(&options, 3, argv, idle[0], 0, 0, &prompt) == 0);
     EXPECT_STR_EQ(prompt, "summarize");
     free(prompt);
-    fclose(stream);
+    close(idle[0]);
     close(idle[1]);
 
     int ready[2];
     EXPECT(socketpair(AF_UNIX, SOCK_STREAM, 0, ready) == 0);
     EXPECT(write(ready[1], "context", 7) == 7);
     close(ready[1]);
-    stream = fdopen(ready[0], "r");
-    EXPECT(cli_read_prompt(&options, 3, argv, stream, 0, 0, &prompt) == 0);
+    EXPECT(cli_read_prompt(&options, 3, argv, ready[0], 0, 0, &prompt) == 0);
     EXPECT_STR_EQ(prompt, "summarize\n\n<stdin>\ncontext\n</stdin>");
     free(prompt);
-    fclose(stream);
+    close(ready[0]);
 }
 
 /* A write-only stdin cannot carry input, so it must not fail a run that has its prompt. */
@@ -373,14 +330,13 @@ static void test_read_prompt_skips_write_only_input(void)
     struct cli_options options;
     EXPECT(cli_parse(3, argv, &options) == CLI_PARSE_OK);
 
-    int fd = open("/dev/null", O_WRONLY);
-    EXPECT(fd >= 0);
-    FILE *stream = fdopen(fd, "w");
+    int input = open("/dev/null", O_WRONLY);
+    EXPECT(input >= 0);
     char *prompt = NULL;
-    EXPECT(cli_read_prompt(&options, 3, argv, stream, 0, 0, &prompt) == 0);
+    EXPECT(cli_read_prompt(&options, 3, argv, input, 0, 0, &prompt) == 0);
     EXPECT_STR_EQ(prompt, "summarize");
     free(prompt);
-    fclose(stream);
+    close(input);
 }
 
 static void test_read_prompt_rejects_missing_or_empty_input(void)
@@ -390,17 +346,17 @@ static void test_read_prompt_rejects_missing_or_empty_input(void)
     EXPECT(cli_parse(2, argv, &options) == CLI_PARSE_OK);
 
     char *prompt = NULL;
-    EXPECT(cli_read_prompt(&options, 2, argv, stdin, 1, 0, &prompt) == -1);
+    EXPECT(cli_read_prompt(&options, 2, argv, STDIN_FILENO, 1, 0, &prompt) == -1);
     EXPECT(prompt == NULL);
 
-    FILE *stream = prompt_stream("\n");
-    EXPECT(cli_read_prompt(&options, 2, argv, stream, 0, 0, &prompt) == -1);
+    int input = prompt_input("\n");
+    EXPECT(cli_read_prompt(&options, 2, argv, input, 0, 0, &prompt) == -1);
     EXPECT(prompt == NULL);
-    fclose(stream);
+    close(input);
 
     char *blank_argv[] = {"hax", "--print", " ", "\n", NULL};
     EXPECT(cli_parse(4, blank_argv, &options) == CLI_PARSE_OK);
-    EXPECT(cli_read_prompt(&options, 4, blank_argv, stdin, 1, 0, &prompt) == -1);
+    EXPECT(cli_read_prompt(&options, 4, blank_argv, STDIN_FILENO, 1, 0, &prompt) == -1);
     EXPECT(prompt == NULL);
 }
 
@@ -412,13 +368,13 @@ static void test_read_prompt_promptless_resume_continues(void)
     EXPECT(cli_parse(3, argv, &options) == CLI_PARSE_OK);
 
     char *prompt = NULL;
-    EXPECT(cli_read_prompt(&options, 3, argv, stdin, 1, 0, &prompt) == 0);
+    EXPECT(cli_read_prompt(&options, 3, argv, STDIN_FILENO, 1, 0, &prompt) == 0);
     EXPECT(prompt == NULL);
 
-    FILE *stream = prompt_stream("\n");
-    EXPECT(cli_read_prompt(&options, 3, argv, stream, 0, 0, &prompt) == 0);
+    int input = prompt_input("\n");
+    EXPECT(cli_read_prompt(&options, 3, argv, input, 0, 0, &prompt) == 0);
     EXPECT(prompt == NULL);
-    fclose(stream);
+    close(input);
 }
 
 static void test_resolve_missing_session(void)
@@ -548,10 +504,9 @@ int main(void)
     test_parse_json_implies_print();
     test_parse_version_prints_and_exits();
     test_help_wraps_to_display_width();
-    test_read_prompt_from_stream();
+    test_read_prompt_from_input();
     test_read_prompt_appends_input_to_arguments();
     test_read_prompt_waits_for_slow_pipe();
-    test_read_prompt_waits_on_nonblocking_pipe();
     test_read_prompt_skips_idle_socket();
     test_read_prompt_skips_write_only_input();
     test_read_prompt_rejects_missing_or_empty_input();
