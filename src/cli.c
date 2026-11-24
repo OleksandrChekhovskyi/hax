@@ -3,11 +3,15 @@
 
 /* getopt_long and struct option live in glibc's bits/getopt_ext.h, which the
  * include cleaner is told to ignore, so it cannot see this header being used. */
+#include <errno.h>
+#include <fcntl.h>
 #include <getopt.h> // IWYU pragma: keep
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #include "buf.h"
 #include "config.h"
@@ -32,8 +36,8 @@ static const struct help_option {
 } HELP_OPTIONS[] = {
     {"-p, --print",
      "Non-interactive mode. Runs the prompt to completion and prints the final assistant "
-     "message to stdout. The prompt comes from PROMPT positional arguments (joined with "
-     "spaces) when given, otherwise from stdin if stdin is not a terminal."},
+     "message to stdout. The prompt is the PROMPT arguments joined with spaces. Piped stdin "
+     "is added after them as context, or is the whole prompt when no PROMPT is given."},
     {"--json",
      "Non-interactive JSON output (implies -p): stream the run as JSON records on stdout, "
      "one per line, ending with a result record. Format reference: hax-sessions(5)."},
@@ -321,6 +325,13 @@ static char *read_stream(FILE *input)
             buf_append(&buffer, chunk, bytes_read);
         if (bytes_read == sizeof(chunk))
             continue;
+        /* A parent sharing the open file description may have made it nonblocking. */
+        if (ferror(input) && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            clearerr(input);
+            struct pollfd readable = {.fd = fileno(input), .events = POLLIN};
+            (void)poll(&readable, 1, -1);
+            continue;
+        }
         if (ferror(input)) {
             buf_free(&buffer);
             return NULL;
@@ -331,8 +342,49 @@ static char *read_stream(FILE *input)
     return buf_steal(&buffer);
 }
 
+/* Pipes, files, and devices are read to EOF, since an idle pipe cannot be told from a slow
+ * producer. Other stdin, chiefly a socket a launcher leaves open, is read only if input arrives
+ * within the grace period, and then to EOF rather than truncated at a pause. */
+static int accompanying_input_arrives(FILE *input, int grace_ms)
+{
+    int fd = fileno(input);
+    int flags = fd < 0 ? -1 : fcntl(fd, F_GETFL);
+    struct stat st;
+    if (flags < 0 || (flags & O_ACCMODE) == O_WRONLY || fstat(fd, &st) != 0)
+        return 0;
+    if (S_ISFIFO(st.st_mode) || S_ISREG(st.st_mode) || S_ISCHR(st.st_mode))
+        return 1;
+
+    struct pollfd readable = {.fd = fd, .events = POLLIN};
+    if (poll(&readable, 1, grace_ms) > 0)
+        return 1;
+    hax_warn("stdin had no input within %d ms; continuing without it", grace_ms);
+    return 0;
+}
+
+/* Take ownership of both parts, either of which may be NULL or empty. Piped text accompanying a
+ * prompt is fenced as context; on its own it is the prompt. Return NULL when both are empty. */
+static char *combine_prompt(char *typed, char *piped)
+{
+    if (typed && !*typed) {
+        free(typed);
+        typed = NULL;
+    }
+    if (piped && !*piped) {
+        free(piped);
+        piped = NULL;
+    }
+    if (!typed || !piped)
+        return typed ? typed : piped;
+
+    char *combined = xasprintf("%s\n\n<stdin>\n%s\n</stdin>", typed, piped);
+    free(typed);
+    free(piped);
+    return combined;
+}
+
 int cli_read_prompt(const struct cli_options *options, int argc, char **argv, FILE *input,
-                    int input_is_tty, char **prompt)
+                    int input_is_tty, int input_grace_ms, char **prompt)
 {
     *prompt = NULL;
     if (!options->one_shot)
@@ -340,32 +392,37 @@ int cli_read_prompt(const struct cli_options *options, int argc, char **argv, FI
     /* Resuming gives a missing prompt a meaning — continue the recorded conversation, like the
      * REPL's empty-send resume — so only a fresh run rejects it. */
     int resuming = options->resume_mode != CLI_RESUME_NONE;
+    int has_arguments = options->first_prompt_arg < argc;
 
-    if (options->first_prompt_arg < argc) {
-        *prompt =
-            join_arguments(argc - options->first_prompt_arg, argv + options->first_prompt_arg);
-    } else if (!input_is_tty) {
-        *prompt = read_stream(input);
-        if (!*prompt) {
-            hax_err("failed to read stdin");
-            return -1;
-        }
-    } else if (resuming) {
-        return 0;
-    } else {
+    if (!has_arguments && input_is_tty) {
+        if (resuming)
+            return 0;
         hax_err("-p requires a prompt (positional args or piped stdin)");
         return -1;
     }
 
-    if (!trim_prompt(*prompt)) {
-        free(*prompt);
-        *prompt = NULL;
-        if (resuming)
-            return 0;
-        hax_err("-p prompt is empty");
-        return -1;
+    char *typed = NULL;
+    if (has_arguments) {
+        typed = join_arguments(argc - options->first_prompt_arg, argv + options->first_prompt_arg);
+        trim_prompt(typed);
     }
-    return 0;
+
+    char *piped = NULL;
+    if (!input_is_tty && (!has_arguments || accompanying_input_arrives(input, input_grace_ms))) {
+        piped = read_stream(input);
+        if (!piped) {
+            hax_err("failed to read stdin");
+            free(typed);
+            return -1;
+        }
+        trim_prompt(piped);
+    }
+
+    *prompt = combine_prompt(typed, piped);
+    if (*prompt || resuming)
+        return 0;
+    hax_err("-p prompt is empty");
+    return -1;
 }
 
 static char *resolve_session_id(const char *cwd, const char *id)

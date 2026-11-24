@@ -12,6 +12,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 - Terminals that show program status (OSC 7501) now see whether hax is working, waiting for you,
   done, or failed, and can mark the tab that needs you. The new `program_status` setting turns this
   off.
+- `hax -p` accepts piped input alongside a prompt and adds it as context, as in
+  `gh pr diff 123 | hax -p "any issues?"`.
 
 ### Changed
 

@@ -105,6 +105,7 @@ Run hax from the project directory you want it to work in:
 hax                         # interactive REPL
 hax -p "list TODOs"         # run one prompt and print the final answer
 printf "explain x" | hax -p # read the prompt from stdin
+git diff | hax -p "review"  # ask about piped input
 hax -c                      # continue the latest session for this directory
 hax --resume                # pick a past session for this directory
 hax --resume=ID -p "next"   # resume a specific session in one-shot mode

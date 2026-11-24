@@ -23,6 +23,7 @@ With no arguments, hax starts the interactive REPL:
 hax                              # interactive
 hax -p "fix the failing test"    # one-shot
 printf "explain x" | hax -p      # one-shot prompt from stdin
+git diff | hax -p "review"       # one-shot prompt with piped context
 hax -c                           # continue the latest session here
 hax --resume                     # pick a session for this directory
 hax --resume=ID -p "continue"    # resume non-interactively
@@ -49,9 +50,18 @@ A picker needs a terminal, so use `--resume=ID` rather than bare `--resume` with
 
 ### One-shot mode
 
-In one-shot mode, positional arguments are joined with spaces. With no arguments, a non-terminal
-stdin becomes the prompt. The final answer goes to stdout; the provider banner, usage stats, errors,
-and resume hint go to stderr. This makes `hax -p` safe to pipe without losing diagnostics:
+In one-shot mode, positional arguments are joined with spaces. Input piped or redirected into hax is
+added after them as context; with no arguments, that input is the prompt itself. hax reads that
+input until it ends, so redirect from `/dev/null` when hax should not read stdin, such as inside a
+`while read` loop or when started by a program that leaves stdin open.
+
+```sh
+gh pr diff 123 | hax -p "any issues with these changes?"
+hax -p "summarize the failures" <build.log
+```
+
+The final answer goes to stdout; the provider banner, usage stats, errors, and resume hint go to
+stderr. This makes `hax -p` safe to pipe without losing diagnostics:
 
 ```sh
 answer=$(hax -p "summarize the public API")
