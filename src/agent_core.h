@@ -168,6 +168,10 @@ void agent_session_prepare_resumed(struct agent_session *session, struct provide
  * describes the summarized request rather than the fresh seed's window, is ignored. */
 long agent_session_last_context_tokens(const struct agent_session *session);
 
+/* Text of the newest non-empty assistant message at item index `from` or later, borrowed from the
+ * session, or NULL. */
+const char *agent_session_last_response(const struct agent_session *session, size_t from);
+
 /* agent_session_last_context_tokens() plus an items_token_estimate() of what that usage
  * record's request could not count: tool results answering its response and everything appended
  * after it, such as task notes. -1 when no usage record reports window use. */

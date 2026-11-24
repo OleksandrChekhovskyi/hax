@@ -9,8 +9,44 @@ static int feed(struct interrupt_classifier *classifier, const char *bytes)
     int escapes = 0;
     size_t length = strlen(bytes);
     for (size_t i = 0; i < length; i++)
-        escapes += interrupt_classifier_feed(classifier, (unsigned char)bytes[i]);
+        escapes += interrupt_classifier_feed(classifier, (unsigned char)bytes[i]) ==
+                   INTERRUPT_INPUT_ESCAPE;
     return escapes;
+}
+
+/* Return the last event the bytes complete. */
+static enum interrupt_input_event last_event(struct interrupt_classifier *classifier,
+                                             const char *bytes)
+{
+    enum interrupt_input_event last = INTERRUPT_INPUT_NONE;
+    for (size_t i = 0; bytes[i]; i++) {
+        enum interrupt_input_event event =
+            interrupt_classifier_feed(classifier, (unsigned char)bytes[i]);
+        if (event != INTERRUPT_INPUT_NONE)
+            last = event;
+    }
+    return last;
+}
+
+static void test_focus_reports_are_classified(void)
+{
+    struct interrupt_classifier classifier;
+    interrupt_classifier_init(&classifier);
+
+    EXPECT(last_event(&classifier, "\x1b[I") == INTERRUPT_INPUT_FOCUS_IN);
+    EXPECT(last_event(&classifier, "\x1b[O") == INTERRUPT_INPUT_FOCUS_OUT);
+    EXPECT(classifier.state == INTERRUPT_CLASSIFIER_IDLE);
+    EXPECT(interrupt_classifier_timeout(&classifier) == 0);
+}
+
+static void test_parameterized_csi_is_not_focus(void)
+{
+    struct interrupt_classifier classifier;
+    interrupt_classifier_init(&classifier);
+
+    EXPECT(last_event(&classifier, "\x1b[1I") == INTERRUPT_INPUT_NONE);
+    EXPECT(last_event(&classifier, "\x1b[2O") == INTERRUPT_INPUT_NONE);
+    EXPECT(classifier.state == INTERRUPT_CLASSIFIER_IDLE);
 }
 
 static void test_text_is_ignored(void)
@@ -133,5 +169,7 @@ int main(void)
     test_escape_after_text_is_confirmed();
     test_control_byte_ends_truncated_csi();
     test_reset_discards_pending_escape();
+    test_focus_reports_are_classified();
+    test_parameterized_csi_is_not_focus();
     T_REPORT();
 }

@@ -138,7 +138,8 @@ fixture is model quality, not plumbing.
 - `HAX_MARKDOWN=0` disables Markdown rendering.
 - `HAX_DISPLAY_WIDTH=<cols>` forces a stable render width, useful for fixtures.
 - `HAX_SHOW_REASONING=1` displays reasoning deltas when a provider emits them.
-- `HAX_NOTIFY=off` disables terminal/desktop completion notifications.
+- `HAX_NOTIFY=off` silences the bell, and `HAX_PROGRAM_STATUS=off` stops status reports to the
+  terminal.
 
 ## Provider startup checks
 

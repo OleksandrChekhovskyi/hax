@@ -2,8 +2,9 @@
 #ifndef HAX_TERMINAL_INTERRUPT_H
 #define HAX_TERMINAL_INTERRUPT_H
 
-/* Initialize bare-Esc detection and terminal restoration. Detection is available only when stdin
- * and stdout are TTYs; otherwise the watcher API is inert and request queries return false. */
+/* Initialize bare-Esc detection and terminal restoration, including across a Ctrl-Z stop.
+ * Detection is available only when stdin and stdout are TTYs; otherwise the watcher API is inert
+ * and request queries return false. */
 void interrupt_init(void);
 
 /* Install fatal-signal handlers without starting the TTY watcher. The handlers invoke the optional
@@ -13,6 +14,10 @@ void interrupt_install_fatal_signal_handlers(void);
 /* The hook runs from a signal handler and must be async-signal-safe. */
 void interrupt_set_fatal_signal_hook(void (*hook)(void));
 
+/* Hooks around a Ctrl-Z stop, run from its signal handler and so async-signal-safe: `stopping`
+ * before the shell gets the terminal, and `resumed` once hax continues in the foreground. */
+void interrupt_set_stop_hooks(void (*stopping)(void), void (*resumed)(void));
+
 /* Install handlers that translate driver signals into requests for headless runs: SIGINT and
  * SIGTERM latch an abort — a repeat escalates to the fatal path — and SIGUSR1 latches a pause.
  * Overrides the fatal handlers for these signals, so install those first for the escalation
@@ -20,7 +25,8 @@ void interrupt_set_fatal_signal_hook(void (*hook)(void));
 void interrupt_install_request_signal_handlers(void);
 
 /* Start bare-Esc detection. The first Esc requests a pause and the second requests an immediate
- * abort. Arming is idempotent and does not clear requests left by an earlier cycle. */
+ * abort. Focus reporting stays enabled while armed. Arming is idempotent and does not clear
+ * requests left by an earlier cycle. */
 void interrupt_arm(void);
 
 /* Stop detection, wait until the watcher no longer owns stdin, restore terminal mode, and discard
@@ -41,8 +47,16 @@ void interrupt_resolve_pending_escape(void);
 enum interrupt_classifier_state {
     INTERRUPT_CLASSIFIER_IDLE,
     INTERRUPT_CLASSIFIER_ESCAPE_PENDING,
+    INTERRUPT_CLASSIFIER_CSI_START, /* no CSI byte read yet */
     INTERRUPT_CLASSIFIER_CSI,
     INTERRUPT_CLASSIFIER_SS3,
+};
+
+enum interrupt_input_event {
+    INTERRUPT_INPUT_NONE,
+    INTERRUPT_INPUT_ESCAPE, /* the preceding Esc was bare */
+    INTERRUPT_INPUT_FOCUS_IN,
+    INTERRUPT_INPUT_FOCUS_OUT,
 };
 
 struct interrupt_classifier {
@@ -51,8 +65,9 @@ struct interrupt_classifier {
 
 void interrupt_classifier_init(struct interrupt_classifier *classifier);
 
-/* Return true when this byte confirms that the preceding Esc was bare. */
-int interrupt_classifier_feed(struct interrupt_classifier *classifier, unsigned char byte);
+/* Return the event this byte completes, if any. */
+enum interrupt_input_event interrupt_classifier_feed(struct interrupt_classifier *classifier,
+                                                     unsigned char byte);
 
 /* Return true when the timeout confirms a pending Esc was bare. */
 int interrupt_classifier_timeout(struct interrupt_classifier *classifier);

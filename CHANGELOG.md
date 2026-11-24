@@ -7,6 +7,19 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
+### Added
+
+- Terminals that show program status (OSC 7501) now see whether hax is working, waiting for you,
+  done, or failed, and can mark the tab that needs you. The new `program_status` setting turns this
+  off.
+
+### Changed
+
+- The bell rings only when hax finishes or stops after the terminal window lost focus; in tmux,
+  that needs `set -g focus-events on`. `notify: bel` rings every time, as before. The bell also
+  replaces the desktop notification some terminals got before; `notify: osc9` brings that back, now
+  with a preview of the answer.
+
 ## [0.7.0] - 2026-11-12
 
 ### Added

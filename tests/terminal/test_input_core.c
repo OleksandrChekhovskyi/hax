@@ -1143,6 +1143,15 @@ static void test_decode_paste_begin(void)
     EXPECT(decode("[200~") == INPUT_ACTION_PASTE_BEGIN);
 }
 
+static void test_decode_focus_reports(void)
+{
+    EXPECT(decode("[I") == INPUT_ACTION_FOCUS_IN);
+    EXPECT(decode("[O") == INPUT_ACTION_FOCUS_OUT);
+    /* Parameters or a Meta prefix make these something other than a focus report. */
+    EXPECT(decode("[1I") == INPUT_ACTION_NONE);
+    EXPECT(decode("\x1b[O") == INPUT_ACTION_NONE);
+}
+
 static void test_decode_partial_and_unknown(void)
 {
     EXPECT(decode("") == INPUT_ACTION_NONE);
@@ -1344,6 +1353,7 @@ int main(void)
     test_decode_iterm_meta_prefix();
     test_decode_meta_letters();
     test_decode_paste_begin();
+    test_decode_focus_reports();
     test_decode_partial_and_unknown();
     test_decode_overflow_and_runaway();
 

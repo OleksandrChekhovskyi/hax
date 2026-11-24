@@ -244,6 +244,18 @@ pause and interrupt from outside; see [One-shot mode](#one-shot-mode).
 Resuming an interrupted conversation (`--resume`, `-c`, `/resume`) offers the same empty-Enter
 continue at the first prompt.
 
+## Terminal notifications
+
+hax tells the terminal whether it is working, waiting for you, done, or failed (OSC 7501), so
+terminals that show program status can mark the tab that needs you. These reports never include
+your prompts or the model's answers. Set `program_status` to `off` to stop them.
+
+When hax finishes or stops after the terminal window lost focus, it also rings the bell. Until the
+terminal reports a focus change, hax assumes you are watching, so a terminal that does not report
+focus never rings; tmux reports it only with `set -g focus-events on`. Set `notify` to `bel` to ring
+every time, to `osc9` for a desktop notification that previews the answer instead, or to `off` for
+neither.
+
 ## Background tasks and delegation
 
 Long-running commands may detach into managed background tasks instead of being killed at the bash

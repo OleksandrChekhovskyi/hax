@@ -44,6 +44,24 @@ static void test_session_append(void)
     agent_session_free(&session);
 }
 
+static void test_last_response_skips_empty_messages(void)
+{
+    struct agent_session session = {0};
+    EXPECT(agent_session_last_response(&session, 0) == NULL);
+
+    agent_session_append(&session,
+                         (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("first")});
+    agent_session_append(&session,
+                         (struct item){.kind = ITEM_USER_MESSAGE, .text = xstrdup("again")});
+    agent_session_append(&session,
+                         (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("")});
+    EXPECT_STR_EQ(agent_session_last_response(&session, 0), "first");
+    /* Starting after it, as a later user turn does, finds none. */
+    EXPECT(agent_session_last_response(&session, 1) == NULL);
+
+    agent_session_free(&session);
+}
+
 static void test_find_tool(void)
 {
     EXPECT(agent_find_tool("read") == &TOOL_READ);
@@ -913,6 +931,7 @@ static void test_prepare_resumed(void)
 int main(void)
 {
     test_session_append();
+    test_last_response_skips_empty_messages();
     test_find_tool();
     test_build_system_prompt_raw();
     test_build_system_prompt_explicit_empty();

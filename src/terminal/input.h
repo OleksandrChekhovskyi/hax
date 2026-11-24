@@ -57,6 +57,10 @@ int input_add_completer(struct input *in, const struct input_completer *complete
  * until none applies. The hook must not touch the tty; NULL `fn` disables it. */
 void input_set_hint(struct input *in, char *(*fn)(const char *buf, void *user), void *user);
 
+/* Call `fn` once per input_readline(), before handling the first key; terminal reports such as
+ * focus changes are not keys. The hook must not touch the tty; NULL `fn` disables it. */
+void input_set_first_key_hook(struct input *in, void (*fn)(void *user), void *user);
+
 /* Register the Ctrl-V paste hook. Ctrl-V or an empty bracketed paste calls
  * `fn(user)` and inserts the returned malloc'd string at the cursor, freeing it.
  * NULL return inserts nothing; NULL `fn` disables the binding. The hook

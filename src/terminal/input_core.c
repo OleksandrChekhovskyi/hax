@@ -872,6 +872,10 @@ enum input_action input_core_decode_escape(input_byte_reader read, void *user)
         if (n < 0)
             return INPUT_ACTION_NONE;
 
+        if (n == 1 && !meta && seq[0] == 'I')
+            return INPUT_ACTION_FOCUS_IN;
+        if (n == 1 && !meta && seq[0] == 'O')
+            return INPUT_ACTION_FOCUS_OUT;
         if (n == 1) {
             /* rxvt lowercase CSI arrows denote Shift, which remains character motion. */
             char final = seq[0];

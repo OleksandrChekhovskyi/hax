@@ -49,6 +49,11 @@
 #define ANSI_SYNC_BEGIN ANSI_CSI "?2026h"
 #define ANSI_SYNC_END   ANSI_CSI "?2026l"
 
+/* DEC mode 1004 makes the terminal send CSI I on focus gain and CSI O on loss; tty restoration
+ * must always emit DISABLE. */
+#define ANSI_FOCUS_REPORTING_ENABLE  ANSI_CSI "?1004h"
+#define ANSI_FOCUS_REPORTING_DISABLE ANSI_CSI "?1004l"
+
 /* DECTCEM cursor visibility; tty restoration must always emit SHOW. */
 #define ANSI_CURSOR_HIDE ANSI_CSI "?25l"
 #define ANSI_CURSOR_SHOW ANSI_CSI "?25h"

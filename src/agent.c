@@ -87,6 +87,7 @@ static int reasoning_visible(void)
 void agent_display_refresh(struct agent_state *state)
 {
     theme_init();
+    notify_status_refresh();
     struct render_ctx *render = state->render;
     render->show_reasoning = reasoning_visible();
     if (render->md) {
@@ -211,6 +212,13 @@ static int render_on_event(const struct stream_event *event, void *user)
 static int cursor_supported(void)
 {
     return isatty(STDIN_FILENO) && isatty(STDOUT_FILENO);
+}
+
+/* Runs from a fatal-signal handler, so it calls only async-signal-safe code. */
+static void fatal_signal_cleanup(void)
+{
+    bash_shell_pgids_kill();
+    notify_status_withdraw();
 }
 
 static void cursor_show(void)
@@ -793,9 +801,10 @@ static void compact_notice(struct render_ctx *render, const char *format, ...)
 
 /* Run a compaction under whatever interrupt watch the caller holds, showing the "compacting..."
  * spinner and an outcome notice. The spinner stays up, relabeled "working...", for the work that
- * follows. Returns 1 only when a seed was appended. */
-static int compact_conversation(struct agent_state *state, const char *instructions,
-                                enum compact_reason reason)
+ * follows. A non-NULL `error_message` receives an owned copy of the provider's error, if any. */
+static enum compact_outcome compact_conversation(struct agent_state *state,
+                                                 const char *instructions,
+                                                 enum compact_reason reason, char **error_message)
 {
     struct agent_session *session = state->session;
     struct provider *provider = state->provider;
@@ -805,19 +814,22 @@ static int compact_conversation(struct agent_state *state, const char *instructi
     if (!provider) {
         if (manual)
             compact_notice(render, "no provider selected — use /provider");
-        return 0;
+        return COMPACT_NO_PROVIDER;
     }
     if (!session->model || !*session->model) {
         if (manual)
             compact_notice(render, "no model selected — use /model (or /provider)");
-        return 0;
+        return COMPACT_NO_MODEL;
     }
     if (session->n_items == 0) {
         if (manual)
             compact_notice(render, "nothing to compact");
-        return 0;
+        return COMPACT_EMPTY;
     }
 
+    /* Automatic compaction runs inside work that has already reported its status. */
+    if (manual)
+        notify_status(NOTIFY_STATE_WORKING);
     render_set_mode(render, RENDER_IDLE);
     /* Before render_stream_begin() shows the spinner, so it never paints another label first. */
     footer_set_label(render->footer, "compacting", "compacting...");
@@ -842,9 +854,9 @@ static int compact_conversation(struct agent_state *state, const char *instructi
     /* Release the held label. */
     footer_set_label(render->footer, "working", "working...");
 
-    int compacted = result.outcome == COMPACT_COMPLETE;
+    enum compact_outcome outcome = result.outcome;
     /* Manual compaction moves the model past the resumable tail; retract the empty-send offer. */
-    if (compacted && manual)
+    if (outcome == COMPACT_COMPLETE && manual)
         clear_resume_state(state);
     switch (result.outcome) {
     case COMPACT_COMPLETE:
@@ -868,8 +880,40 @@ static int compact_conversation(struct agent_state *state, const char *instructi
     if (result.auto_suspended)
         compact_notice(render, "automatic compaction off after %d failures — /compact retries it",
                        COMPACT_MAX_AUTO_FAILURES);
+    if (error_message && result.error_message)
+        *error_message = xstrdup(result.error_message);
     compact_result_destroy(&result);
-    return compacted;
+    return outcome;
+}
+
+/* Report how foreground work ended and ask for attention. Call after rendering settles; `message`
+ * is borrowed. */
+static void notify_work_end(enum notify_state state, const char *message)
+{
+    notify_status(state);
+    notify_attention(message);
+}
+
+static void notify_manual_compact_end(enum compact_outcome outcome, const char *error_message)
+{
+    switch (outcome) {
+    case COMPACT_COMPLETE:
+        notify_work_end(NOTIFY_STATE_DONE, "conversation compacted");
+        break;
+    case COMPACT_CANCELLED:
+        notify_work_end(NOTIFY_STATE_IDLE, "compaction cancelled");
+        break;
+    case COMPACT_PROVIDER_ERROR:
+        notify_work_end(NOTIFY_STATE_ERROR, error_message ? error_message : "compaction failed");
+        break;
+    case COMPACT_NO_SUMMARY:
+        notify_work_end(NOTIFY_STATE_ERROR, "compaction produced no summary");
+        break;
+    case COMPACT_NO_PROVIDER:
+    case COMPACT_NO_MODEL:
+    case COMPACT_EMPTY:
+        break; /* refused before any work was reported */
+    }
 }
 
 int agent_compact(struct agent_state *state, const char *instructions, enum compact_reason reason)
@@ -877,10 +921,16 @@ int agent_compact(struct agent_state *state, const char *instructions, enum comp
     /* Clear before the spinner shows: its pause label would report an Esc left from earlier. */
     interrupt_clear_requests();
     interrupt_arm();
-    int compacted = compact_conversation(state, instructions, reason);
-    interrupt_disarm();
+    char *error_message = NULL;
+    enum compact_outcome outcome =
+        compact_conversation(state, instructions, reason, &error_message);
     render_finish(state->render);
-    return compacted;
+    if (reason == COMPACT_MANUAL)
+        notify_manual_compact_end(outcome, error_message);
+    /* Only now: the watcher records the focus changes the notification decides on. */
+    interrupt_disarm();
+    free(error_message);
+    return outcome == COMPACT_COMPLETE;
 }
 
 static int repl_loop_on_event(const struct stream_event *event, void *user)
@@ -914,7 +964,7 @@ static struct item repl_loop_tool_call(const struct item *call, enum agent_loop_
 /* Runs under the loop's interrupt watch, so an Esc latched here reaches its next checkpoint. */
 static int repl_loop_compact(enum compact_reason reason, void *user)
 {
-    return compact_conversation(user, NULL, reason);
+    return compact_conversation(user, NULL, reason, NULL) == COMPACT_COMPLETE;
 }
 
 /* Drawn when the run ends rather than as the error streams, so a rejection the loop recovers from
@@ -969,6 +1019,37 @@ static int handle_slash_input(struct input *input, struct agent_state *state, co
         state->pending_preseed = NULL;
     }
     return 1;
+}
+
+/* The user turn's items start at `from`; an answer from an earlier turn is not previewed. */
+static void notify_user_turn_end(const struct agent_loop_result *result,
+                                 const struct agent_session *session, size_t from)
+{
+    switch (result->outcome) {
+    case AGENT_LOOP_COMPLETE:
+        notify_work_end(NOTIFY_STATE_DONE, agent_session_last_response(session, from));
+        break;
+    case AGENT_LOOP_MAX_TURNS:
+        notify_work_end(NOTIFY_STATE_BLOCKED, resume_placeholder(AGENT_RESUME_MAX_TURNS));
+        break;
+    case AGENT_LOOP_PROVIDER_ERROR:
+        notify_work_end(NOTIFY_STATE_ERROR,
+                        result->error_message ? result->error_message : "stream failed");
+        break;
+    case AGENT_LOOP_PAUSED:
+        notify_work_end(NOTIFY_STATE_IDLE, "paused");
+        break;
+    case AGENT_LOOP_INTERRUPTED:
+        notify_work_end(NOTIFY_STATE_IDLE, "interrupted");
+        break;
+    }
+}
+
+/* Typing at the prompt shows that the user has seen the last result. */
+static void acknowledge_status(void *user)
+{
+    (void)user;
+    notify_acknowledge();
 }
 
 static void set_resume_state(struct agent_state *state, const struct agent_loop_result *result)
@@ -1062,12 +1143,15 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
     input_set_hint(input, slash_hint_cb, NULL);
     input_set_paste_hook(input, capture_paste, NULL);
     input_set_paste_filter(input, filter_paste, NULL);
+    input_set_first_key_hook(input, acknowledge_status, NULL);
     /* Raw mode clears IEXTEN, so Ctrl-O does not trigger BSD/macOS VDISCARD. */
     input_bind_modal_key(input, INPUT_KEY_CTRL('O'), show_history_cb, &state);
     input_bind_modal_key(input, INPUT_KEY_CTRL('T'), show_transcript_cb, &state);
     /* Capture terminal state before raw input; non-TTY initialization is a no-op. */
     interrupt_init();
-    interrupt_set_fatal_signal_hook(bash_shell_pgids_kill);
+    interrupt_set_fatal_signal_hook(fatal_signal_cleanup);
+    interrupt_set_stop_hooks(notify_status_withdraw, notify_status_reassert);
+    notify_status(NOTIFY_STATE_IDLE);
 
     char prompt_buffer[64];
 
@@ -1120,6 +1204,8 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
             continue;
         }
 
+        notify_status(NOTIFY_STATE_WORKING);
+
         /* Compact before appending the prompt rather than when a user turn ends: only a send
          * proves the conversation continues. A failed pass lets the send proceed. */
         if (compact_due(&session, current_provider, line)) {
@@ -1127,6 +1213,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
             /* An Esc during compaction stops the send as well: nothing launches after it, and
              * the prompt returns to the editor unsent. A compaction it cut short stays due. */
             if (agent_interrupt_signal() != AGENT_SIGNAL_NONE) {
+                notify_work_end(NOTIFY_STATE_IDLE, "paused");
                 if (*line) {
                     disp_block_separator(&render.disp);
                     ui_note("message not sent — press Enter to send it");
@@ -1137,6 +1224,12 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
                 continue;
             }
         }
+
+        /* Clear stale editor interrupts before arming first-Esc pause and second-Esc abort. Arm
+         * before the bookkeeping below, which can wait seconds for model metadata, so that Esc
+         * and focus changes reach the watcher meanwhile. */
+        interrupt_clear_requests();
+        interrupt_arm();
 
         int continued = 0;
         /* Boundaries precede fresh prompts. An empty send asks the recorded tail how to
@@ -1192,9 +1285,6 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
 
         footer_set_timer(render.footer, user_turn_start_ms);
 
-        /* Clear stale editor interrupts before arming first-Esc pause and second-Esc abort. */
-        interrupt_clear_requests();
-        interrupt_arm();
         struct agent_loop_params loop_params = {
             .session = &session,
             .provider = current_provider,
@@ -1214,15 +1304,13 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
                     .task_note = repl_loop_task_note,
                 },
         };
+        size_t user_turn_from = session.n_items;
         struct agent_loop_result loop_result;
         agent_loop_run(&loop_params, &loop_result);
         int user_turn_errored = loop_result.outcome == AGENT_LOOP_PROVIDER_ERROR;
         if (user_turn_errored)
             render_loop_error(&render, &loop_result);
         set_resume_state(&state, &loop_result);
-        agent_loop_result_destroy(&loop_result);
-        interrupt_disarm();
-        int user_pressed_escape = interrupt_pause_requested();
         footer_set_timer(render.footer, 0);
 
         /* Close active rendering before post-turn output can emit terminal control sequences. */
@@ -1240,12 +1328,13 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
         if (!user_turn_errored)
             display_stats_line(&render, current_provider, &session, user_turn_ms);
 
-        /* Esc means the user is already present; otherwise notify when the REPL becomes idle,
-         * including errors and max-turn pauses. */
-        if (!user_pressed_escape)
-            notify_attention();
+        notify_user_turn_end(&loop_result, &session, user_turn_from);
+        /* Only now: the watcher records the focus changes notify_user_turn_end() decides on. */
+        interrupt_disarm();
+        agent_loop_result_destroy(&loop_result);
     }
 
+    notify_status(NOTIFY_STATE_CLEAR);
     finalize_tasks(&state);
 
     const char *resume_hint = session_log_resume_hint(state.session_log);

@@ -91,6 +91,10 @@ struct input {
     char *(*paste_hook)(void *user);
     void *paste_hook_user;
 
+    void (*first_key_hook)(void *user);
+    void *first_key_user;
+    int first_key_seen; /* this readline already ran first_key_hook */
+
     /* Returns a malloc'd replacement, or NULL to preserve the paste body. */
     char *(*paste_filter)(const char *text, void *user);
     void *paste_filter_user;
@@ -254,6 +258,8 @@ enum input_action {
     INPUT_ACTION_KILL_WORD_BACK_ALNUM,
     INPUT_ACTION_INSERT_NEWLINE,
     INPUT_ACTION_PASTE_BEGIN, /* body follows in the byte stream */
+    INPUT_ACTION_FOCUS_IN,    /* a terminal report rather than a key */
+    INPUT_ACTION_FOCUS_OUT,   /* a terminal report rather than a key */
 };
 
 /* Return 0..255, or -1 when no byte is available. */

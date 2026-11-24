@@ -237,7 +237,8 @@ provider-dependent.
 | `sort_models` | `HAX_SORT_MODELS` | `auto` | Sort model picker newest-first (`on`), keep server order (`off`), or use provider default (sorted unless the provider opts out). |
 | `context_limit` | `HAX_CONTEXT_LIMIT` | auto | Override the model context-window size used for display and compaction. |
 | `display_width` | `HAX_DISPLAY_WIDTH` | `auto` | `auto`, `terminal`, or an exact width of at least 20 columns. |
-| `notify` | `HAX_NOTIFY` | `auto` | Completion notification: `auto`, `bel`, `osc9`, or `off`. |
+| `notify` | `HAX_NOTIFY` | `auto` | How hax calls you back when work ends while you are away: the bell (`auto`), a desktop notification (`osc9`), or nothing (`off`); `bel` rings every time. See [Terminal notifications](./usage.md#terminal-notifications). |
+| `program_status` | `HAX_PROGRAM_STATUS` | `auto` | Tell the terminal whether hax is working, waiting for you, done, or failed. `auto` skips terminals that would print the reports. |
 | `theme` | `HAX_THEME` | `auto` | `auto`, `dark`, `light`, `ansi`, or `off`. |
 | `tint` | `HAX_TINT` | `teal` | Model-output tint: `teal`, `violet`, `rose`, or `sage`. |
 | `keep_awake` | `HAX_KEEP_AWAKE` | on | Best-effort idle-sleep inhibition while a turn runs. |

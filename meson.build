@@ -166,6 +166,7 @@ sources = files(
 
     'src/terminal/clipboard.c',
     'src/terminal/escape.c',
+    'src/terminal/focus.c',
     'src/terminal/input.c',
     'src/terminal/input_core.c',
     'src/terminal/interrupt.c',

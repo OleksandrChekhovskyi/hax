@@ -77,7 +77,7 @@ enum apply_announce {
 void agent_apply_settings(struct agent_state *state, struct provider *provider,
                           enum apply_announce announce);
 
-/* Rebuild display settings between provider streams. */
+/* Rebuild display settings between provider streams, and apply a changed program_status. */
 void agent_display_refresh(struct agent_state *state);
 
 /* Compact the conversation on its own: watch for Esc, append a summary seed that stands in for

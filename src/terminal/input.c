@@ -24,6 +24,7 @@
 #include "system/locale.h"
 #include "system/spawn.h"
 #include "terminal/ansi.h"
+#include "terminal/focus.h"
 #include "terminal/input_core.h"
 #include "terminal/live_region.h"
 #include "terminal/theme.h"
@@ -99,7 +100,7 @@ static void enable_raw_mode(struct input *in)
         return;
 
     fputs(ANSI_BRACKETED_PASTE_ENABLE, stdout);
-    fflush(stdout);
+    focus_reporting_enable();
     in->raw_active = 1;
 }
 
@@ -108,7 +109,7 @@ static void disable_raw_mode(struct input *in)
     if (!in->raw_active)
         return;
     fputs(ANSI_BRACKETED_PASTE_DISABLE, stdout);
-    fflush(stdout);
+    focus_reporting_disable();
     tcsetattr(STDIN_FILENO, TCSADRAIN, &in->saved_termios);
     in->raw_active = 0;
 }
@@ -288,12 +289,22 @@ static void apply_action(struct input *in, enum input_action a)
     case INPUT_ACTION_PASTE_BEGIN:
         handle_bracketed_paste(in);
         return;
+    case INPUT_ACTION_FOCUS_IN:
+    case INPUT_ACTION_FOCUS_OUT:
+        return; /* consumed by record_focus_report() before dispatch */
     }
 }
 
-static void handle_escape_sequence(struct input *in)
+/* Focus reports are terminal state, not keys: they must leave editing state untouched. */
+static int record_focus_report(enum input_action action)
 {
-    apply_action(in, input_core_decode_escape(read_escape_byte, NULL));
+    if (action == INPUT_ACTION_FOCUS_IN)
+        focus_record(FOCUS_IN);
+    else if (action == INPUT_ACTION_FOCUS_OUT)
+        focus_record(FOCUS_OUT);
+    else
+        return 0;
+    return 1;
 }
 
 /* ---------------- render / paint ---------------- */
@@ -891,7 +902,10 @@ static enum history_search_outcome search_history(struct input *in)
             goto done;
         }
         if (key == 0x1b) {
-            if (input_core_decode_escape(read_escape_byte, NULL) == INPUT_ACTION_PASTE_BEGIN) {
+            enum input_action action = input_core_decode_escape(read_escape_byte, NULL);
+            if (record_focus_report(action))
+                continue;
+            if (action == INPUT_ACTION_PASTE_BEGIN) {
                 read_bracketed_paste(paste_into_query, &query);
                 recompute_history_match(in, &query, direction, &match, &no_match);
                 continue;
@@ -1178,6 +1192,12 @@ void input_set_hint(struct input *in, char *(*fn)(const char *buf, void *user), 
     in->hint_user = user;
 }
 
+void input_set_first_key_hook(struct input *in, void (*fn)(void *user), void *user)
+{
+    in->first_key_hook = fn;
+    in->first_key_user = user;
+}
+
 void input_set_paste_hook(struct input *in, char *(*fn)(void *user), void *user)
 {
     in->paste_hook = fn;
@@ -1262,6 +1282,7 @@ char *input_readline(struct input *in, const char *prompt)
     in->last_key_was_tab = 0;
     clear_candidates(in);
     in->hint_state = INPUT_HINT_NONE;
+    in->first_key_seen = 0;
     live_region_forget(&in->region);
     in->window_top = 0;
 
@@ -1278,6 +1299,18 @@ char *input_readline(struct input *in, const char *prompt)
         if (r <= 0) {
             eof = 1;
             break;
+        }
+
+        enum input_action escape_action = INPUT_ACTION_NONE;
+        if (c == 0x1b) {
+            escape_action = input_core_decode_escape(read_escape_byte, NULL);
+            if (record_focus_report(escape_action))
+                continue;
+        }
+        if (!in->first_key_seen) {
+            in->first_key_seen = 1;
+            if (in->first_key_hook)
+                in->first_key_hook(in->first_key_user);
         }
 
         refresh_terminal_size(in);
@@ -1371,8 +1404,8 @@ char *input_readline(struct input *in, const char *prompt)
             enable_raw_mode(in);
             refresh_terminal_size(in);
             break;
-        case 0x1b: /* ESC — start of escape sequence */
-            handle_escape_sequence(in);
+        case 0x1b: /* ESC — decoded above */
+            apply_action(in, escape_action);
             break;
         default:
             if (c >= 0x20) {

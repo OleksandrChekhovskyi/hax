@@ -473,6 +473,16 @@ long agent_session_last_context_tokens(const struct agent_session *session)
     return last_context_tokens(&window, NULL);
 }
 
+const char *agent_session_last_response(const struct agent_session *session, size_t from)
+{
+    for (size_t i = session->n_items; i > from; i--) {
+        const struct item *item = &session->items[i - 1];
+        if (item->kind == ITEM_ASSISTANT_MESSAGE && item->text && item->text[0])
+            return item->text;
+    }
+    return NULL;
+}
+
 long agent_session_context_estimate(const struct agent_session *session)
 {
     struct context window = agent_session_context(session);

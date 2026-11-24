@@ -806,21 +806,10 @@ static void run_compact(const struct command_call *call)
 
 /* ---------- /copy ---------- */
 
-static const char *last_response_text(const struct agent_session *session)
-{
-    if (!session)
-        return NULL;
-    for (size_t i = session->n_items; i > 0; i--) {
-        const struct item *item = &session->items[i - 1];
-        if (item->kind == ITEM_ASSISTANT_MESSAGE && item->text && item->text[0])
-            return item->text;
-    }
-    return NULL;
-}
-
 static void run_copy(const struct command_call *call)
 {
-    const char *text = last_response_text(call->state->session);
+    const struct agent_session *session = call->state->session;
+    const char *text = session ? agent_session_last_response(session, 0) : NULL;
     if (!text) {
         ui_note("no assistant response to copy");
         return;

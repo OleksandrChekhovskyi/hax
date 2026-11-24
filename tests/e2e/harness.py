@@ -403,6 +403,31 @@ class Terminal:
         """Send named keys in tmux's spelling: Enter, Escape, C-c, BSpace, ..."""
         self._run("send-keys", "-t", "hax", "--", *keys)
 
+    def record_output(self) -> None:
+        """Record the bytes hax writes from now on, escape sequences included, for
+        wait_output(). Earlier output is not recorded."""
+        self._output = scratch_dir() / "output"
+        self._output.touch()
+        self._run("pipe-pane", "-t", "hax", f"cat >> {shlex.quote(str(self._output))}")
+
+    def wait_output(self, data: bytes, count: int = 1, timeout: float = 10) -> bytes:
+        """Wait until the recorded output holds `data` at least `count` times, and return it."""
+        deadline = time.monotonic() + timeout
+        while True:
+            output = self._output.read_bytes()
+            if output.count(data) >= count:
+                return output
+            if time.monotonic() > deadline:
+                query = "#{pane_dead}:#{pane_dead_status}:#{pane_dead_signal}"
+                dead, status, signal_number = (
+                    self._run("display-message", "-p", "-t", "hax", query).strip().split(":")
+                )
+                state = "running"
+                if dead == "1":
+                    state = f"exited: status {status!r}, signal {signal_number!r}"
+                self._fail(f"output never held {data!r} {count} times (hax {state}): {output!r}")
+            time.sleep(0.01)
+
     def resize(self, columns: int, rows: int) -> None:
         """Resize the terminal and wait until hax would see the new size. tmux rewraps the rows
         already on screen, as most terminals do."""

@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include "terminal/ansi.h"
+#include "terminal/focus.h"
 
 #define ESCAPE_TIMEOUT_MS       50
 #define ESCAPE_POLL_INTERVAL_MS 5
@@ -32,6 +33,7 @@ struct interrupt_watcher {
     int initialized;
     int started;
     struct termios saved_termios;
+    struct termios raw_termios; /* applied while raw_mode_active */
     volatile sig_atomic_t saved_termios_valid;
     volatile sig_atomic_t raw_mode_active;
     volatile sig_atomic_t interactive_terminal;
@@ -48,36 +50,45 @@ void interrupt_classifier_init(struct interrupt_classifier *classifier)
     classifier->state = INTERRUPT_CLASSIFIER_IDLE;
 }
 
-int interrupt_classifier_feed(struct interrupt_classifier *classifier, unsigned char byte)
+enum interrupt_input_event interrupt_classifier_feed(struct interrupt_classifier *classifier,
+                                                     unsigned char byte)
 {
     switch (classifier->state) {
     case INTERRUPT_CLASSIFIER_IDLE:
         if (byte == 0x1b)
             classifier->state = INTERRUPT_CLASSIFIER_ESCAPE_PENDING;
-        return 0;
+        return INTERRUPT_INPUT_NONE;
     case INTERRUPT_CLASSIFIER_ESCAPE_PENDING:
         if (byte == '[') {
-            classifier->state = INTERRUPT_CLASSIFIER_CSI;
-            return 0;
+            classifier->state = INTERRUPT_CLASSIFIER_CSI_START;
+            return INTERRUPT_INPUT_NONE;
         }
         if (byte == 'O') {
             classifier->state = INTERRUPT_CLASSIFIER_SS3;
-            return 0;
+            return INTERRUPT_INPUT_NONE;
         }
         /* The previous Esc was bare; classify a second Esc as a new candidate. */
         classifier->state =
             byte == 0x1b ? INTERRUPT_CLASSIFIER_ESCAPE_PENDING : INTERRUPT_CLASSIFIER_IDLE;
-        return 1;
+        return INTERRUPT_INPUT_ESCAPE;
+    case INTERRUPT_CLASSIFIER_CSI_START:
+        if (byte == 'I' || byte == 'O') {
+            classifier->state = INTERRUPT_CLASSIFIER_IDLE;
+            return byte == 'I' ? INTERRUPT_INPUT_FOCUS_IN : INTERRUPT_INPUT_FOCUS_OUT;
+        }
+        /* Any other byte continues an ordinary CSI sequence. */
+        classifier->state = INTERRUPT_CLASSIFIER_CSI;
+        return interrupt_classifier_feed(classifier, byte);
     case INTERRUPT_CLASSIFIER_CSI:
         /* CSI final bytes are 0x40-0x7e; control and non-ASCII bytes invalidate the sequence. */
         if ((byte >= 0x40 && byte <= 0x7e) || byte < 0x20 || byte > 0x7e)
             classifier->state = INTERRUPT_CLASSIFIER_IDLE;
-        return 0;
+        return INTERRUPT_INPUT_NONE;
     case INTERRUPT_CLASSIFIER_SS3:
         classifier->state = INTERRUPT_CLASSIFIER_IDLE;
-        return 0;
+        return INTERRUPT_INPUT_NONE;
     }
-    return 0;
+    return INTERRUPT_INPUT_NONE;
 }
 
 int interrupt_classifier_timeout(struct interrupt_classifier *classifier)
@@ -102,6 +113,7 @@ static int enter_raw_mode(void)
     raw.c_cc[VTIME] = 0;
 
     /* Publish the changed state first so a signal during tcsetattr still restores the terminal. */
+    watcher.raw_termios = raw;
     watcher.raw_mode_active = 1;
     if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) != 0) {
         watcher.raw_mode_active = 0;
@@ -122,6 +134,23 @@ static void latch_pause_or_abort(void)
 {
     if (atomic_exchange(&watcher.pause_requested, 1))
         atomic_store(&watcher.abort_requested, 1);
+}
+
+static void handle_input_event(enum interrupt_input_event event)
+{
+    switch (event) {
+    case INTERRUPT_INPUT_NONE:
+        break;
+    case INTERRUPT_INPUT_ESCAPE:
+        latch_pause_or_abort();
+        break;
+    case INTERRUPT_INPUT_FOCUS_IN:
+        focus_record(FOCUS_IN);
+        break;
+    case INTERRUPT_INPUT_FOCUS_OUT:
+        focus_record(FOCUS_OUT);
+        break;
+    }
 }
 
 enum input_event {
@@ -230,10 +259,8 @@ static void watch_armed_input(void)
             wait_until_disarmed();
             return;
         }
-        for (ssize_t i = 0; i < bytes_read; i++) {
-            if (interrupt_classifier_feed(&classifier, bytes[i]))
-                latch_pause_or_abort();
-        }
+        for (ssize_t i = 0; i < bytes_read; i++)
+            handle_input_event(interrupt_classifier_feed(&classifier, bytes[i]));
         atomic_store(&watcher.escape_pending,
                      classifier.state == INTERRUPT_CLASSIFIER_ESCAPE_PENDING);
     }
@@ -264,7 +291,8 @@ static void restore_terminal(void)
     }
     if (watcher.interactive_terminal) {
         static const char restore_sequence[] =
-            ANSI_BRACKETED_PASTE_DISABLE ANSI_CURSOR_SHOW ANSI_SYNC_END;
+            ANSI_BRACKETED_PASTE_DISABLE ANSI_FOCUS_REPORTING_DISABLE ANSI_CURSOR_SHOW
+                ANSI_SYNC_END;
         (void)!write(STDOUT_FILENO, restore_sequence, sizeof(restore_sequence) - 1);
     }
 }
@@ -283,6 +311,59 @@ static void restore_and_reraise_signal(int signal_number)
     restore_terminal();
     signal(signal_number, SIG_DFL);
     raise(signal_number);
+}
+
+static void (*volatile stop_hook)(void);
+static void (*volatile resume_hook)(void);
+
+void interrupt_set_stop_hooks(void (*stopping)(void), void (*resumed)(void))
+{
+    stop_hook = stopping;
+    resume_hook = resumed;
+}
+
+static void suspend_for_stop_signal(int signal_number);
+
+static void install_stop_handler(void)
+{
+    struct sigaction action = {0};
+    action.sa_handler = suspend_for_stop_signal;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = SA_RESTART;
+    sigaction(SIGTSTP, &action, NULL);
+}
+
+/* A stop hands the tty to the shell, which must not receive focus reports, keep the watcher's
+ * terminal mode, or show hax's status as current. All return once hax continues. */
+static void suspend_for_stop_signal(int signal_number)
+{
+    int saved_errno = errno;
+    int was_raw = watcher.raw_mode_active;
+    int was_reporting = focus_reporting_suspend();
+    if (stop_hook)
+        stop_hook();
+    if (was_raw)
+        tcsetattr(STDIN_FILENO, TCSANOW, &watcher.saved_termios);
+
+    signal(signal_number, SIG_DFL);
+    sigset_t stop_signal;
+    sigemptyset(&stop_signal);
+    sigaddset(&stop_signal, signal_number);
+    sigprocmask(SIG_UNBLOCK, &stop_signal, NULL);
+    raise(signal_number);
+
+    /* Continued. Under `bg` the shell keeps the terminal, and changing its mode from the
+     * background would stop hax again with SIGTTOU. */
+    install_stop_handler();
+    if (tcgetpgrp(STDIN_FILENO) == getpgrp()) {
+        if (was_raw)
+            tcsetattr(STDIN_FILENO, TCSANOW, &watcher.raw_termios);
+        if (was_reporting)
+            focus_reporting_resume();
+        if (resume_hook)
+            resume_hook();
+    }
+    errno = saved_errno;
 }
 
 void interrupt_install_fatal_signal_handlers(void)
@@ -356,6 +437,7 @@ void interrupt_init(void)
     watcher.interactive_terminal = 1;
     atexit(restore_terminal);
     interrupt_install_fatal_signal_handlers();
+    install_stop_handler();
 
     if (tcgetattr(STDIN_FILENO, &watcher.saved_termios) < 0)
         return;
@@ -399,11 +481,15 @@ void interrupt_arm(void)
         return;
 
     pthread_mutex_lock(&watcher.mutex);
+    int armed_now = 0;
     if (!watcher.armed && enter_raw_mode() == 0) {
         watcher.armed = 1;
+        armed_now = 1;
         pthread_cond_broadcast(&watcher.state_changed);
     }
     pthread_mutex_unlock(&watcher.mutex);
+    if (armed_now)
+        focus_reporting_enable();
 }
 
 void interrupt_disarm(void)
@@ -419,6 +505,9 @@ void interrupt_disarm(void)
     if (!was_armed)
         return;
 
+    /* Before leaving raw mode, so reports sent until the terminal applies this land in input the
+     * flush below discards instead of being echoed. */
+    focus_reporting_disable();
     wake_watcher();
 
     /* Restoring canonical mode before the watcher stops could block its next read indefinitely. */
