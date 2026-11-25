@@ -17,6 +17,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Changed
 
+- Prompt guidance favors separate tool calls over unrelated shell commands chained into one, so
+  each step shows on its own in the conversation and is easier to follow and steer.
 - The bell rings only when hax finishes or stops after the terminal window lost focus; in tmux,
   that needs `set -g focus-events on`. `notify: bel` rings every time, as before. The bell also
   replaces the desktop notification some terminals got before; `notify: osc9` brings that back, now
