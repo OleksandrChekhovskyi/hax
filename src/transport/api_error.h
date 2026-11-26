@@ -29,13 +29,13 @@ enum api_error_kind {
     API_ERROR_CONTEXT_OVERFLOW,  /* the input exceeds the model's context window */
     API_ERROR_PAYLOAD_TOO_LARGE, /* the request body exceeds the endpoint's byte limit (413) */
     API_ERROR_LENGTH_LIMIT,      /* the reply hit an output cap or the end of the context window */
+    API_ERROR_OUTPUT_CAP,        /* the reply used the whole output cap its request set */
 };
 
 /* Classifies a failure from its HTTP status (0 for one inside a stream) and what the server said
- * (either may be NULL). Only a client error other than a 429 can be an overflow, recognized by
- * known wording or by `overflow_phrases`, the provider's own NULL-terminated additions (may be
- * NULL), matched case-insensitively. A stream failure whose code is a stop reason for a length
- * limit ("length", "max_tokens", "max_output_tokens") is API_ERROR_LENGTH_LIMIT. */
+ * (either may be NULL). `overflow_phrases` (may be NULL) is the provider's own NULL-terminated
+ * overflow wording, matched case-insensitively. Never API_ERROR_OUTPUT_CAP, which takes the
+ * request's cap to tell. */
 enum api_error_kind api_error_classify(long status, const char *code, const char *detail,
                                        const char *const *overflow_phrases);
 

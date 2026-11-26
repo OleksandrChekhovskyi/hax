@@ -52,6 +52,9 @@ struct wire_body_opts {
 struct wire {
     const char *id;   /* canonical dialect name accepted by `api` config fields */
     const char *path; /* request path appended to the provider base URL */
+    /* Top-level request members that cap the reply, NULL-terminated, in the order servers prefer
+     * them. */
+    const char *const *output_cap_members;
     /* Compose one request minus the extra_body passthrough; wire_build_body finishes it. */
     json_t *(*build_body)(const struct context *context, const char *provider_id, const char *model,
                           const struct wire_body_opts *opts);

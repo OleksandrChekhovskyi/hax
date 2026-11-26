@@ -107,14 +107,27 @@ int agent_stream_has_usage(const struct agent_stream *stream)
     return attempt_log_has_usage(&stream->attempts);
 }
 
+/* llama-server can stop at the window partway through counting an accepted speculative batch,
+ * which is 64 tokens at most by default. */
+#define WINDOW_SHORTFALL_TOKENS 256
+
+/* Usage past the window counts too: it may be an output cap after a context shift, but also an
+ * understated window, and misreading a cap costs only a bounded retry. */
+static int filled_window(const struct stream_usage *usage, long context_limit)
+{
+    if (usage->input_tokens < 0 || usage->output_tokens < 0)
+        return 0;
+    return usage->output_tokens >= context_limit - WINDOW_SHORTFALL_TOKENS - usage->input_tokens;
+}
+
 int agent_stream_rejected_for_size(const struct agent_stream *stream, long context_limit)
 {
     if (stream->assembly.state != TURN_FAILED)
         return 0;
-    /* A known window keeps room for the reply before compacting, so a length limit there is an
-     * output cap, such as a provider's default max_tokens, not a full context. */
+    /* Compaction keeps room for the reply in a known window, so a length stop there is an output
+     * cap unless the usage shows the window filled anyway. */
     if (stream->error_kind == API_ERROR_LENGTH_LIMIT)
-        return context_limit <= 0;
+        return context_limit <= 0 || filled_window(&stream->usage, context_limit);
     return stream->error_kind == API_ERROR_CONTEXT_OVERFLOW ||
            stream->error_kind == API_ERROR_PAYLOAD_TOO_LARGE;
 }

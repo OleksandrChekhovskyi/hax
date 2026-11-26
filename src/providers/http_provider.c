@@ -237,6 +237,7 @@ struct http_stream {
     const char *session_id;  /* the request's affinity id, never NULL */
     struct chat_cache_plan cache;
     union wire_events events;
+    long output_cap;    /* the output cap the request carries, or 0 */
     int auth_retried;   /* per-stream guard for the auth source's unauthorized recovery */
     stream_cb callback; /* the caller's; receives errors classified */
     void *callback_user;
@@ -303,7 +304,26 @@ static int classify_stream_error(const struct stream_event *event, void *user)
     classified.u.error.kind =
         api_error_classify(event->u.error.http_status, event->u.error.code, event->u.error.detail,
                            (const char *const *)stream->provider->overflow_phrases);
+    /* Servers report a full window and an output cap with the same stop reason, so only a reply
+     * that ended exactly at the cap sent surely stopped at it; one past it shows another cap was
+     * enforced. If the window ran out on that same token, the reply would still stop at the cap
+     * after shortening. */
+    const struct stream_usage *usage = event->u.error.usage;
+    if (classified.u.error.kind == API_ERROR_LENGTH_LIMIT && stream->output_cap > 0 && usage &&
+        usage->output_tokens == stream->output_cap)
+        classified.u.error.kind = API_ERROR_OUTPUT_CAP;
     return stream->callback(&classified, stream->callback_user);
+}
+
+/* extra_body overrides the cap hax built; a value of 0 or less sets no cap. */
+static long request_output_cap(const struct wire *wire, const json_t *extra_body, long built)
+{
+    for (const char *const *member = wire->output_cap_members; *member; member++) {
+        json_t *value = json_object_get(extra_body, *member);
+        if (json_is_integer(value))
+            return json_integer_value(value) > 0 ? (long)json_integer_value(value) : 0;
+    }
+    return built;
 }
 
 static int stream_auth_recover(void *ctx, long http_status, http_tick_cb tick, void *tick_user)
@@ -444,6 +464,7 @@ static int http_provider_stream(struct provider *base, const struct context *con
         opts.request_cost = provider->request_cost;
     }
 
+    stream.output_cap = request_output_cap(wire, provider->extra_body, opts.max_tokens);
     char *body = wire_build_body(wire, context, provider_stable_id(base), model, &opts);
     if (!body)
         return -1;

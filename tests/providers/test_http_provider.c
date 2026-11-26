@@ -1122,6 +1122,104 @@ static void test_overflow_phrases_classify_errors(void)
     EXPECT(config_load(NULL) == 0);
 }
 
+/* `body` as a 200 event stream. */
+static char *sse_reply(const char *body)
+{
+    return xasprintf("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                     "Content-Length: %zu\r\nConnection: close\r\n\r\n%s",
+                     strlen(body), body);
+}
+
+/* A Messages stream that stops at max_tokens after `output_tokens` of reply. */
+static char *max_tokens_reply(int output_tokens)
+{
+    char *body =
+        xasprintf("data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,"
+                  "\"output_tokens\":0}}}\n\n"
+                  "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},"
+                  "\"usage\":{\"output_tokens\":%d}}\n\n"
+                  "data: {\"type\":\"message_stop\"}\n\n",
+                  output_tokens);
+    char *reply = sse_reply(body);
+    free(body);
+    return reply;
+}
+
+/* A Chat stream that stops at length after `output_tokens` of reply. */
+static char *length_reply(int output_tokens)
+{
+    char *body = xasprintf("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},"
+                           "\"finish_reason\":\"length\"}]}\n\n"
+                           "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,"
+                           "\"completion_tokens\":%d}}\n\n"
+                           "data: [DONE]\n\n",
+                           output_tokens);
+    char *reply = sse_reply(body);
+    free(body);
+    return reply;
+}
+
+/* The kind of error one request through provider `id` reports. */
+static enum api_error_kind stream_error_kind(const char *id, const char *api, const char *base_url)
+{
+    struct provider_def def = {.id = id, .api = api, .base_url = base_url};
+    struct provider *provider = http_provider_new(&def);
+    EXPECT(provider != NULL);
+    if (!provider)
+        return API_ERROR_OTHER;
+    struct item items[] = {{.kind = ITEM_USER_MESSAGE, .text = "hello"}};
+    struct context context = {.items = items, .n_items = 1};
+    struct error_log log = {0};
+    provider->stream(provider, &context, "m", log_error, &log, NULL, NULL);
+    provider->destroy(provider);
+    EXPECT(log.n_errors == 1);
+    return log.kind;
+}
+
+/* A length stop is the request's cap only once the reply used all of it; short of that, the
+ * server may mean a full window. The cap is the one sent, extra_body included. */
+static void test_length_stop_at_sent_cap(void)
+{
+    char *at_cap = max_tokens_reply(100);
+    char *short_of_cap = max_tokens_reply(60);
+    char *past_max_tokens = length_reply(600);
+    char *past_n_predict = max_tokens_reply(512);
+    char *past_cap = max_tokens_reply(150);
+    struct loopback server = {
+        .responses = {at_cap, short_of_cap, past_cap, at_cap, past_max_tokens, past_n_predict},
+        .n_requests = 6,
+    };
+    int port = loopback_start(&server);
+    EXPECT(port > 0);
+    if (port <= 0)
+        goto out;
+
+    EXPECT(config_load("{\"providers\": {"
+                       "\"x\": {\"max_tokens\": 100},"
+                       "\"y\": {\"max_tokens\": 32000, \"extra_body\": {\"max_tokens\": 100}},"
+                       "\"z\": {\"extra_body\": {\"max_tokens\": 512, \"n_predict\": 2048}},"
+                       "\"w\": {\"extra_body\": {\"n_predict\": 128}}}}") == 0);
+    char base_url[64];
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", port);
+    EXPECT(stream_error_kind("x", "anthropic-messages", base_url) == API_ERROR_OUTPUT_CAP);
+    EXPECT(stream_error_kind("x", "anthropic-messages", base_url) == API_ERROR_LENGTH_LIMIT);
+    /* Output past the cap sent shows another cap was enforced. */
+    EXPECT(stream_error_kind("x", "anthropic-messages", base_url) == API_ERROR_LENGTH_LIMIT);
+    EXPECT(stream_error_kind("y", "anthropic-messages", base_url) == API_ERROR_OUTPUT_CAP);
+    /* llama-server reads n_predict over max_tokens. */
+    EXPECT(stream_error_kind("z", NULL, base_url) == API_ERROR_LENGTH_LIMIT);
+    /* ...but Messages reads only max_tokens. */
+    EXPECT(stream_error_kind("w", "anthropic-messages", base_url) == API_ERROR_LENGTH_LIMIT);
+    loopback_stop(&server);
+    EXPECT(config_load(NULL) == 0);
+out:
+    free(at_cap);
+    free(short_of_cap);
+    free(past_max_tokens);
+    free(past_n_predict);
+    free(past_cap);
+}
+
 int main(void)
 {
     signal(SIGPIPE, SIG_IGN);
@@ -1143,5 +1241,6 @@ int main(void)
     test_catalog_routing_warning();
     test_unsupported_protocol_reported();
     test_overflow_phrases_classify_errors();
+    test_length_stop_at_sent_cap();
     T_REPORT();
 }

@@ -24,6 +24,11 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   replaces the desktop notification some terminals got before; `notify: osc9` brings that back, now
   with a preview of the answer.
 
+### Fixed
+
+- Compaction recovers when a reply fills the context window, as on a local server with a small
+  context, instead of failing with "response incomplete: length".
+
 ## [0.7.0] - 2026-11-12
 
 ### Added

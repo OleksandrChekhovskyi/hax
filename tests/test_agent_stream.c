@@ -224,8 +224,7 @@ static void test_pause_after_content_finishes(void)
     agent_stream_destroy(&stream);
 }
 
-/* A reply cut at a length limit counts as too large only while the window is unknown: a known one
- * keeps room for the reply, so the limit there is an output cap. */
+/* A length stop counts as too large only when the window may have run out. */
 static void test_rejected_for_size(void)
 {
     struct agent_stream stream;
@@ -239,8 +238,22 @@ static void test_rejected_for_size(void)
     EXPECT(agent_stream_rejected_for_size(&stream, 32768));
     stream.error_kind = API_ERROR_LENGTH_LIMIT;
     EXPECT(agent_stream_rejected_for_size(&stream, 0));
-    EXPECT(!agent_stream_rejected_for_size(&stream, 32768));
+    EXPECT(!agent_stream_rejected_for_size(&stream, 32768)); /* usage unreported */
+    stream.usage.input_tokens = 15052;
+    stream.usage.output_tokens = 1332;
+    EXPECT(agent_stream_rejected_for_size(&stream, 16384)); /* exactly the window */
+    stream.usage.output_tokens = 2000;
+    EXPECT(agent_stream_rejected_for_size(&stream, 16384)); /* past it */
+    stream.usage.output_tokens = 1076;
+    EXPECT(agent_stream_rejected_for_size(&stream, 16384)); /* short by a speculative batch */
+    stream.usage.output_tokens = 1075;
+    EXPECT(!agent_stream_rejected_for_size(&stream, 16384)); /* short by more: an output cap */
+    stream.error_kind = API_ERROR_OUTPUT_CAP;
+    stream.usage.output_tokens = 1332;
+    EXPECT(!agent_stream_rejected_for_size(&stream, 16384));
+    EXPECT(!agent_stream_rejected_for_size(&stream, 0));
     stream.error_kind = API_ERROR_OTHER;
+    EXPECT(!agent_stream_rejected_for_size(&stream, 16384));
     EXPECT(!agent_stream_rejected_for_size(&stream, 0));
 
     agent_stream_destroy(&stream);

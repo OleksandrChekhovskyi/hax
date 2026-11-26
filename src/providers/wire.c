@@ -62,9 +62,14 @@ static const struct stream_usage *chat_usage(const union wire_events *events)
     return &events->chat.usage;
 }
 
+/* n_predict is llama-server's own name, which it reads over the OpenAI ones. */
+static const char *const CHAT_OUTPUT_CAP[] = {"n_predict", "max_completion_tokens", "max_tokens",
+                                              NULL};
+
 const struct wire WIRE_OPENAI_CHAT = {
     .id = "openai-completions",
     .path = "/chat/completions",
+    .output_cap_members = CHAT_OUTPUT_CAP,
     .build_body = chat_build_body,
     .events_init = chat_init,
     .events_feed = chat_feed,
@@ -102,9 +107,12 @@ static int responses_complete(const union wire_events *events)
     return events->responses.terminal_emitted;
 }
 
+static const char *const RESPONSES_OUTPUT_CAP[] = {"max_output_tokens", NULL};
+
 const struct wire WIRE_OPENAI_RESPONSES = {
     .id = "openai-responses",
     .path = "/responses",
+    .output_cap_members = RESPONSES_OUTPUT_CAP,
     .build_body = responses_build_body,
     .events_init = responses_init,
     .events_feed = responses_feed,
@@ -145,9 +153,12 @@ static const struct stream_usage *anthropic_usage(const union wire_events *event
     return &events->anthropic.usage;
 }
 
+static const char *const MESSAGES_OUTPUT_CAP[] = {"max_tokens", NULL};
+
 const struct wire WIRE_ANTHROPIC_MESSAGES = {
     .id = "anthropic-messages",
     .path = "/messages",
+    .output_cap_members = MESSAGES_OUTPUT_CAP,
     .build_body = anthropic_build_body,
     .events_init = anthropic_init,
     .events_feed = anthropic_feed,
