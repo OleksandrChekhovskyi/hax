@@ -14,8 +14,24 @@
 int t_failures;
 int t_skips;
 
-/* A hax parent or the user's shell would otherwise configure every test through the registry. */
-__attribute__((constructor)) static void t_clear_hax_environment(void)
+/* Variables through which a hax parent or the user's shell would configure every test. */
+static int t_is_inherited_setting(const char *name, size_t length)
+{
+    static const char api_key_suffix[] = "_API_KEY";
+    static const char home_suffix[] = "_HOME";
+    size_t api_key_length = sizeof(api_key_suffix) - 1;
+    size_t home_length = sizeof(home_suffix) - 1;
+
+    if (strncmp(name, "HAX_", 4) == 0)
+        return 1;
+    if (strncmp(name, "XDG_", 4) == 0 && length > home_length &&
+        memcmp(name + length - home_length, home_suffix, home_length) == 0)
+        return 1;
+    return length > api_key_length &&
+           memcmp(name + length - api_key_length, api_key_suffix, api_key_length) == 0;
+}
+
+static void t_clear_inherited_settings(void)
 {
     extern char **environ;
     size_t count = 0;
@@ -28,7 +44,7 @@ __attribute__((constructor)) static void t_clear_hax_environment(void)
     size_t name_count = 0;
     for (size_t i = 0; i < count; i++) {
         const char *equals = strchr(environ[i], '=');
-        if (strncmp(environ[i], "HAX_", 4) == 0 && equals)
+        if (equals && t_is_inherited_setting(environ[i], (size_t)(equals - environ[i])))
             names[name_count++] = strndup(environ[i], (size_t)(equals - environ[i]));
     }
     for (size_t i = 0; i < name_count; i++) {
@@ -38,6 +54,23 @@ __attribute__((constructor)) static void t_clear_hax_environment(void)
         free(names[i]);
     }
     free(names);
+}
+
+/* Anything beyond the loopback fixtures would reach a real provider, or hang where outbound packets
+ * are dropped, so it goes to a closed port instead. libcurl prefers these lowercase names over the
+ * uppercase and all_proxy forms. */
+static void t_confine_network(void)
+{
+    setenv("http_proxy", "http://127.0.0.1:1", 1);
+    setenv("https_proxy", "http://127.0.0.1:1", 1);
+    setenv("no_proxy", "127.0.0.1,localhost,::1", 1);
+}
+
+__attribute__((constructor)) static void t_isolate_environment(void)
+{
+    t_clear_inherited_settings();
+    setenv("HOME", t_tempdir(), 1);
+    t_confine_network();
 }
 
 /* Ownership is per pid: a forked child that never calls t_tempdir() must not remove its parent's

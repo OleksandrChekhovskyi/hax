@@ -23,8 +23,9 @@
 #define T_ASAN 1
 #endif
 
-/* Every test process starts with inherited HAX_* variables removed, before main runs, so settings
- * resolve to the registry defaults unless the test sets them. */
+/* Before main runs, every test process is isolated from the user's environment: inherited settings
+ * and credentials are cleared, HOME is an empty scratch directory, and HTTP reaches loopback only.
+ * Settings resolve to the registry defaults unless the test sets them. */
 
 /* This process's tallies; T_REPORT turns them into the exit status. A forked child inherits its
  * parent's counts. */
